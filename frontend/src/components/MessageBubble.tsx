@@ -43,6 +43,9 @@ import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
 import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
 import { isActionableUserInteractionEvent } from "../adapter/mapToRenderModel";
+import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
+import { findScrollParent } from "../utils/scrollParent";
+import { VirtualizedEventList, VIRTUALIZE_EVENT_THRESHOLD } from "./VirtualizedEventList";
 import type { UserInteractionPayloadWire } from "../adapter/wire";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
@@ -169,21 +172,6 @@ export function workerPanelComplete(worker: WorkerPanel): boolean {
 export function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
   if (isCreationPanelKind(worker.panel_kind)) return false;
   return activeWorkerIds.has(worker.delegation_id) && !workerPanelComplete(worker);
-}
-
-/** Walk up the DOM tree from `el` and return the nearest ancestor
- *  whose computed `overflow-y` makes it a scroll container. Used by
- *  the collapse-toggle anchor logic when the parent hasn't threaded
- *  an explicit `scrollEl` prop — works for every container regardless
- *  of class name. Returns null if nothing in the chain scrolls. */
-function findScrollParent(el: HTMLElement): HTMLElement | null {
-  let parent = el.parentElement;
-  while (parent) {
-    const overflowY = getComputedStyle(parent).overflowY;
-    if (overflowY === "auto" || overflowY === "scroll") return parent;
-    parent = parent.parentElement;
-  }
-  return null;
 }
 
 /** Returns true when the text has no rendering payload (only whitespace,
@@ -2093,6 +2081,24 @@ export function renderGroupedEvents(
   );
 }
 
+/** Windows a turn's fully-built row list (renderTimeline's return value —
+ * every path: entity blocks, worker collapsibles, prep blocks, and the
+ * legacy no-worker manager stream all funnel through here) via
+ * VirtualizedEventList once the row count crosses VIRTUALIZE_EVENT_
+ * THRESHOLD — the v2 (Chat Surface Contract) path only; legacy rendering
+ * is untouched (readSurfaceV2Flag false -> always the plain, fully-
+ * mounted row list, byte-identical DOM to before virtualization existed).
+ * Threshold is checked against the RENDERED rows, not the raw event
+ * count, since grouping (auto-action groups, etc.) can collapse many
+ * events into one row — "renderable events" means what actually becomes
+ * a DOM node. */
+function possiblyVirtualizeStream(rows: ReactNode[]): ReactNode {
+  if (readSurfaceV2Flag() && rows.length > VIRTUALIZE_EVENT_THRESHOLD) {
+    return <VirtualizedEventList items={rows} />;
+  }
+  return rows;
+}
+
 function workerPanelEvents(worker: WorkerPanel): WSEvent[] {
   return Array.isArray(worker.events) ? worker.events : [];
 }
@@ -2926,6 +2932,11 @@ const AssistantMessage = memo(function AssistantMessage({
     initiatorMessageId,
     sessionId,
   );
+  // Windows `stream` via VirtualizedEventList above the threshold — v2
+  // path only, see possiblyVirtualizeStream. `stream` itself (the raw
+  // row array) stays the source of truth for every `.length` check below
+  // so gating rendering never changes content-presence decisions.
+  const renderedStream = possiblyVirtualizeStream(stream);
 
   const managerSessionShort =
     hasManagerScope && effectiveMessage.agent_session_id
@@ -2957,10 +2968,10 @@ const AssistantMessage = memo(function AssistantMessage({
                 <span className="role-session-id">· {managerSessionShort}</span>
               )}
             </div>
-            {stream}
+            {renderedStream}
           </div>
         ) : (
-          stream
+          renderedStream
         )}
         {shouldRenderAssistantContent && (
           <MessageBox text={assistantContent} onFileClick={onFileClick} />

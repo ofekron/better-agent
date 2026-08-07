@@ -52,7 +52,14 @@ from backend.surface_contract.chat_surface import (
     OlderPage,
     SearchMatch,
 )
-from backend.surface_contract.frames import NodeUpsert, ResyncRequired, TerminalReason, TurnLifecycle, TurnPhase
+from backend.surface_contract.frames import (
+    NodeUpsert,
+    ResyncRequired,
+    TerminalReason,
+    TextDelta,
+    TurnLifecycle,
+    TurnPhase,
+)
 from backend.surface_contract.identity import (
     CONTRACT_VERSION,
     Emit,
@@ -91,6 +98,22 @@ _COMPACT_TURN_WINDOW = 5
 _RENDER_HISTORY_CAP = 500
 _TOOL_PREFIX = "tool:"
 _RESULT_SUFFIX = ":result"
+
+# Kinds whose payload carries a monotonically-growing `.text` (streamed via
+# runner_better_agent.py's feed_text_delta/feed_thinking_delta — each
+# journal row rewrites the FULL cumulative text, per the journal's
+# full-snapshot convergence convention). `_on_event_written` diffs a new
+# row's text against the node's previously-broadcast text to detect a pure
+# append and emit a cheap TextDelta instead of the full Node.
+_TEXT_DELTA_KINDS = frozenset({NodeKind.ASSISTANT_TEXT, NodeKind.THINKING})
+# Self-healing: after this many consecutive TextDelta frames for the same
+# node, force one full NodeUpsert so a client that missed/mis-applied a
+# delta resyncs from ground truth without waiting for the node to finish.
+_FULL_SYNC_EVERY_N_DELTAS = 20
+# Bound on state.last_text/delta_count — same eviction idiom as
+# render_seq_history, so a long-lived surface with many text-bearing nodes
+# can't grow this unboundedly.
+_TEXT_CACHE_CAP = 2000
 
 
 def _turn_node_id(turn_id: str) -> NodeId:
@@ -185,12 +208,35 @@ class _SurfaceState:
     # `prompt_meta` fact arriving AFTER that row (live path) can re-derive
     # and re-broadcast the now-enriched node. None until the first prompt.
     current_prompt_row: dict | None = None
+    # Last text broadcast for a _TEXT_DELTA_KINDS node (TextDelta baseline)
+    # and how many consecutive deltas have been sent since its last full
+    # NodeUpsert — both bounded (oldest evicted) like render_seq_history.
+    last_text: "OrderedDict[NodeId, str]" = field(default_factory=OrderedDict)
+    delta_count: dict[NodeId, int] = field(default_factory=dict)
+    # True while a coalescing flush is scheduled for the next event-loop
+    # tick (see `ChatSurfaceAdapter._on_event_written`) — guards against
+    # scheduling a second flush for a journal write that arrives while one
+    # is already pending; the pending flush's `read_events(after_seq=...)`
+    # picks up that write too once it runs.
+    flush_scheduled: bool = False
 
 
-def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Group ordered rows into (turn_id, rows) segments. A row is a turn
-    boundary iff it normalizes to a TYPED_PROMPT node; rows before the
-    first boundary are dropped (no anchoring turn).
+_TurnSegment = tuple[str, list[dict], list[list[Node]]]
+
+
+def _segment_turns(rows: list[dict]) -> list[_TurnSegment]:
+    """Group ordered rows into (turn_id, rows, produced_by_row) segments. A
+    row is a turn boundary iff it normalizes to a TYPED_PROMPT node; rows
+    before the first boundary are dropped (no anchoring turn).
+
+    Each row is normalized EXACTLY ONCE here (with placeholder surface_id/
+    turn_id="_", since node_id derivation never depends on either — only
+    the Node.surface_id/turn_id fields do) and the produced nodes are
+    carried alongside the row for `_build_turn_view` to restamp
+    (`replace(n, surface_id=..., turn_id=...)`) rather than re-normalizing
+    — normalize_journal_row's JSON-shape dispatch/base64-decoding is the
+    expensive part of hydrating a huge turn; this way it runs once per row
+    per `_all_segments`/`_replay` call, not twice.
 
     A TYPED_PROMPT-producing row is instead treated as the CURRENTLY OPEN
     turn's own echo (dropped, not a boundary) only when BOTH: (1) that
@@ -206,13 +252,14 @@ def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     canonical row, a second GENUINE canonical row (e.g. an interrupt)
     still opens a new turn correctly, since it satisfies neither
     condition (its own `is_canonical_prompt_row` is True)."""
-    segments: list[tuple[str, list[dict]]] = []
+    segments: list[_TurnSegment] = []
     current_rows: list[dict] | None = None
+    current_produced: list[list[Node]] | None = None
     current_turn_id: str | None = None
     current_prompt_row: dict | None = None
     for row in rows:
-        provisional = normalize_journal_row(row, surface_id="_", turn_id="_", cv=CONTRACT_VERSION)
-        prompt_node = next((n for n in provisional if n.kind == NodeKind.TYPED_PROMPT), None)
+        produced = normalize_journal_row(row, surface_id="_", turn_id="_", cv=CONTRACT_VERSION)
+        prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
         if (
             prompt_node is not None
             and current_prompt_row is not None
@@ -222,24 +269,42 @@ def _segment_turns(rows: list[dict]) -> list[tuple[str, list[dict]]]:
             continue  # echo of the currently-open canonical turn's own prompt
         if prompt_node is not None:
             if current_rows is not None:
-                segments.append((current_turn_id, current_rows))
+                segments.append((current_turn_id, current_rows, current_produced))
             current_turn_id = prompt_node.node_id
             current_prompt_row = row
             current_rows = [row]
+            current_produced = [produced]
         elif current_rows is not None:
             current_rows.append(row)
+            current_produced.append(produced)
     if current_rows is not None:
-        segments.append((current_turn_id, current_rows))
+        segments.append((current_turn_id, current_rows, current_produced))
     return segments
 
 
-def _normalize_rows(
-    surface_id: str, turn_id: str, rows: list[dict], prompt_meta: dict[str, dict] | None = None,
-) -> list[Node]:
+def _finish_normalize(
+    surface_id: str,
+    turn_id: str,
+    rows: list[dict],
+    produced_by_row: list[list[Node]],
+    prompt_meta: dict[str, dict] | None = None,
+) -> tuple[list[Node], dict[NodeId, bool]]:
+    """Restamp already-normalized (placeholder-id) nodes with the real
+    surface_id/turn_id and run the per-segment enrich/pair/resolve passes
+    — shared by `_build_turn_view` (rows pre-produced by `_segment_turns`)
+    and `_replay` (rows pre-produced inline from a single normalize pass
+    per row), so normalize_journal_row runs exactly once per row
+    regardless of caller.
+
+    Also returns `is_sidechain`: node_id -> the ORIGINATING row's
+    `isSidechain` flag (`ParentLink.is_sidechain`, already computed here
+    for every produced node's parent-linkage anyway) — the signal
+    `derive.build_subagent_turns` needs to segregate sidechain content,
+    without that pure function importing anything row-shaped itself."""
     raw_nodes: list[Node] = []
     links: dict[NodeId, ParentLink] = {}
-    for row in rows:
-        produced = normalize_journal_row(row, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION)
+    for row, produced in zip(rows, produced_by_row):
+        produced = [replace(n, surface_id=surface_id, turn_id=turn_id) for n in produced]
         if prompt_meta:
             row_data = row.get("data")
             row_data = row_data if isinstance(row_data, dict) else {}
@@ -252,14 +317,20 @@ def _normalize_rows(
             links[n.node_id] = link
         raw_nodes.extend(produced)
     raw_nodes = pair_tool_results(raw_nodes)
-    return resolve_parents(raw_nodes, links)
+    raw_nodes = resolve_parents(raw_nodes, links)
+    is_sidechain = {node_id: link.is_sidechain for node_id, link in links.items()}
+    return raw_nodes, is_sidechain
 
 
 def _build_turn_view(
-    surface_id: str, turn_id: str, rows: list[dict], prompt_meta: dict[str, dict] | None = None,
+    surface_id: str,
+    turn_id: str,
+    rows: list[dict],
+    produced_by_row: list[list[Node]],
+    prompt_meta: dict[str, dict] | None = None,
 ) -> _TurnView:
     boundary_seq = _row_seq(rows[0])
-    raw_nodes = _normalize_rows(surface_id, turn_id, rows, prompt_meta)
+    raw_nodes, is_sidechain = _finish_normalize(surface_id, turn_id, rows, produced_by_row, prompt_meta)
 
     runtime_change = next((n for n in raw_nodes if n.kind in RUNTIME_CHANGED_KINDS), None)
     # FAILURE nodes attach directly to the turn (never Explanation-
@@ -270,10 +341,20 @@ def _build_turn_view(
     # (turn_id) directly; `derive_body` would otherwise wrap this in a synthetic
     # Explanation like any other body item).
     failure_nodes = [n for n in raw_nodes if n.kind == NodeKind.FAILURE]
-    body_source = [
+    body_source_raw = [
         n for n in raw_nodes
         if n.kind not in RUNTIME_CHANGED_KINDS and n.kind != NodeKind.FAILURE
     ]
+    # chat-panel.md grammar: sidechain content segregates into its own
+    # NATIVE_SUBAGENT_TURN structural node(s) BEFORE derive_turn runs — it
+    # must never flat-merge into the turn's own body (see
+    # `derive.build_subagent_turns`'s docstring). `subagent_index` holds
+    # every node this pulled out (at every nesting depth); merged into
+    # `index` below so `children()` can still serve them one level at a
+    # time, the same generic mechanism Explanation members already use.
+    body_source, subagent_index = _derive.build_subagent_turns(
+        body_source_raw, is_sidechain, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+    )
 
     derived = _derive.derive_turn(turn_id, body_source, surface_id=surface_id, cv=CONTRACT_VERSION)
     turn_node = replace(derived["turn"], parent_id=surface_id)
@@ -293,21 +374,30 @@ def _build_turn_view(
         fn = replace(fn, parent_id=turn_node.node_id)
         index[fn.node_id] = fn
 
-    derived_body = derived["body"]
-    for item in derived_body.items:
-        if item.kind == NodeKind.EXPLANATION:
-            exp = replace(item, parent_id=turn_node.node_id)
-            index[exp.node_id] = exp
-            for member in derived_body.membership[exp.node_id]:
-                m = replace(member, parent_id=exp.node_id)
-                index[m.node_id] = m
-        else:
-            pn = replace(item, parent_id=turn_node.node_id)
-            index[pn.node_id] = pn
+    body_items, body_index = _derive.attach_body_items(derived["body"], parent_id=turn_node.node_id)
+    index.update(body_index)
+    trailing_item = body_items[-1] if body_items else None
+
+    # The live turn's "extended form" (live_nodes) is bounded to this
+    # turn's own top-level items — NOT the (potentially huge) sidechain
+    # subtrees now hanging off any NATIVE_SUBAGENT_TURN, which stay lazy
+    # (children(), one level at a time — same contract Explanation members
+    # already have). Exception: when the CHRONOLOGICALLY LAST body item
+    # is itself a subagent turn, its own direct children are served
+    # eagerly too — one level, matching the one-level children() contract
+    # — so a client watching a live turn can follow the currently-active
+    # subagent without an extra round trip; anything deeper, or any
+    # EARLIER subagent turn in the same live turn, is fetched on demand.
+    bounded_nodes = list(index.values())
+    if trailing_item is not None and trailing_item.kind == NodeKind.NATIVE_SUBAGENT_TURN:
+        bounded_nodes.extend(
+            n for n in subagent_index.values() if n.parent_id == trailing_item.node_id
+        )
+    index.update(subagent_index)
 
     return _TurnView(
         turn_id=turn_id, boundary_seq=boundary_seq, turn_node=turn_node, prompt=prompt,
-        results=results, runtime_change=runtime_change, live_nodes=tuple(raw_nodes), index=index,
+        results=results, runtime_change=runtime_change, live_nodes=tuple(bounded_nodes), index=index,
         prompt_row=rows[0],
     )
 
@@ -422,11 +512,18 @@ class ChatSurfaceAdapter(ChatSurface):
     # ---- read plane ------------------------------------------------
 
     def open_session(self, session_id: SessionId) -> ProjectionResult[CompactSessionSnapshot]:
+        # Only the compact window's turns are ever rendered by this
+        # response — building a full `_TurnView` (derive_turn/derive_body,
+        # replace-heavy tree construction) for every OLDER segment too
+        # would reprocess the entire journal on every open, for data the
+        # response never uses. Older turns are paged in on demand via
+        # `older()`, which builds only the page it serves.
         state = self._get_or_create(session_id)
-        turns = self._all_turns(session_id)
-        window = turns[-_COMPACT_TURN_WINDOW:]
+        segments, prompt_meta = self._all_segments(session_id)
+        window_segments = segments[-_COMPACT_TURN_WINDOW:]
+        window = self._build_turns(session_id, window_segments, prompt_meta)
         older_cursor = None
-        if len(turns) > len(window):
+        if len(segments) > len(window_segments):
             older_cursor = PageCursor(
                 surface_id=session_id, snapshot=state.projection.snapshot(),
                 token=str(window[0].boundary_seq),
@@ -437,7 +534,7 @@ class ChatSurfaceAdapter(ChatSurface):
             turns=tuple(_to_compact(t) for t in window), live_turn_nodes=live_nodes,
             runs=(), older_cursor=older_cursor,
         )
-        self._ensure_seeded(session_id, turns)
+        self._ensure_seeded(session_id, window)
         return Ok(snapshot, state.projection.snapshot())
 
     def children(
@@ -464,10 +561,14 @@ class ChatSurfaceAdapter(ChatSurface):
             boundary = int(cursor.token)
         except ValueError:
             return StaleCursor()
-        eligible = [t for t in self._all_turns(cursor.surface_id) if t.boundary_seq < boundary]
-        page = eligible[-_COMPACT_TURN_WINDOW:]
+        # Same "only build what's served" bound as open_session: only the
+        # requested page's segments get a full _TurnView.
+        segments, prompt_meta = self._all_segments(cursor.surface_id)
+        eligible_segments = [s for s in segments if _row_seq(s[1][0]) < boundary]
+        page_segments = eligible_segments[-_COMPACT_TURN_WINDOW:]
+        page = self._build_turns(cursor.surface_id, page_segments, prompt_meta)
         next_cursor = None
-        if len(eligible) > len(page):
+        if len(eligible_segments) > len(page_segments):
             next_cursor = PageCursor(
                 surface_id=cursor.surface_id, snapshot=current, token=str(page[0].boundary_seq),
             )
@@ -614,17 +715,33 @@ class ChatSurfaceAdapter(ChatSurface):
                 self._surfaces[surface_id] = state
             return state
 
-    def _all_turns(self, surface_id: SurfaceId) -> list[_TurnView]:
+    def _all_segments(self, surface_id: SurfaceId) -> tuple[list[_TurnSegment], dict[str, dict]]:
+        """Read + segment the full journal (single normalize pass per row,
+        see `_segment_turns`) WITHOUT building a `_TurnView` for every
+        segment — callers that only need a bounded window (`open_session`,
+        `older`) build views for just the segments they'll serve via
+        `_build_turns`; callers that genuinely need every turn's index
+        (`children`, `search`) pass every segment through it."""
         rows = self._read_all_rows(surface_id)
         prompt_meta = _collect_prompt_meta(rows)
         if prompt_meta:
             state = self._get_or_create(surface_id)
             with state.lock:
                 state.prompt_meta.update(prompt_meta)
+        return _segment_turns(rows), prompt_meta
+
+    @staticmethod
+    def _build_turns(
+        surface_id: SurfaceId, segments: list[_TurnSegment], prompt_meta: dict[str, dict],
+    ) -> list[_TurnView]:
         return [
-            _build_turn_view(surface_id, turn_id, seg_rows, prompt_meta)
-            for turn_id, seg_rows in _segment_turns(rows)
+            _build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta)
+            for turn_id, seg_rows, seg_produced in segments
         ]
+
+    def _all_turns(self, surface_id: SurfaceId) -> list[_TurnView]:
+        segments, prompt_meta = self._all_segments(surface_id)
+        return self._build_turns(surface_id, segments, prompt_meta)
 
     @staticmethod
     def _read_all_rows(root_id: str) -> list[dict]:
@@ -657,7 +774,10 @@ class ChatSurfaceAdapter(ChatSurface):
             if state.seeded:
                 return state
         if turns is None:
-            turns = self._all_turns(surface_id)
+            # Only `turns[-1]` is ever read below — build a _TurnView for
+            # just the last segment rather than every turn in the journal.
+            segments, prompt_meta = self._all_segments(surface_id)
+            turns = self._build_turns(surface_id, segments[-1:], prompt_meta)
         seq = event_journal_reader.current_seq(surface_id) or 0
         pending: dict[str, Node] = {}
         if turns:
@@ -687,15 +807,42 @@ class ChatSurfaceAdapter(ChatSurface):
     # ---- internals: live fact handlers ----------------------------------
 
     async def _on_event_written(self, event: BusEvent) -> None:
+        """Debounces rapid-fire EVENT_JOURNAL_WRITTEN facts for the same
+        surface onto one flush per event-loop tick. If a flush is already
+        scheduled for this surface, this call is a no-op — the pending
+        flush's `read_events(after_seq=state.last_seq)` subsumes whatever
+        this call would have read, since a row is durably journaled
+        before its bus fact publishes, and `last_seq` only advances once
+        the flush actually runs. `asyncio.sleep(0)` is a pure event-loop
+        yield (reschedules via call_soon; no wall-clock wait) — it lets
+        every `_on_event_written` call already queued for THIS tick (e.g.
+        several rapid feed_text_delta journal writes) land before the
+        flush reads, so one flush naturally coalesces all of them."""
         surface_id = event.root_id
         state = self._ensure_seeded(surface_id)
+        with state.lock:
+            if state.flush_scheduled:
+                return
+            state.flush_scheduled = True
+        await asyncio.sleep(0)
+        with state.lock:
+            state.flush_scheduled = False
+        await self._flush_event_written(surface_id, state)
+
+    async def _flush_event_written(self, surface_id: SurfaceId, state: _SurfaceState) -> None:
         with state.lock:
             after = state.last_seq
         rows, _total, _has_more = event_journal_reader.read_events(surface_id, after_seq=after, limit=1000)
         if not rows:
             return
 
-        frames: list[Node] = []
+        # Per-batch coalescing (ADR upsert semantics: latest-wins per
+        # node_id). A dict keeps each node_id's FIRST-occurrence position
+        # while later occurrences in this batch overwrite its value — so
+        # several rows updating the SAME node (e.g. a fast-streaming text
+        # block, or several coalesced _on_event_written ticks worth of
+        # writes) net out to exactly one outbound frame per node_id.
+        coalesced: dict[NodeId, Node] = {}
         with state.lock:
             state.prompt_meta.update(_collect_prompt_meta(rows))
             turn_id = state.current_turn_id
@@ -703,9 +850,8 @@ class ChatSurfaceAdapter(ChatSurface):
             for row in rows:
                 max_seq = max(max_seq, _row_seq(row))
                 if row.get("type") == "prompt_meta":
-                    frames.extend(
-                        self._late_prompt_meta_frames(state, row, turn_id, surface_id)
-                    )
+                    for n in self._late_prompt_meta_frames(state, row, turn_id, surface_id):
+                        coalesced[n.node_id] = n
                     continue
                 produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
                 prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
@@ -737,19 +883,68 @@ class ChatSurfaceAdapter(ChatSurface):
                         # attachment below, so this row's node_id resolves
                         # to the identical Node wherever it's observed.
                         n = replace(n, parent_id=_turn_node_id(turn_id))
-                    frames.append(self._merge_live_node(state, n))
+                    merged = self._merge_live_node(state, n)
+                    coalesced[merged.node_id] = merged
             state.current_turn_id = turn_id
             state.last_seq = max_seq
             render_rev = state.projection.bump_render()
             state.render_seq_history[render_rev] = max_seq
             while len(state.render_seq_history) > _RENDER_HISTORY_CAP:
                 state.render_seq_history.popitem(last=False)
+            # The delta/upsert decision (and its last_text/delta_count
+            # bookkeeping) runs once per node_id per batch, over each
+            # node's FINAL coalesced value — so a node updated several
+            # times within one flush yields one TextDelta spanning the
+            # whole batch's growth, not one per row.
+            outbound = [self._to_outbound(state, n) for n in coalesced.values()]
             snapshot = state.projection.snapshot()
 
-        for n in frames:
-            state.projection.broadcast(
-                NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=n)
-            )
+        for item in outbound:
+            if item[0] == "delta":
+                _, node_id, appended_text = item
+                state.projection.broadcast(
+                    TextDelta(
+                        cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot,
+                        node_id=node_id, appended_text=appended_text,
+                    )
+                )
+            else:
+                _, n = item
+                state.projection.broadcast(
+                    NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=n)
+                )
+
+    @staticmethod
+    def _to_outbound(
+        state: _SurfaceState, n: Node,
+    ) -> tuple[str, Node] | tuple[str, NodeId, str]:
+        """Decide NodeUpsert vs TextDelta for one node's final value in this
+        batch. A TextDelta iff `n`'s kind streams incremental text
+        (`_TEXT_DELTA_KINDS`) AND its new text is a proper append of the
+        last text this surface broadcast for that node_id. Every other
+        case — first sighting, a non-append rewrite, or every
+        `_FULL_SYNC_EVERY_N_DELTAS`th delta (self-healing periodic full
+        sync) — falls back to a full NodeUpsert."""
+        if n.kind not in _TEXT_DELTA_KINDS or n.payload is None:
+            return ("upsert", n)
+        new_text = getattr(n.payload, "text", None)
+        if not isinstance(new_text, str):
+            return ("upsert", n)
+        prev_text = state.last_text.get(n.node_id)
+        state.last_text[n.node_id] = new_text
+        state.last_text.move_to_end(n.node_id)
+        while len(state.last_text) > _TEXT_CACHE_CAP:
+            oldest_id, _ = state.last_text.popitem(last=False)
+            state.delta_count.pop(oldest_id, None)
+        if prev_text is None or new_text == prev_text or not new_text.startswith(prev_text):
+            state.delta_count[n.node_id] = 0
+            return ("upsert", n)
+        count = state.delta_count.get(n.node_id, 0) + 1
+        if count >= _FULL_SYNC_EVERY_N_DELTAS:
+            state.delta_count[n.node_id] = 0
+            return ("upsert", n)
+        state.delta_count[n.node_id] = count
+        return ("delta", n.node_id, new_text[len(prev_text):])
 
     def _late_prompt_meta_frames(
         self, state: _SurfaceState, meta_row: dict, turn_id: str | None, surface_id: str,
@@ -930,13 +1125,25 @@ class ChatSurfaceAdapter(ChatSurface):
         prompt_meta = _collect_prompt_meta(all_rows)
         segments = _segment_turns(all_rows)
         touched = {
-            turn_id for turn_id, seg_rows in segments
+            turn_id for turn_id, seg_rows, _seg_produced in segments
             if any(_row_seq(r) > implied_seq for r in seg_rows)
         }
         if not touched:
             return
-        for turn_id, seg_rows in segments:
+        for turn_id, seg_rows, seg_produced in segments:
             if turn_id not in touched:
                 continue
-            for n in _normalize_rows(cursor.surface_id, turn_id, seg_rows, prompt_meta):
+            finished, is_sidechain = _finish_normalize(
+                cursor.surface_id, turn_id, seg_rows, seg_produced, prompt_meta,
+            )
+            # Same bound as `_build_turn_view`: a resubscribing cursor must
+            # not be flooded with raw sidechain descendants either — kept
+            # excludes them (they're still reachable via children() once
+            # their NATIVE_SUBAGENT_TURN exists from the next open_session/
+            # children() call); non-sidechain nodes (including runtime_
+            # change/failure) pass through unaffected.
+            kept, _extra = _derive.build_subagent_turns(
+                finished, is_sidechain, surface_id=cursor.surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+            )
+            for n in kept:
                 emit(NodeUpsert(cv=CONTRACT_VERSION, surface_id=cursor.surface_id, snapshot=snapshot, node=n))

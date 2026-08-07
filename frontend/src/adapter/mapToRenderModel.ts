@@ -67,7 +67,34 @@
 //                          (the existing unknown-event rendering path)
 //   worker_interaction     -> folded into ChatMessage.workers (WorkerPanel[])
 //                          by fact_kind (worker_start/worker_event/worker_complete)
-//   worker_turn / native_subagent_turn / sub_session_turn / session_turn
+//   native_subagent_turn   -> NOT a WSEvent of its own. Its node_id is
+//                          `subagent:{anchor_node_id}`, where anchor_node_id
+//                          is the dispatching tool_interaction's OWN
+//                          node_id (== the `tool_use_id` that node's own
+//                          tool_call event already carries, per the
+//                          tool_interaction case above). Once
+//                          `subagentChildren` (see mapTurnToAssistantMessage)
+//                          has this node's resolved child NodeWire[] (fetched
+//                          by useSurfaceSession.ts via SurfaceClient.
+//                          fetchTurnBody — the SAME turn-body-resolution
+//                          call used for compact turns, since a subagent
+//                          turn's body has the identical
+//                          explanation-wrapped shape), each child is mapped
+//                          recursively through mapNodeToEvents (so a nested
+//                          native_subagent_turn works too) and every
+//                          resulting event's `parent_tool_use_id` is
+//                          stamped with the anchor's node_id — the exact
+//                          field partitionEventsByParent
+//                          (MessageBubble.tsx) already groups by, so these
+//                          events nest under the anchor tool_call's
+//                          existing SubAgentBlock with ZERO changes to that
+//                          rendering path. Before the fetch resolves (or
+//                          when the manifest reports zero children), this
+//                          returns `[]` — the anchor renders as a plain
+//                          tool card for that one gap, then upgrades to
+//                          SubAgentBlock once the fetch lands and
+//                          useSurfaceSession re-pushes.
+//   worker_turn / sub_session_turn / session_turn
 //                        -> GAP (documented, not a silent drop): these are
 //                          structural containers with NO payload — a full
 //                          WorkerPanel needs their `sidecar_ref` resolved
@@ -137,6 +164,16 @@ import type {
 
 export type RunsById = ReadonlyMap<string, RunWire>;
 
+/** node_id -> memoized mapNodeToEvents() output. Passed by
+ * useSurfaceSession.ts's live-frame path so a node_upsert/text_delta/
+ * node_status frame recomputes events for ONLY the one node it touched —
+ * every other node_id is a cache hit, turning the O(K) "recompute every
+ * node's events again" pass into an O(K) *cheap* pointer-array read/concat
+ * (see mapTurnToAssistantMessage below). Omitted (undefined) by every
+ * from-scratch call site (resync/snapshot, and every existing test) —
+ * default behavior is byte-identical to before this cache existed. */
+export type EventsCache = Map<string, WSEvent[]>;
+
 // ---- deterministic ids --------------------------------------------------
 //
 // Legacy ChatMessage ids are backend-generated uuid4()s with NO derivable
@@ -198,6 +235,45 @@ function toolResultOutput(result: ToolInteractionPayloadWire["result"]): string 
   }
 }
 
+const SUBAGENT_NODE_ID_PREFIX = "subagent:";
+
+/** `native_subagent_turn.node_id` is always `subagent:{anchor_node_id}`,
+ * where `anchor_node_id` is the dispatching tool_interaction's OWN
+ * node_id — already the exact `tool_use_id` value that node's own
+ * tool_call event carries (see the tool_interaction case above:
+ * `tool_use_id: node.node_id`). Returns null for a malformed/unexpected
+ * id shape rather than guessing. */
+export function parseSubagentAnchorToolUseId(nodeId: string): string | null {
+  if (!nodeId.startsWith(SUBAGENT_NODE_ID_PREFIX)) return null;
+  const anchor = nodeId.slice(SUBAGENT_NODE_ID_PREFIX.length);
+  return anchor || null;
+}
+
+/** node_id -> that native_subagent_turn's resolved child NodeWire[]
+ * (fetched via SurfaceClient.fetchTurnBody — see useSurfaceSession.ts).
+ * Absent/no entry means "not fetched yet" (or nothing to fetch), NOT
+ * "fetched, zero children" — mapNodeToEvents returns `[]` for that node
+ * either way, so the two aren't distinguished at this layer. */
+export type SubagentChildrenByNodeId = ReadonlyMap<string, NodeWire[]>;
+
+/** Every event a subagent turn's DIRECT children produce (recursively, via
+ * mapNodeToEvents itself) must nest under the anchor tool_call in
+ * partitionEventsByParent (MessageBubble.tsx) — stamp `parent_tool_use_id`
+ * post-hoc onto each rather than threading it through every mapNodeToEvents
+ * branch, since none of them know they're being rendered inside a subagent
+ * turn. Only stamps events that are still unclaimed (`parent_tool_use_id`
+ * missing or null): a child that is ITSELF a native_subagent_turn already
+ * returns events correctly tagged with ITS OWN (more specific, deeper)
+ * anchor from its own recursive call — overwriting that here would flatten
+ * a subagent-of-subagent onto the outer anchor instead of nesting it. */
+function withParentToolUseId(events: WSEvent[], parentToolUseId: string): WSEvent[] {
+  return events.map((e) => {
+    const claimed = (e.data as { parent_tool_use_id?: unknown } | undefined)?.parent_tool_use_id;
+    if (claimed != null) return e;
+    return { ...e, data: { ...e.data, parent_tool_use_id: parentToolUseId } };
+  });
+}
+
 /** Maps one content node to zero or more flat legacy WSEvents. Most kinds
  * produce exactly one; `tool_interaction` with a resolved result produces
  * two (tool_call + tool_result, mirroring how the legacy render pipeline
@@ -206,8 +282,14 @@ function toolResultOutput(result: ToolInteractionPayloadWire["result"]): string 
  * `runsById` is used only by `model_change(source=user)` to best-effort
  * fill provider/runner/reasoning_effort for the node's own run — optional
  * and defaulted so every other call site (and existing tests) is
- * unaffected. */
-export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()): WSEvent[] {
+ * unaffected. `subagentChildren` (ditto — optional, defaulted) resolves
+ * `native_subagent_turn` nodes; omitted, that kind returns `[]` (the
+ * "not fetched yet" state), matching every existing call site. */
+export function mapNodeToEvents(
+  node: NodeWire,
+  runsById: RunsById = new Map(),
+  subagentChildren?: SubagentChildrenByNodeId,
+): WSEvent[] {
   const base = { node_id: node.node_id };
   switch (node.kind) {
     case "assistant_text": {
@@ -337,9 +419,16 @@ export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()):
       const p = node.payload as UnknownPayloadWire;
       return [{ type: "diagnostic", data: { ...base, kind: `unknown.${p.label}`, raw: p.payload } }];
     }
-    // Structural / handled-elsewhere kinds, plus the one remaining
-    // documented GAP (the sidecar-dependent SubAgentTurn family) — see
-    // the module docstring: no direct WSEvent.
+    case "native_subagent_turn": {
+      const anchorToolUseId = parseSubagentAnchorToolUseId(node.node_id);
+      const children = anchorToolUseId ? subagentChildren?.get(node.node_id) : undefined;
+      if (!anchorToolUseId || !children || children.length === 0) return [];
+      const childEvents = children.flatMap((child) => mapNodeToEvents(child, runsById, subagentChildren));
+      return withParentToolUseId(childEvents, anchorToolUseId);
+    }
+    // Structural / handled-elsewhere kinds, plus the remaining
+    // documented GAP (the sidecar-dependent worker_turn/sub_session_turn/
+    // session_turn family) — see the module docstring: no direct WSEvent.
     case "turn":
     case "explanation":
     case "result":
@@ -348,7 +437,6 @@ export function mapNodeToEvents(node: NodeWire, runsById: RunsById = new Map()):
     case "continuation_session":
     case "instruction_widget":
     case "worker_turn":
-    case "native_subagent_turn":
     case "sub_session_turn":
     case "session_turn":
       return [];
@@ -519,6 +607,27 @@ function statusToStreaming(status: ContentStatusWire | null): boolean {
   return status === "streaming" || status === "queued" || status === "partial";
 }
 
+/** mapNodeToEvents, memoized by node_id through `cache` when given —
+ * identical output to calling mapNodeToEvents directly either way, since a
+ * cache hit only ever returns a previously-computed-fresh value for that
+ * exact node_id (see the cache-invalidation contract on EventsCache /
+ * useSurfaceSession.ts, which deletes a node_id's entry whenever that
+ * node's content actually changes — including a native_subagent_turn's
+ * `subagentChildren` entry newly resolving — before this is called again). */
+function eventsOf(
+  node: NodeWire,
+  runsById: RunsById,
+  cache?: EventsCache,
+  subagentChildren?: SubagentChildrenByNodeId,
+): WSEvent[] {
+  if (!cache) return mapNodeToEvents(node, runsById, subagentChildren);
+  const cached = cache.get(node.node_id);
+  if (cached) return cached;
+  const computed = mapNodeToEvents(node, runsById, subagentChildren);
+  cache.set(node.node_id, computed);
+  return computed;
+}
+
 function resultText(results: NodeWire[]): string {
   const marker = results.find((n) => n.kind === "result");
   const markerText = marker ? (marker.payload as ResultPayloadWire).text : null;
@@ -556,16 +665,26 @@ function runMetaFor(
  * and completion marker per backend/adapters/derive.py::resolve_result.
  * `runsById` (from the snapshot's/live `run_upsert`-fed `runs[]`) is used
  * only to stamp the existing `run_meta` display field — best-effort, a
- * missing entry just omits it. */
+ * missing entry just omits it. `eventsCache` (see EventsCache above) is
+ * the ONLY thing that makes a call "incremental" — omit it (every
+ * snapshot/resync call site does) for the original from-scratch behavior,
+ * byte-identical output either way. `subagentChildren` resolves any
+ * native_subagent_turn node in `bodyNodes` (see SubagentChildrenByNodeId
+ * above) — omitted, those nodes contribute no events (the "not fetched
+ * yet" state), same as before this parameter existed. */
 export function mapTurnToAssistantMessage(
   turn: CompactTurnWire,
   bodyNodes: NodeWire[],
   runsById: RunsById = new Map(),
+  eventsCache?: EventsCache,
+  subagentChildren?: SubagentChildrenByNodeId,
 ): ChatMessage {
   const ordered = sortNodes(bodyNodes);
-  const events = ordered.flatMap((n) => mapNodeToEvents(n, runsById));
+  const events = ordered.flatMap((n) => eventsOf(n, runsById, eventsCache, subagentChildren));
   const workers = reduceWorkerInteractions(ordered);
-  const runtimeChangeEvents = turn.runtime_change ? mapNodeToEvents(turn.runtime_change, runsById) : [];
+  const runtimeChangeEvents = turn.runtime_change
+    ? mapNodeToEvents(turn.runtime_change, runsById, subagentChildren)
+    : [];
   const allEvents = [...runtimeChangeEvents, ...events];
 
   const bodyText = ordered

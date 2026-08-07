@@ -26,7 +26,16 @@ import {
   mapTurnToAssistantMessage,
   mapTurnToMessages,
   turnPhaseToMessagePatch,
+  type EventsCache,
 } from "./mapToRenderModel";
+import {
+  buildTurnNodeTable,
+  createTurnNodeTable,
+  getTurnNode,
+  hasTurnNode,
+  upsertTurnNode,
+  type TurnNodeTable,
+} from "./turnNodeTable";
 import type { ChatFrame, CompactTurnWire, NodeWire, RunWire, SnapshotIdentity } from "./wire";
 
 export interface UseSurfaceSessionOptions {
@@ -39,11 +48,44 @@ export interface UseSurfaceSessionOptions {
 
 interface TurnState {
   turn: CompactTurnWire;
-  body: NodeWire[];
+  /** Incrementally-maintained node table — see turnNodeTable.ts. Mutated
+   * in place by every live frame below; never handed to React state
+   * directly (mapTurnToAssistantMessage/mapTurnToMessages always copy
+   * `.nodes` before deriving a ChatMessage). */
+  body: TurnNodeTable;
+  /** node_id -> memoized mapNodeToEvents() output for this turn's body,
+   * kept in lockstep with `body`: every mutation to a node's content
+   * deletes that node_id's entry here (see EventsCache in
+   * mapToRenderModel.ts) so the next derive recomputes only that one
+   * node's events, not the whole turn's. */
+  eventsCache: EventsCache;
+  /** native_subagent_turn node_id -> its resolved child NodeWire[] (see
+   * SubagentChildrenByNodeId / maybeFetchSubagentChildren below). Absent
+   * entry = not fetched yet. */
+  subagentChildren: Map<string, NodeWire[]>;
+  /** native_subagent_turn node_id -> the child_manifest.renderable_child_
+   * count a fetch was last triggered for — dedup gate so a repeated
+   * node_upsert for the same node (status changes, etc.) doesn't refetch
+   * unless the manifest actually reports a NEW count (the subagent
+   * produced more children since the last fetch). */
+  subagentFetchTriggeredCount: Map<string, number>;
 }
 
 function byTsSeq(a: { ts: number; seq: number }, b: { ts: number; seq: number }): number {
   return a.ts - b.ts || a.seq - b.seq;
+}
+
+/** Single source of truth for a freshly-created TurnState's shape — every
+ * creation site (hydrate's bulk load, a live typed_prompt's scaffolded
+ * turn) goes through this. */
+function newTurnState(turn: CompactTurnWire, body: TurnNodeTable): TurnState {
+  return {
+    turn,
+    body,
+    eventsCache: new Map(),
+    subagentChildren: new Map(),
+    subagentFetchTriggeredCount: new Map(),
+  };
 }
 
 /** Fabricates a minimal `turn` Node scaffold for a turn discovered live
@@ -97,7 +139,8 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
     function pushSnapshot(): void {
       if (cancelled) return;
       const ordered = [...turnsById.values()].sort((a, b) => byTsSeq(a.turn.turn, b.turn.turn));
-      const messages = ordered.flatMap((t) => mapTurnToMessages(t.turn, t.body, runsById));
+      // From-scratch (no eventsCache): snapshot/resync always fully re-derives.
+      const messages = ordered.flatMap((t) => mapTurnToMessages(t.turn, t.body.nodes, runsById));
       const withBanner = instructionWidgetNode
         ? [mapInstructionWidgetToMessage(instructionWidgetNode), ...messages]
         : messages;
@@ -110,8 +153,36 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
       if (!state) return;
       optionsRef.current.onUpsertMessage(
         sid,
-        mapTurnToAssistantMessage(state.turn, state.body, runsById),
+        mapTurnToAssistantMessage(
+          state.turn,
+          state.body.nodes,
+          runsById,
+          state.eventsCache,
+          state.subagentChildren,
+        ),
       );
+    }
+
+    /** Kicks off (at most once per manifest count) the SAME turn-body-
+     * resolution call used for compact turns (SurfaceClient.fetchTurnBody
+     * — a subagent turn's body has the identical explanation-wrapped
+     * shape) for a native_subagent_turn node, caches the result, and
+     * re-derives/pushes the owning turn once it lands. No-ops for every
+     * other kind, an already-fetched-at-this-count node, or a manifest
+     * reporting zero children. */
+    function maybeFetchSubagentChildren(turnId: string, state: TurnState, node: NodeWire): void {
+      if (node.kind !== "native_subagent_turn") return;
+      const count = node.child_manifest?.renderable_child_count ?? 0;
+      if (count <= 0) return;
+      if (state.subagentFetchTriggeredCount.get(node.node_id) === count) return;
+      state.subagentFetchTriggeredCount.set(node.node_id, count);
+      const atRenderRev = identity?.render_rev ?? 0;
+      void client.fetchTurnBody(sid, node.node_id, atRenderRev).then((children) => {
+        if (cancelled) return;
+        state.subagentChildren.set(node.node_id, children);
+        state.eventsCache.delete(node.node_id);
+        pushUpsert(turnId);
+      });
     }
 
     async function hydrate(): Promise<void> {
@@ -144,7 +215,10 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
       );
       if (cancelled) return;
       for (let i = 0; i < envelope.turns.length; i++) {
-        turnsById.set(envelope.turns[i].turn.turn_id, { turn: envelope.turns[i], body: bodies[i] });
+        const turnId = envelope.turns[i].turn.turn_id;
+        const state = newTurnState(envelope.turns[i], buildTurnNodeTable(bodies[i]));
+        turnsById.set(turnId, state);
+        for (const node of bodies[i]) maybeFetchSubagentChildren(turnId, state, node);
       }
 
       pushSnapshot();
@@ -176,7 +250,7 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
             const existing = turnsById.get(node.turn_id);
             if (!existing) {
               if (node.kind !== "typed_prompt") return; // no anchoring turn yet
-              turnsById.set(node.turn_id, { turn: scaffoldTurn(node), body: [] });
+              turnsById.set(node.turn_id, newTurnState(scaffoldTurn(node), createTurnNodeTable()));
               pushUpsert(node.turn_id);
               return;
             }
@@ -189,19 +263,22 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
               const results = [...existing.turn.results.filter((n) => n.node_id !== node.node_id), node];
               turnsById.set(node.turn_id, { ...existing, turn: { ...existing.turn, results } });
             } else {
-              const body = [...existing.body.filter((n) => n.node_id !== node.node_id), node];
-              turnsById.set(node.turn_id, { ...existing, body });
+              // Mutates existing.body/eventsCache in place (see
+              // turnNodeTable.ts) — O(1) amortized, no new TurnState
+              // needed since `existing` IS the stored object.
+              upsertTurnNode(existing.body, node);
+              existing.eventsCache.delete(node.node_id);
+              maybeFetchSubagentChildren(node.turn_id, existing, node);
             }
             pushUpsert(node.turn_id);
             return;
           }
           case "text_delta": {
             for (const [turnId, state] of turnsById) {
-              const idx = state.body.findIndex((n) => n.node_id === frame.node_id);
-              if (idx === -1) continue;
-              const body = [...state.body];
-              body[idx] = applyTextDeltaToNode(body[idx], frame.appended_text);
-              turnsById.set(turnId, { ...state, body });
+              if (!hasTurnNode(state.body, frame.node_id)) continue;
+              const node = getTurnNode(state.body, frame.node_id)!;
+              upsertTurnNode(state.body, applyTextDeltaToNode(node, frame.appended_text));
+              state.eventsCache.delete(frame.node_id);
               pushUpsert(turnId);
               return;
             }
@@ -209,11 +286,10 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
           }
           case "node_status": {
             for (const [turnId, state] of turnsById) {
-              const idx = state.body.findIndex((n) => n.node_id === frame.node_id);
-              if (idx === -1) continue;
-              const body = [...state.body];
-              body[idx] = applyNodeStatusToNode(body[idx], frame.status);
-              turnsById.set(turnId, { ...state, body });
+              if (!hasTurnNode(state.body, frame.node_id)) continue;
+              const node = getTurnNode(state.body, frame.node_id)!;
+              upsertTurnNode(state.body, applyNodeStatusToNode(node, frame.status));
+              state.eventsCache.delete(frame.node_id);
               pushUpsert(turnId);
               return;
             }
@@ -222,7 +298,13 @@ export function useSurfaceSession(options: UseSurfaceSessionOptions): void {
           case "turn_lifecycle": {
             const state = turnsById.get(frame.turn_id);
             if (!state) return;
-            const base = mapTurnToAssistantMessage(state.turn, state.body, runsById);
+            const base = mapTurnToAssistantMessage(
+              state.turn,
+              state.body.nodes,
+              runsById,
+              state.eventsCache,
+              state.subagentChildren,
+            );
             optionsRef.current.onUpsertMessage(sid, { ...base, ...turnPhaseToMessagePatch(frame) });
             return;
           }

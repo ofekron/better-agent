@@ -51,12 +51,14 @@ import event_ingester as bare_event_ingester  # noqa: E402
 
 import auth  # noqa: E402
 import adapter_api  # noqa: E402
+import browser_trust  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
 from backend.surface_contract.identity import Rebuilding  # noqa: E402
+from backend.ws_outbox import WebSocketOutbox  # noqa: E402
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, WebSocketDisconnect  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
 
@@ -368,6 +370,115 @@ def test_ws_subscribe_receives_node_upsert_and_intent_is_rejected() -> None:
         auth.verify_token = original_verify_token
 
 
+class _SlowConsumerWebSocket:
+    """Duck-types just enough of `fastapi.WebSocket` for `ws_surface`/
+    `_authenticate` to drive directly (bypassing the ASGI test-transport,
+    which doesn't reliably reproduce backpressure — see
+    `test_ws_outbox.py`'s own fakes for the same rationale). `session`
+    carries an already-authenticated user so `_authenticate` never touches
+    `query_params`. First `receive_json()` call hands back the `surfaces`
+    subscribe message; every call after that blocks until `close()` is
+    called (mirroring a client that goes idle after subscribing), then
+    raises WebSocketDisconnect — the same signal a real dropped connection
+    would deliver to a blocked `receive_json()`. `send_text` never
+    returns — the permanently-stuck "slow consumer" `WebSocketOutbox`'s
+    enqueue-timeout is meant to detect."""
+
+    def __init__(self, subscribe_message: dict) -> None:
+        self.session = {"user": "tester"}
+        self.query_params: dict[str, str] = {}
+        self._subscribe_message = subscribe_message
+        self._receive_calls = 0
+        self.subscribed = asyncio.Event()
+        self._closed_event = asyncio.Event()
+        self.closed = False
+        self.sent: list[dict] = []
+
+    async def accept(self) -> None:
+        return None
+
+    async def receive_json(self) -> dict:
+        self._receive_calls += 1
+        if self._receive_calls == 1:
+            return self._subscribe_message
+        self.subscribed.set()
+        await self._closed_event.wait()
+        raise WebSocketDisconnect()
+
+    async def send_text(self, text: str) -> None:
+        await asyncio.Event().wait()  # never returns: the permanent slow consumer
+
+    async def send_bytes(self, payload: bytes) -> None:
+        await asyncio.Event().wait()
+
+    async def close(self, code: int | None = None) -> None:
+        self.closed = True
+        self._closed_event.set()
+
+
+def test_ws_surface_disconnects_slow_consumer_via_bounded_outbox() -> None:
+    """H3: /ws/v2/surface routes its live-frame sends through the SAME
+    bounded-outbox/slow-consumer-disconnect mechanism as /ws/chat
+    (backend/ws_outbox.py) — a consumer that never drains gets
+    disconnected (not an unboundedly growing in-memory queue), and the
+    route's cleanup (subscription.close()) still runs afterward."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    adapter_api.configure(chat=adapter)
+    opened = adapter.open_session(root_id)
+    identity = opened.snapshot
+
+    original_validate = browser_trust.validate_websocket
+    original_outbox_cls = adapter_api.WebSocketOutbox
+    # Small bounds so the test is fast/deterministic — production defaults
+    # (256 items, 2s) are already covered by test_ws_outbox.py's own suite
+    # against this SAME shared class.
+    adapter_api.browser_trust.validate_websocket = lambda ws: True
+    adapter_api.WebSocketOutbox = lambda websocket, *, on_close: WebSocketOutbox(
+        websocket, on_close=on_close, max_items=1, enqueue_timeout_s=0.02,
+    )
+
+    async def run() -> None:
+        websocket = _SlowConsumerWebSocket({
+            "surfaces": [{
+                "surface_id": root_id,
+                "incarnation": identity.incarnation,
+                "render_rev": identity.render_rev,
+            }],
+            "focus": "opened",
+        })
+        route_task = asyncio.create_task(adapter_api.ws_surface(websocket))
+        await asyncio.wait_for(websocket.subscribed.wait(), timeout=1.0)
+
+        # Enough broadcasts to exceed max_items=1 and trip the enqueue
+        # timeout against a writer permanently stuck in send_text.
+        for i in range(5):
+            seq = bare_event_ingester.event_ingester.ingest(
+                root_id, root_id, "agent_message",
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": f"chunk {i}"}]}},
+                source="test",
+            )
+            await bus.publish(BusEvent(
+                type=EVENT_JOURNAL_WRITTEN, root_id=root_id, sid=root_id,
+                payload={"event_type": "agent_message", "seq": seq, "data": {}, "source": "test", "event_id": str(uuid.uuid4())},
+            ))
+
+        await asyncio.wait_for(websocket._closed_event.wait(), timeout=2.0)
+        assert websocket.closed is True
+        # The route's own receive loop unblocks on the disconnect and its
+        # finally: block runs (outbox.close()/wait_closed(), subscription
+        # cleanup) without hanging.
+        await asyncio.wait_for(route_task, timeout=2.0)
+
+    try:
+        asyncio.run(run())
+    finally:
+        adapter_api.browser_trust.validate_websocket = original_validate
+        adapter_api.WebSocketOutbox = original_outbox_cls
+
+
 _TESTS = [
     test_aliasing_unifies_bare_and_dotted_event_bus,
     test_aliasing_survives_real_dotted_import_before_canonicalization,
@@ -381,6 +492,7 @@ _TESTS = [
     test_attachment_route_rejects_foreign_session_ref,
     test_attachment_route_rejects_malformed_ref,
     test_ws_subscribe_receives_node_upsert_and_intent_is_rejected,
+    test_ws_surface_disconnects_slow_consumer_via_bounded_outbox,
 ]
 
 

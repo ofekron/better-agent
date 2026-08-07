@@ -197,7 +197,7 @@ def test_ws_outbox_binary_records_timeline_and_lag_overlap() -> None:
                 side_effect=lambda name, value=1: counts.append((name, value)),
             ),
             mock.patch.object(
-                main,
+                lag_watchdog,
                 "_LAG_LOOP_EVIDENCE",
                 {},
             ),

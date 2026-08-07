@@ -132,6 +132,66 @@ describe("useSurfaceSession", () => {
     expect(msg.events.some((e) => e.type === "output" && e.data.output === "live update")).toBe(true);
   });
 
+  it("lazily fetches a native_subagent_turn's children via the children() endpoint and re-derives once resolved", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/snapshot")) return jsonResponse(snapshotBody("inc-1", 0, "turn-a", 100));
+      if (u.includes("/nodes/subagent%3Atool%3Ax/children")) {
+        return jsonResponse({
+          kind: "ok",
+          value: [
+            {
+              cv: 1, node_id: "sc1", parent_id: null, turn_id: "turn-a", surface_id: SESSION,
+              kind: "assistant_text", ts: 1, seq: 0, status: "complete",
+              payload: { text: "subagent says hi" }, run_ref: null, sidecar_ref: null, target_ref: null, child_manifest: null,
+            },
+          ],
+          snapshot_identity: { incarnation: "inc-1", render_rev: 0, hist_rev: 0 },
+        });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+    const onSnapshot = vi.fn();
+    const onUpsertMessage = vi.fn();
+    renderHook(() => useSurfaceSession({ sessionId: SESSION, onSnapshot, onUpsertMessage }));
+    await waitFor(() => expect(onSnapshot).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      ws.emit({
+        type: "node_upsert",
+        cv: 1, surface_id: SESSION, snapshot: { incarnation: "inc-1", render_rev: 1, hist_rev: 0 },
+        node: {
+          cv: 1, node_id: "subagent:tool:x", parent_id: null, turn_id: "turn-a", surface_id: SESSION,
+          kind: "native_subagent_turn", ts: 101, seq: 5, status: "complete", payload: null,
+          run_ref: null, sidecar_ref: null, target_ref: null,
+          child_manifest: { renderable_child_count: 1, has_children: true },
+        },
+      } as unknown as import("../src/types").WSEvent);
+    });
+
+    // First upsert (structural node arrives, children not fetched yet):
+    // contributes nothing to events. This is the SYNCHRONOUS push from the
+    // node_upsert handler itself, guaranteed to run before the async
+    // children() fetch's `.then()` callback can — so it's asserted on
+    // `calls[0]` specifically, not the latest call (which `waitFor`'s
+    // polling can easily race past the fetch's resolution by the time it
+    // returns).
+    await waitFor(() => expect(onUpsertMessage).toHaveBeenCalled());
+    const beforeFetch = onUpsertMessage.mock.calls[0][1] as ChatMessage;
+    expect(beforeFetch.events.some((e) => e.data?.node_id === "sc1")).toBe(false);
+
+    // The async children() fetch resolves -> a SECOND upsert with the
+    // resolved child event, tagged with the anchor's tool_use_id.
+    await waitFor(() =>
+      expect(onUpsertMessage.mock.calls.some(([, m]: [string, ChatMessage]) =>
+        m.events.some((e) => e.data?.node_id === "sc1"),
+      )).toBe(true),
+    );
+    const resolved = onUpsertMessage.mock.calls.at(-1)![1] as ChatMessage;
+    const childEvent = resolved.events.find((e) => e.data?.node_id === "sc1");
+    expect(childEvent).toMatchObject({ type: "output", data: { output: "subagent says hi", parent_tool_use_id: "tool:x" } });
+  });
+
   it("on resync_required, refetches the snapshot and performs a fresh onSnapshot replace (not an upsert)", async () => {
     let call = 0;
     fetchMock.mockImplementation(() => {

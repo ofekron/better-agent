@@ -119,6 +119,7 @@ STATELESS_DOTTED_IMPORT_ALLOWLIST = frozenset({
     "restart_request",
     "dependency_environment",
     "portable_lock",
+    "ws_outbox",
 })
 
 _STDLIB = set(sys.stdlib_module_names) | {"__future__"}

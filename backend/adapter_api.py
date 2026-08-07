@@ -56,6 +56,7 @@ from backend.surface_contract.nodes import Attachment
 from backend.surface_contract.provider_config_surface import ProviderConfigSurface
 from backend.surface_contract.runs_surface import RunsSurface
 from backend.surface_contract.session_surface import SessionSurface
+from backend.ws_outbox import WebSocketOutbox
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +445,14 @@ async def ws_surface(websocket: WebSocket) -> None:
         return
 
     loop = asyncio.get_running_loop()
-    send_queue: asyncio.Queue = asyncio.Queue()
+    # Bounded outbox / slow-consumer-disconnect (backend/ws_outbox.py,
+    # shared with ws_chat.py's /ws/chat) — protects the process from
+    # unbounded memory growth when a client can't drain a monster-turn's
+    # broadcast fan-out fast enough. `on_close` is a no-op: a slow-
+    # consumer disconnect closes `websocket` itself, which unblocks the
+    # `receive_json()` loop below with WebSocketDisconnect and runs the
+    # SAME subscription/feed cleanup any other disconnect reason does.
+    outbox = WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
     subscription = None
     # Non-cursor live feeds (SessionSurface/ProviderConfigSurface/
     # RunsSurface `subscribe(emit)` — no per-surface cursor, unlike the
@@ -456,14 +464,13 @@ async def ws_surface(websocket: WebSocket) -> None:
     def emit(frame: object) -> None:
         body = to_wire(frame)
         body["type"] = _frame_type_name(frame)
-        loop.call_soon_threadsafe(send_queue.put_nowait, body)
+        # `emit` may fire from a different thread than this connection's
+        # event loop (chat_adapter's broadcast runs under the event-bus
+        # dispatch context) — call_soon_threadsafe marshals the actual
+        # (possibly backpressure-waiting) send onto the right loop as a
+        # fire-and-forget task; `emit` itself must stay synchronous.
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(outbox.send(body)))
 
-    async def _pump_sends() -> None:
-        while True:
-            item = await send_queue.get()
-            await websocket.send_json(item)
-
-    pump_task = asyncio.create_task(_pump_sends())
     try:
         while True:
             raw = await websocket.receive_json()
@@ -502,11 +509,8 @@ async def ws_surface(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("ws/v2/surface: connection handler failed")
     finally:
-        pump_task.cancel()
-        try:
-            await pump_task
-        except BaseException:  # CancelledError is a BaseException, not Exception
-            pass
+        await outbox.close()
+        await outbox.wait_closed()
         if subscription is not None:
             subscription.close()
         for feed_subscription in feed_subscriptions.values():

@@ -22,6 +22,7 @@ import atexit
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -40,11 +41,12 @@ atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 import runs_dir  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
 from stores import worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
 
+import backend.adapters.chat_adapter as chat_adapter_mod  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
 from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
-from backend.surface_contract.frames import NodeUpsert, ResyncRequired  # noqa: E402
+from backend.surface_contract.frames import NodeUpsert, ResyncRequired, TextDelta  # noqa: E402
 from backend.surface_contract.identity import Focus, Ok, Rebuilding, StaleCursor, SurfaceCursor  # noqa: E402
 from backend.surface_contract.intents import SendPrompt, SendMode, SendTarget, SendTargetKind  # noqa: E402
 from backend.surface_contract.nodes import (  # noqa: E402
@@ -66,6 +68,49 @@ def _ingest_assistant_text(root_id: str, text: str) -> int:
     return event_ingester.ingest(
         root_id, root_id, "agent_message",
         {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
+        source="test",
+    )
+
+
+def _ingest_tool_use(root_id: str, tool_use_id: str, name: str = "Task") -> int:
+    return event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": tool_use_id, "name": name, "input": {}},
+        ]}},
+        source="test",
+    )
+
+
+def _ingest_sidechain_text(
+    root_id: str, uuid_str: str, text: str, *, parent_tool_use_id: str | None = None,
+    parent_uuid: str | None = None,
+) -> int:
+    """A Claude Code sidechain message row: `isSidechain: True` plus
+    EITHER `parent_tool_use_id` (the very first message of a sidechain,
+    resolving back to its spawning Task tool_use) OR `parentUuid`
+    (chaining to a PRIOR message in the SAME sidechain conversation) — the
+    same two fields `normalize.derive_link`/`resolve_parents` already
+    read from any row's `data`."""
+    data = {
+        "type": "assistant", "message": {"content": [{"type": "text", "text": text}]},
+        "uuid": uuid_str, "isSidechain": True,
+    }
+    if parent_tool_use_id is not None:
+        data["parent_tool_use_id"] = parent_tool_use_id
+    if parent_uuid is not None:
+        data["parentUuid"] = parent_uuid
+    return event_ingester.ingest(root_id, root_id, "agent_message", data, source="test")
+
+
+def _ingest_assistant_text_uuid(root_id: str, text: str, uuid_str: str) -> int:
+    """Same shape `runner_better_agent.py`'s `feed_text_delta` journals
+    (full cumulative text, SAME `uuid` reused across successive writes) —
+    lets a test ingest several rows that all normalize to the SAME
+    node_id, the scenario TextDelta/coalescing exist for."""
+    return event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}, "uuid": uuid_str},
         source="test",
     )
 
@@ -456,6 +501,391 @@ def test_search_finds_substring_case_insensitive() -> None:
     assert match.node_id in match.path
 
 
+def test_open_session_normalizes_each_row_once() -> None:
+    """H5: every journal row is normalized exactly once per open_session()
+    call — not once in `_segment_turns` and again in `_build_turn_view`."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    _ingest_assistant_text(root_id, "hi there")
+    _ingest_assistant_text(root_id, "more text")
+
+    calls = 0
+    original = chat_adapter_mod.normalize_journal_row
+
+    def counting(*a, **kw):
+        nonlocal calls
+        calls += 1
+        return original(*a, **kw)
+
+    chat_adapter_mod.normalize_journal_row = counting
+    try:
+        adapter = ChatSurfaceAdapter()
+        result = adapter.open_session(root_id)
+    finally:
+        chat_adapter_mod.normalize_journal_row = original
+
+    assert isinstance(result, Ok), result
+    assert calls == 3, calls  # one call per journal row — not 6
+
+
+def test_older_only_builds_the_requested_page_not_every_turn() -> None:
+    """H5: `older()` builds a `_TurnView` for just the page it serves —
+    turns outside the requested page are segmented (cheap) but never
+    passed through `_build_turn_view` (derive_turn/derive_body)."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    # 7 turns total: open_session's compact window (5) covers the last 5,
+    # leaving 2 older turns for a SINGLE older() page (window size 5 > 2).
+    for i in range(7):
+        _ingest_prompt(root_id, f"prompt {i}")
+        _ingest_assistant_text(root_id, f"reply {i}")
+
+    adapter = ChatSurfaceAdapter()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    assert opened.value.older_cursor is not None
+
+    built_turn_ids: list[str] = []
+    original = chat_adapter_mod._build_turn_view
+
+    def counting(surface_id, turn_id, rows, produced_by_row, prompt_meta=None):
+        built_turn_ids.append(turn_id)
+        return original(surface_id, turn_id, rows, produced_by_row, prompt_meta)
+
+    chat_adapter_mod._build_turn_view = counting
+    try:
+        older = adapter.older(opened.value.older_cursor)
+    finally:
+        chat_adapter_mod._build_turn_view = original
+
+    assert isinstance(older, Ok), older
+    assert len(older.value.turns) == 2
+    assert len(built_turn_ids) == 2  # not all 7
+
+
+def test_on_event_written_coalesces_same_tick_notifications() -> None:
+    """H2: two EVENT_JOURNAL_WRITTEN notifications for the same surface
+    landing in the same event-loop tick collapse into one flush — the
+    second call is a no-op because the pending flush's
+    `read_events(after_seq=...)` will subsume its row too."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    seq = _ingest_assistant_text(root_id, "hi there")
+
+    adapter = ChatSurfaceAdapter()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+
+    flush_calls = 0
+    original_flush = chat_adapter_mod.ChatSurfaceAdapter._flush_event_written
+
+    async def counting_flush(self, surface_id, state):
+        nonlocal flush_calls
+        flush_calls += 1
+        await original_flush(self, surface_id, state)
+
+    event = BusEvent(
+        type=EVENT_JOURNAL_WRITTEN, root_id=root_id, sid=root_id,
+        payload={"event_type": "agent_message", "seq": seq, "data": {}, "source": "test", "event_id": str(uuid.uuid4())},
+    )
+
+    async def run() -> None:
+        await asyncio.gather(
+            adapter._on_event_written(event),
+            adapter._on_event_written(event),
+        )
+
+    chat_adapter_mod.ChatSurfaceAdapter._flush_event_written = counting_flush
+    try:
+        asyncio.run(run())
+    finally:
+        chat_adapter_mod.ChatSurfaceAdapter._flush_event_written = original_flush
+
+    assert flush_calls == 1, flush_calls
+
+
+def test_per_batch_coalescing_collapses_multiple_rows_to_one_frame() -> None:
+    """H2: several rows updating the SAME node_id, all landing in ONE
+    flush's batch, net out to exactly one outbound frame carrying the
+    batch's FINAL value — not one frame per row."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    text_uuid = str(uuid.uuid4())
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        # 3 growing rewrites of the SAME node, all ingested BEFORE the
+        # single EVENT_JOURNAL_WRITTEN notification — matches feed_text_
+        # delta writing several chunks before a bus dispatch is observed.
+        node_id = None
+        for chunk in ("a", "ab", "abc"):
+            seq = _ingest_assistant_text_uuid(root_id, chunk, text_uuid)
+        _publish_written(root_id, seq)
+
+        frames = [
+            f for f in received
+            if isinstance(f, (NodeUpsert, TextDelta))
+            and (f.node.node_id if isinstance(f, NodeUpsert) else f.node_id) == text_uuid
+        ]
+        assert len(frames) == 1, received  # coalesced, not one per row
+        assert isinstance(frames[0], NodeUpsert)  # first sighting: full upsert
+        assert frames[0].node.payload.text == "abc"  # the batch's FINAL value
+    finally:
+        sub.close()
+
+
+def test_text_delta_emitted_for_pure_append() -> None:
+    """H4: a second observation of a growing text node, in its OWN flush,
+    emits a TextDelta carrying just the appended suffix."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    text_uuid = str(uuid.uuid4())
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        seq1 = _ingest_assistant_text_uuid(root_id, "hello", text_uuid)
+        _publish_written(root_id, seq1)
+        first = [f for f in received if isinstance(f, NodeUpsert) and f.node.node_id == text_uuid]
+        assert len(first) == 1, received
+        assert first[0].node.payload.text == "hello"
+
+        seq2 = _ingest_assistant_text_uuid(root_id, "hello world", text_uuid)
+        _publish_written(root_id, seq2)
+        deltas = [f for f in received if isinstance(f, TextDelta) and f.node_id == text_uuid]
+        assert len(deltas) == 1, received
+        assert deltas[0].appended_text == " world"
+    finally:
+        sub.close()
+
+
+def test_text_delta_falls_back_to_upsert_for_non_append() -> None:
+    """H4: a rewrite that is NOT a prefix-preserving append (e.g. an
+    edited/replaced message) falls back to a full NodeUpsert, never a
+    TextDelta that would desync the client."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    text_uuid = str(uuid.uuid4())
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        seq1 = _ingest_assistant_text_uuid(root_id, "hello", text_uuid)
+        _publish_written(root_id, seq1)
+        seq2 = _ingest_assistant_text_uuid(root_id, "goodbye", text_uuid)
+        _publish_written(root_id, seq2)
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert) and f.node.node_id == text_uuid]
+        deltas = [f for f in received if isinstance(f, TextDelta) and f.node_id == text_uuid]
+        assert len(upserts) == 2, received
+        assert upserts[-1].node.payload.text == "goodbye"
+        assert deltas == []
+    finally:
+        sub.close()
+
+
+def test_text_delta_periodic_full_sync_self_heals() -> None:
+    """H4: after `_FULL_SYNC_EVERY_N_DELTAS` consecutive deltas, the next
+    observation is forced back to a full NodeUpsert so a client that
+    mis-applied a delta resyncs from ground truth."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    text_uuid = str(uuid.uuid4())
+    n = chat_adapter_mod._FULL_SYNC_EVERY_N_DELTAS
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        kinds: list[str] = []
+        text = "x"
+        for _ in range(n + 1):
+            seq = _ingest_assistant_text_uuid(root_id, text, text_uuid)
+            _publish_written(root_id, seq)
+            new_frames = [
+                f for f in received
+                if (isinstance(f, NodeUpsert) and f.node.node_id == text_uuid)
+                or (isinstance(f, TextDelta) and f.node_id == text_uuid)
+            ]
+            kinds.append("upsert" if isinstance(new_frames[-1], NodeUpsert) else "delta")
+            text += "x"
+
+        assert kinds[0] == "upsert"  # first sighting
+        assert all(k == "delta" for k in kinds[1:n]), kinds  # n-1 deltas
+        assert kinds[n] == "upsert", kinds  # the nth delta attempt self-heals
+    finally:
+        sub.close()
+
+
+def test_open_session_bounds_deep_sidechain_fan_out() -> None:
+    """H1: a deep sidechain (Task-tool subagent) fan-out does NOT flatten
+    into the live turn's extended form — chat-panel.md grammar (SubAgentTurn
+    is a BodyItem embedding a full nested Turn), enforced end-to-end
+    through open_session()/children()."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "delegate this to a subagent")
+    task_id = str(uuid.uuid4())
+    _ingest_tool_use(root_id, task_id, name="Task")
+
+    fan_out = 200
+    prev_uuid = None
+    for i in range(fan_out):
+        node_uuid = str(uuid.uuid4())
+        if prev_uuid is None:
+            _ingest_sidechain_text(root_id, node_uuid, f"subagent step {i}", parent_tool_use_id=task_id)
+        else:
+            _ingest_sidechain_text(root_id, node_uuid, f"subagent step {i}", parent_uuid=prev_uuid)
+        prev_uuid = node_uuid
+    _ingest_assistant_text(root_id, "done delegating, here's the summary")
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    snapshot = result.value
+    assert len(snapshot.turns) == 1
+
+    subagent_items = [n for n in snapshot.live_turn_nodes if n.kind == NodeKind.NATIVE_SUBAGENT_TURN]
+    assert len(subagent_items) == 1, snapshot.live_turn_nodes
+    subagent_node = subagent_items[0]
+    assert subagent_node.node_id == f"subagent:tool:{task_id}"
+    assert subagent_node.child_manifest.has_children is True
+
+    # Bounded: the live turn's extended form stays a small, fixed number
+    # of top-level items regardless of how deep the subagent's own
+    # conversation goes (200 sidechain messages here).
+    assert len(snapshot.live_turn_nodes) < 10, len(snapshot.live_turn_nodes)
+    assert not any(n.node_id == prev_uuid for n in snapshot.live_turn_nodes)  # last sidechain msg not flattened in
+
+    # One level at a time: children() of the subagent turn returns its
+    # own wrapping Explanation, not the 200 raw sidechain messages.
+    level1 = adapter.children(root_id, subagent_node.node_id, at_render_rev=result.snapshot.render_rev)
+    assert isinstance(level1, Ok)
+    assert len(level1.value) == 1
+    explanation = level1.value[0]
+    assert explanation.kind == NodeKind.EXPLANATION
+
+    # children() of THAT explanation reaches the real content — full
+    # reachability, still one level at a time (never all at once).
+    level2 = adapter.children(root_id, explanation.node_id, at_render_rev=result.snapshot.render_rev)
+    assert isinstance(level2, Ok)
+    assert len(level2.value) == fan_out
+
+
+def test_live_path_only_expands_trailing_subagent_not_earlier_ones() -> None:
+    """H1: live-path force-expansion is scoped to the CHRONOLOGICALLY LAST
+    subagent turn only — an earlier one in the same live turn stays lazy
+    (children() on demand), matching the "minimal and justified" bound."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    task1 = str(uuid.uuid4())
+    _ingest_tool_use(root_id, task1, name="Task")
+    early_side = str(uuid.uuid4())
+    _ingest_sidechain_text(root_id, early_side, "first subagent", parent_tool_use_id=task1)
+    _ingest_assistant_text(root_id, "middle narration")
+    task2 = str(uuid.uuid4())
+    _ingest_tool_use(root_id, task2, name="Task")
+    trailing_side = str(uuid.uuid4())
+    _ingest_sidechain_text(root_id, trailing_side, "second subagent", parent_tool_use_id=task2)
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    live_nodes = result.value.live_turn_nodes
+
+    subagent_ids = {n.node_id for n in live_nodes if n.kind == NodeKind.NATIVE_SUBAGENT_TURN}
+    trailing_subagent_id = f"subagent:tool:{task2}"
+    early_subagent_id = f"subagent:tool:{task1}"
+    assert subagent_ids == {trailing_subagent_id, early_subagent_id}
+
+    explanations_by_parent = {n.parent_id for n in live_nodes if n.kind == NodeKind.EXPLANATION}
+    assert trailing_subagent_id in explanations_by_parent
+    assert early_subagent_id not in explanations_by_parent
+    # Still bounded to one level: the trailing subagent's own raw
+    # sidechain text is not eagerly included either.
+    assert not any(n.node_id == trailing_side for n in live_nodes)
+
+
+def test_open_session_perf_smoke_bounded_wall_time() -> None:
+    """H6 perf smoke: a single turn with several thousand rows still opens
+    in bounded wall time. Generous bound — this asserts no pathological
+    (quadratic-ish) blowup, not a tight latency budget."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    row_count = 5000
+    for i in range(row_count):
+        _ingest_assistant_text(root_id, f"chunk {i}")
+
+    adapter = ChatSurfaceAdapter()
+    started = time.perf_counter()
+    result = adapter.open_session(root_id)
+    elapsed_s = time.perf_counter() - started
+
+    assert isinstance(result, Ok), result
+    assert len(result.value.turns) == 1
+    assert elapsed_s < 10.0, elapsed_s
+
+
+def test_open_session_perf_smoke_monster_sidechain_turn_bounded_response() -> None:
+    """H1+H6 perf smoke, at the analyzed real-world scale (~7,500 rows,
+    ~6,600 of them sidechain): asserts BOTH bounded wall time AND bounded
+    response node count — the property H1 exists for. Without
+    segregation this would return ~6,600 flat nodes; with it, a handful."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "delegate this huge task to a subagent")
+    task_id = str(uuid.uuid4())
+    _ingest_tool_use(root_id, task_id, name="Task")
+
+    fan_out = 6600
+    prev_uuid = None
+    for i in range(fan_out):
+        node_uuid = str(uuid.uuid4())
+        if prev_uuid is None:
+            _ingest_sidechain_text(root_id, node_uuid, f"subagent step {i}", parent_tool_use_id=task_id)
+        else:
+            _ingest_sidechain_text(root_id, node_uuid, f"subagent step {i}", parent_uuid=prev_uuid)
+        prev_uuid = node_uuid
+    _ingest_assistant_text(root_id, "delegation complete")
+
+    adapter = ChatSurfaceAdapter()
+    started = time.perf_counter()
+    result = adapter.open_session(root_id)
+    elapsed_s = time.perf_counter() - started
+
+    assert isinstance(result, Ok), result
+    assert elapsed_s < 30.0, elapsed_s
+    # The property H1 exists for: response size independent of sidechain
+    # depth, not merely "fast" — a flat-merge regression would still be
+    # fast-ish at this row count but would return ~6,600 nodes here.
+    assert len(result.value.live_turn_nodes) < 10, len(result.value.live_turn_nodes)
+
+
 _TESTS = [
     test_open_session_single_turn,
     test_subscribe_emits_node_upsert_with_bumped_render_rev,
@@ -472,6 +902,17 @@ _TESTS = [
     test_user_message_failed_with_no_turn_yet_does_not_crash_or_emit,
     test_live_handler_node_equals_reload_reconstructed_node_for_same_fact,
     test_search_finds_substring_case_insensitive,
+    test_open_session_normalizes_each_row_once,
+    test_older_only_builds_the_requested_page_not_every_turn,
+    test_on_event_written_coalesces_same_tick_notifications,
+    test_per_batch_coalescing_collapses_multiple_rows_to_one_frame,
+    test_text_delta_emitted_for_pure_append,
+    test_text_delta_falls_back_to_upsert_for_non_append,
+    test_text_delta_periodic_full_sync_self_heals,
+    test_open_session_bounds_deep_sidechain_fan_out,
+    test_live_path_only_expands_trailing_subagent_not_earlier_ones,
+    test_open_session_perf_smoke_bounded_wall_time,
+    test_open_session_perf_smoke_monster_sidechain_turn_bounded_response,
 ]
 
 

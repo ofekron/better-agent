@@ -9,6 +9,7 @@ import {
   mapTurnToAssistantMessage,
   mapTurnToMessages,
   mapUserInteractionEventToRequest,
+  parseSubagentAnchorToolUseId,
   reduceWorkerInteractions,
   surfaceAssistantMessageId,
   surfaceInstructionWidgetMessageId,
@@ -258,7 +259,7 @@ describe("mapNodeToEvents", () => {
   it.each([
     "turn", "explanation", "result", "typed_prompt", "worker_interaction",
     "continuation_session", "instruction_widget",
-    "worker_turn", "native_subagent_turn", "sub_session_turn", "session_turn",
+    "worker_turn", "sub_session_turn", "session_turn",
   ] as const)("produces no direct WSEvent for structural/gap kind %s", (kind) => {
     const n = node({ node_id: "x", kind, payload: null });
     expect(mapNodeToEvents(n)).toEqual([]);
@@ -278,6 +279,79 @@ describe("mapNodeToEvents", () => {
         },
       },
     ]);
+  });
+});
+
+describe("parseSubagentAnchorToolUseId", () => {
+  it("recovers the anchor tool_use_id from a well-formed subagent: node_id", () => {
+    expect(parseSubagentAnchorToolUseId("subagent:tool:x")).toBe("tool:x");
+  });
+
+  it("returns null for a node_id missing the subagent: prefix", () => {
+    expect(parseSubagentAnchorToolUseId("tool:x")).toBeNull();
+  });
+
+  it("returns null for an empty anchor after the prefix", () => {
+    expect(parseSubagentAnchorToolUseId("subagent:")).toBeNull();
+  });
+});
+
+describe("mapNodeToEvents: native_subagent_turn", () => {
+  const anchorId = "tool:x";
+  const subagentNode = node({ node_id: `subagent:${anchorId}`, kind: "native_subagent_turn", payload: null });
+
+  it("produces no events when subagentChildren is omitted (not fetched yet)", () => {
+    expect(mapNodeToEvents(subagentNode)).toEqual([]);
+  });
+
+  it("produces no events when subagentChildren has no entry for this node_id", () => {
+    expect(mapNodeToEvents(subagentNode, new Map(), new Map())).toEqual([]);
+  });
+
+  it("produces no events when the resolved children array is empty", () => {
+    const subagentChildren = new Map([[subagentNode.node_id, []]]);
+    expect(mapNodeToEvents(subagentNode, new Map(), subagentChildren)).toEqual([]);
+  });
+
+  it("maps resolved children recursively and stamps parent_tool_use_id with the anchor", () => {
+    const child = node({ node_id: "c1", kind: "assistant_text", payload: { text: "subagent output" } });
+    const subagentChildren = new Map([[subagentNode.node_id, [child]]]);
+    expect(mapNodeToEvents(subagentNode, new Map(), subagentChildren)).toEqual([
+      { type: "output", data: { node_id: "c1", output: "subagent output", parent_tool_use_id: anchorId } },
+    ]);
+  });
+
+  it("maps a multi-event child (tool_interaction with a result) and tags BOTH events", () => {
+    const child = node({
+      node_id: "c-tool", kind: "tool_interaction",
+      payload: { tool_name: "Bash", args: { cmd: "ls" }, result: { output: "file.txt" }, approval_ref: null, ui_kind: null, derived_view: null },
+    });
+    const subagentChildren = new Map([[subagentNode.node_id, [child]]]);
+    const events = mapNodeToEvents(subagentNode, new Map(), subagentChildren);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: "tool_call", data: { parent_tool_use_id: anchorId } });
+    expect(events[1]).toMatchObject({ type: "tool_result", data: { parent_tool_use_id: anchorId } });
+  });
+
+  it("recurses through a nested native_subagent_turn child using the same subagentChildren map", () => {
+    const grandchild = node({ node_id: "gc1", kind: "assistant_text", payload: { text: "nested output" } });
+    const nestedSubagent = node({
+      node_id: "subagent:tool:y", kind: "native_subagent_turn", payload: null,
+    });
+    const subagentChildren = new Map([
+      [subagentNode.node_id, [nestedSubagent]],
+      [nestedSubagent.node_id, [grandchild]],
+    ]);
+    expect(mapNodeToEvents(subagentNode, new Map(), subagentChildren)).toEqual([
+      { type: "output", data: { node_id: "gc1", output: "nested output", parent_tool_use_id: "tool:y" } },
+    ]);
+  });
+
+  it("returns [] when the node_id has no recoverable anchor, even with a matching subagentChildren entry", () => {
+    const malformed = node({ node_id: "not-a-subagent-id", kind: "native_subagent_turn", payload: null });
+    const child = node({ node_id: "c1", kind: "assistant_text", payload: { text: "x" } });
+    const subagentChildren = new Map([[malformed.node_id, [child]]]);
+    expect(mapNodeToEvents(malformed, new Map(), subagentChildren)).toEqual([]);
   });
 });
 
@@ -619,6 +693,21 @@ describe("mapTurnToAssistantMessage / mapTurnToMessages", () => {
           harness_profile_id: "prof-2", previous_harness_profile_id: "",
         },
       },
+    ]);
+  });
+
+  it("includes a native_subagent_turn's resolved children in the assistant message's events, nested under its anchor", () => {
+    const anchor = node({
+      node_id: "tool:x", kind: "tool_interaction", ts: 1,
+      payload: { tool_name: "Task", args: {}, result: null, approval_ref: null, ui_kind: null, derived_view: null },
+    });
+    const subagentTurn = node({ node_id: "subagent:tool:x", kind: "native_subagent_turn", ts: 2, payload: null });
+    const child = node({ node_id: "sc1", kind: "assistant_text", payload: { text: "subagent says hi" } });
+    const subagentChildren = new Map([["subagent:tool:x", [child]]]);
+    const msg = mapTurnToAssistantMessage(turn(), [anchor, subagentTurn], new Map(), undefined, subagentChildren);
+    expect(msg.events).toEqual([
+      { type: "tool_call", data: { node_id: "tool:x", tool: "Task", args: {}, tool_use_id: "tool:x", parent_tool_use_id: null } },
+      { type: "output", data: { node_id: "sc1", output: "subagent says hi", parent_tool_use_id: "tool:x" } },
     ]);
   });
 
