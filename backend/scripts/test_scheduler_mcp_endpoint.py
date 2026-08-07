@@ -211,20 +211,64 @@ def main_test() -> int:
     finally:
         restore_dispatch()
 
-    print("T8 spawn-side strip is wired (source-level)")
+    print("T8 spawn-side strip is wired (behavior-level)")
     from runs_dir import TIMER_TOOLS
     check(set(TIMER_TOOLS) == {
         "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
     }, "runs_dir.TIMER_TOOLS is the single source of the four names")
-    src = open(os.path.join(_BACKEND, "provider_claude.py")).read()
-    import ast
-    tree = ast.parse(src)
-    in_payload = False
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "start_run":
-            seg = ast.get_source_segment(src, node) or ""
-            in_payload = "TIMER_TOOLS" in seg and "disallowed_tools" in seg
-    check(in_payload, "start_run merges TIMER_TOOLS into input.json disallowed_tools")
+
+    # Behavior check, not a source-grep for a specific function name: build
+    # a real input.json payload through the provider's own payload builder
+    # and assert TIMER_TOOLS actually lands in disallowed_tools. This stays
+    # correct across internal renames/refactors of whichever private method
+    # currently owns payload assembly — only the module-level contract
+    # (ClaudeProvider produces a disallowed_tools list that always contains
+    # TIMER_TOOLS) is asserted.
+    import config_store
+    from provider_claude import ClaudeProvider
+    provider_record = config_store.add_provider({
+        "name": "T8 timer-tools test",
+        "kind": "claude",
+        "mode": "subscription",
+        "config_dir": "$HOME/.claude",
+    })
+    provider = ClaudeProvider(provider_record)
+    input_payload, _bare, _mode, _backend_url = provider._build_input_payload(
+        prompt="ping",
+        images=None,
+        files=None,
+        cwd=_TMP_HOME,
+        model=None,
+        reasoning_effort=None,
+        session_id=None,
+        mode="native",
+        app_session_id=sid,
+        source="test",
+        disallowed_tools=None,
+        setting_sources=None,
+        backend_url=None,
+        internal_token=None,
+        fork=False,
+        supervised=False,
+        supervisor_agent_session_id=None,
+        worker_agent_session_id=None,
+        mssg_sender_session_id=None,
+        is_worker=False,
+        browser_harness_enabled=False,
+        user_facing=False,
+        continuation_chain=None,
+        provider_run_config=None,
+        capability_contexts=None,
+        target_message_id=None,
+        turn_run_id=None,
+        disabled_builtin_extensions=None,
+        provisioned_tool_profile="",
+    )
+    check(
+        set(TIMER_TOOLS) <= set(input_payload.get("disallowed_tools") or []),
+        "ClaudeProvider input.json payload merges TIMER_TOOLS into disallowed_tools "
+        f"(got {input_payload.get('disallowed_tools')!r})",
+    )
     runner_src = open(os.path.join(_BACKEND, "runner.py")).read()
     check("from runs_dir import TIMER_TOOLS" in runner_src,
           "runner's fail-closed gate uses the same constant")
