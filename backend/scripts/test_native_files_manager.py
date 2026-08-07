@@ -559,8 +559,17 @@ async def test_run_state_full_backfill_propagates_scan_failure() -> None:
 
 
 async def test_run_state_full_backfill_failure_marks_startup_task_failed() -> None:
+    # Startup steps no longer own a private registry (see
+    # `feat(background-work): migrate core producers (ADR 0005 phase 3)`,
+    # 864fb9170): `run_task` now projects into the shared
+    # `background_work_registry` under owner_kind=core, owner_id="startup".
+    # The invariant this test locks — a failed run-state full backfill marks
+    # its startup task failed — still holds, just surfaced through that
+    # shared registry instead of a startup-only one.
+    import background_work
+    from background_work import background_work_registry
     from runs_dir import ensure_run_state_ledger_backfilled
-    from startup_tasks import run_task, startup_task_registry
+    from startup_tasks import run_task
 
     root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-task-failure-"))
     original_scandir = runs_dir_mod.os.scandir
@@ -570,22 +579,24 @@ async def test_run_state_full_backfill_failure_marks_startup_task_failed() -> No
             raise PermissionError("scan denied")
         return original_scandir(path)
 
+    task_id = "test_run_state_ledger_backfill"
+    item_id = f"{background_work.OWNER_CORE}:startup:{task_id}"
     runs_dir_mod.os.scandir = fail_scandir  # type: ignore
-    startup_task_registry.reset()
+    background_work_registry.reset()
     try:
         await run_task(
-            "test_run_state_ledger_backfill",
+            task_id,
             "Test run-state ledger backfill",
             ensure_run_state_ledger_backfilled,
             root,
         )
-        tasks = startup_task_registry.list()
-        assert len(tasks) == 1, tasks
-        assert tasks[0]["state"] == "failed", tasks
-        assert tasks[0]["error"] == "scan denied", tasks
+        item = background_work_registry.get(item_id)
+        assert item is not None, item_id
+        assert item["status"] == background_work.STATUS_FAILED, item
+        assert item["error"] == "scan denied", item
     finally:
         runs_dir_mod.os.scandir = original_scandir  # type: ignore
-        startup_task_registry.reset()
+        background_work_registry.reset()
         shutil.rmtree(root, ignore_errors=True)
     print("PASS test_run_state_full_backfill_failure_marks_startup_task_failed")
 
