@@ -11,6 +11,13 @@ import secret_redaction as sr
 def access_logger_reset():
     logger = logging.getLogger("uvicorn.access")
     original_filters = list(logger.filters)
+    # Importing main runs install_access_log_redaction() as a module-level side
+    # effect, so an earlier test that imported main can leave a filter behind.
+    # Start from a clean slate so the install/idempotency assertions hold
+    # regardless of test/import order, then restore the prior filters.
+    logger.filters = [
+        f for f in original_filters if not isinstance(f, sr.SecretRedactionFilter)
+    ]
     yield logger
     logger.filters = original_filters
 
