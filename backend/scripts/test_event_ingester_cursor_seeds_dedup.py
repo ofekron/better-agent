@@ -395,16 +395,16 @@ def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
     )
 
     fresh = EventIngester()
-    original_rebuild = fresh._rebuild_seq_offsets_locked
+    original_scan = fresh._scan_summaries
 
-    def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("empty current summary sidecar should not rebuild seq offsets")
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("empty current summary sidecar should not rescan seq offsets")
 
-    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    fresh._scan_summaries = fail_scan  # type: ignore
     try:
         summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     ok = summaries == {} and fresh._seq_offsets.get(root) == seq_offsets
     print(
         f"  {PASS if ok else FAIL} empty message summary sidecar loads seq offsets"
@@ -451,18 +451,18 @@ def _run_message_summaries_non_empty_sidecar_loads_seq_offsets() -> bool:
 
     fresh = EventIngester()
     calls = 0
-    original_rebuild = fresh._rebuild_seq_offsets_locked
+    original_scan = fresh._scan_summaries
 
-    def counted_rebuild(*args, **kwargs):
+    def counted_scan(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original_rebuild(*args, **kwargs)
+        return original_scan(*args, **kwargs)
 
-    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    fresh._scan_summaries = counted_scan  # type: ignore
     try:
         summaries = fresh.message_event_summaries(root, tail=25)
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     ok = summaries == {"msg-1": expected_summary} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
         f"  {PASS if ok else FAIL} non-empty message summary sidecar loads seq offsets"
@@ -518,18 +518,18 @@ def _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() -> bool:
     _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
 
     fresh = EventIngester()
-    original_rebuild = fresh._rebuild_seq_offsets_locked
+    original_scan = fresh._scan_summaries
 
-    def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("filtered summary miss should not rebuild seq offsets")
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("filtered summary miss should not rescan seq offsets")
 
-    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    fresh._scan_summaries = fail_scan  # type: ignore
     try:
         by_sid = fresh.message_event_summaries(root, sid_filter="missing-sid", tail=25)
         by_msg = fresh.message_event_summaries(root, msg_ids={"missing-msg"}, tail=25)
         by_empty_msg_ids = fresh.message_event_summaries(root, msg_ids=set(), tail=25)
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     ok = by_sid == {} and by_msg == {} and by_empty_msg_ids == {}
     print(
         f"  {PASS if ok else FAIL} filtered message summary miss skips seq-offset rebuild"
@@ -545,18 +545,18 @@ def _run_message_summaries_filtered_match_loads_seq_offsets() -> bool:
 
     fresh = EventIngester()
     calls = 0
-    original_rebuild = fresh._rebuild_seq_offsets_locked
+    original_scan = fresh._scan_summaries
 
-    def counted_rebuild(*args, **kwargs):
+    def counted_scan(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original_rebuild(*args, **kwargs)
+        return original_scan(*args, **kwargs)
 
-    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    fresh._scan_summaries = counted_scan  # type: ignore
     try:
         summaries = fresh.message_event_summaries(root, sid_filter=sid, tail=25)
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     ok = summaries == {"msg-1": expected_summary} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
         f"  {PASS if ok else FAIL} filtered message summary match loads seq offsets"
@@ -641,29 +641,29 @@ def _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() -> bool:
     _write_summary_sidecar(root, sid, resolutions={"1": "msg-1"})
 
     fresh = EventIngester()
-    original_rebuild = fresh._rebuild_seq_offsets_locked
+    original_scan = fresh._scan_summaries
 
-    def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("filtered summary miss should not rebuild seq offsets")
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("filtered summary miss should not rescan seq offsets")
 
-    fresh._rebuild_seq_offsets_locked = fail_rebuild  # type: ignore
+    fresh._scan_summaries = fail_scan  # type: ignore
     try:
         assert fresh.message_event_summaries(root, sid_filter="missing-sid", tail=25) == {}
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     fresh._summaries_cache.pop(root, None)
     calls = 0
 
-    def counted_rebuild(*args, **kwargs):
+    def counted_scan(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original_rebuild(*args, **kwargs)
+        return original_scan(*args, **kwargs)
 
-    fresh._rebuild_seq_offsets_locked = counted_rebuild  # type: ignore
+    fresh._scan_summaries = counted_scan  # type: ignore
     try:
         resolutions = fresh.ownership_resolutions_range(root, seq_start=1, seq_end=1)
     finally:
-        fresh._rebuild_seq_offsets_locked = original_rebuild  # type: ignore
+        fresh._scan_summaries = original_scan  # type: ignore
     ok = resolutions == {1: "msg-1"} and calls == 0 and fresh._seq_offsets.get(root) == [0]
     print(
         f"  {PASS if ok else FAIL} ownership resolution read uses sidecar offsets after filtered miss"

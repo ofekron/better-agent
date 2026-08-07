@@ -522,21 +522,18 @@ def test_covered_refresh_does_not_full_walk() -> None:
     _write_claude(fpath, ["knownneedle here"])
     idx.refresh_once()
 
-    called = {"stat_walk": 0}
-    original = idx._stat_walk
-    idx._stat_walk = lambda: called.__setitem__("stat_walk", called["stat_walk"] + 1) or original()
-    try:
-        time.sleep(1.05)
-        with fpath.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
-                                "message": {"role": "user", "content": "steadyneedle added"}}) + "\n")
-        r = idx.refresh_once()
-        rows = idx.search_rows(["steadyneedle"], limit=10)
-    finally:
-        idx._stat_walk = original
-    ok = called["stat_walk"] == 0 and r["full"] == 0 and r["touched"] >= 1 and len(rows) == 1
+    time.sleep(1.05)
+    with fpath.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
+                            "message": {"role": "user", "content": "steadyneedle added"}}) + "\n")
+    r = idx.refresh_once()
+    rows = idx.search_rows(["steadyneedle"], limit=10)
+    # r["full"] is do_full's exact gate (1 if do_full else 0): the steady
+    # per-known-path scan path (_steady_known_paths) ran instead of the
+    # queue-based full-root walk (_scan_full_batch).
+    ok = r["full"] == 0 and r["touched"] >= 1 and len(rows) == 1
     print(f"{OK if ok else FAIL} covered refresh avoids full walk "
-          f"(stat_walk={called['stat_walk']}, refresh={r}, rows={len(rows)})")
+          f"(refresh={r}, rows={len(rows)})")
     assert ok
 
 

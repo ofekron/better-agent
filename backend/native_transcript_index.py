@@ -764,6 +764,14 @@ def _scan_full_batch(
         return 0, True
     _, _, _, is_native_transcript_path = _roots_and_resolver()
     roots = state.get("roots") if isinstance(state.get("roots"), list) else []
+    real_roots: set[Path] = set()
+    for root_entry in roots:
+        if not isinstance(root_entry, dict):
+            continue
+        try:
+            real_roots.add(Path(str(root_entry.get("path"))).resolve())
+        except OSError:
+            continue
     stack = state.get("stack") if isinstance(state.get("stack"), list) else []
     root_index = int(state.get("root_index") or 0)
     discovered: list[tuple[Path, str, float, int]] = []
@@ -824,6 +832,18 @@ def _scan_full_batch(
                         break
                     continue
                 if not is_native_transcript_path(path, tag):
+                    _full_scan_mark_seen(conn, path)
+                    if visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+                    continue
+                # Symlink-escape guard: `entry.is_dir(follow_symlinks=False)`
+                # above already keeps the walk from recursing into an in-root
+                # directory symlink, but a plain FILE entry can itself be a
+                # symlink pointing outside every native root. Resolve and
+                # require it stay under a walked root before indexing it.
+                resolved_file = path.resolve()
+                if not any(resolved_file.is_relative_to(r) for r in real_roots):
                     _full_scan_mark_seen(conn, path)
                     if visited_entries >= entry_budget:
                         budget_exhausted = True
