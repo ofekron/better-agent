@@ -5,6 +5,16 @@ import { API } from "../api";
 type FrontendLogLevel = "debug" | "info" | "warn" | "error";
 
 let installed = false;
+
+// One id per page load (i.e. per WebView renderer process boot). Android
+// LMK/OOM kills terminate the process with no chance to log the kill itself
+// (see installLifecycleLogger below), so the only way to tell "this boot
+// silently died" apart from "this boot backgrounded normally, still same
+// tab" in post-hoc frontend.log analysis is to stamp every lifecycle event
+// with a value that's stable within a boot and changes across boots. Bare
+// URLs (e.g. the generic Capacitor shell "http://localhost/") collapse
+// unrelated boots into the same key otherwise.
+const BOOT_ID = crypto.randomUUID();
 const EXTENSION_PERFORMANCE_EVENT = "better-agent:extension-performance";
 const DEFAULT_SLOW_TIMING_MS = 250;
 const MAIN_THREAD_BLOCKED_MS = 80;
@@ -268,7 +278,7 @@ function installMemoryHeartbeat(): void {
   if (!("memory" in performance)) return;
   let ticks = 0;
   const intervalId = window.setInterval(() => {
-    logDurable("lifecycle", "memory_heartbeat", memorySnapshot());
+    logDurable("lifecycle", "memory_heartbeat", { boot_id: BOOT_ID, ...memorySnapshot() });
     ticks += 1;
     if (ticks >= HEARTBEAT_MAX_TICKS) window.clearInterval(intervalId);
   }, HEARTBEAT_INTERVAL_MS);
@@ -282,6 +292,7 @@ function installMemoryHeartbeat(): void {
 function installLifecycleLogger(): void {
   document.addEventListener("visibilitychange", () => {
     logDurableImmediate("lifecycle", "visibility_change", {
+      boot_id: BOOT_ID,
       visibility_state: document.visibilityState,
       ...memorySnapshot(),
     });
@@ -292,6 +303,7 @@ function installLifecycleLogger(): void {
   // is gone, hence the immediate (non-debounced) send.
   window.addEventListener("pagehide", (event) => {
     logDurableImmediate("lifecycle", "pagehide", {
+      boot_id: BOOT_ID,
       persisted: event.persisted,
       ...memorySnapshot(),
     });
@@ -300,6 +312,7 @@ function installLifecycleLogger(): void {
   if (Capacitor.isNativePlatform()) {
     CapApp.addListener("appStateChange", (state) => {
       logDurableImmediate("lifecycle", "app_state_change", {
+        boot_id: BOOT_ID,
         is_active: state.isActive,
         ...memorySnapshot(),
       });
