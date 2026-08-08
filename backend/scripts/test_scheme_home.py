@@ -16,6 +16,7 @@ Run:
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ for _p in (str(_BACKEND), str(_REPO_ROOT)):
 
 import paths  # noqa: E402
 import scheme_migrations  # noqa: E402
+import backend.adapters.chat_index as chat_index_mod  # noqa: E402
 from backend.adapters.projection import CURRENT_SCHEME_VERSION, SurfaceProjection  # noqa: E402
 
 
@@ -148,6 +150,65 @@ def test_ensure_raises_on_missing_chain_edge_before_touching_disk() -> None:
         check(not v2_dir.exists(),
               "ensure() validates the full chain before running any migration fn "
               "(fail closed, no partial side effects)")
+    finally:
+        home.release()
+
+
+def test_chat_index_v2_sqlite_self_heals_onto_v3_without_runtime_error() -> None:
+    """Regression test: the surface-migration merge (72492694d) bumped
+    `chat_index.SCHEME_VERSION` to 3 without registering the `chat_index`
+    v2 -> v3 scheme_migrations edge, so any surface with a pre-existing v2
+    chat_index sqlite (left by a pre-merge process) made every real entry
+    point (`chat_adapter._ensure_seeded` -> `read_recent_settled_turns` /
+    `merge_settled_turn`) raise `RuntimeError: scheme_migrations.ensure:
+    no registered migration edge 'chat_index' v2 -> v3 (target v3)`
+    instead of self-healing. Simulates that exact on-disk state directly
+    (a bare v2/<hash>/index.sqlite3 with no v3 sibling, no `chat_index`
+    process ever having run in this home) and drives it through the real
+    public `chat_index` entry point."""
+    home = _test_home.TestHome.acquire("ba-test-chat-index-v2-migrate-")
+    try:
+        surface_id = "surface-v2-migrate-regression"
+        v2_root = paths.scheme_home(chat_index_mod.SCHEME_COMPONENT, 2)
+        name = hashlib.sha256(surface_id.encode("utf-8")).hexdigest()
+        v2_session_dir = v2_root / name
+        v2_session_dir.mkdir(mode=0o700)
+        paths.make_private_directory(v2_session_dir)
+        (v2_session_dir / chat_index_mod._DB_FILENAME).touch()
+
+        # Must not raise; a v2-only surface self-heals onto a fresh v3 index
+        # (chat_index is a disposable projection rebuilt from the journal —
+        # see the module's SCHEME_VERSION/migration-edge docstrings).
+        turns = chat_index_mod.read_recent_settled_turns(surface_id, limit=10)
+        check(turns is None, "freshly self-healed v3 index has no settled turns yet (cold)")
+
+        v3_dir = paths.ba_home() / "scheme" / chat_index_mod.SCHEME_COMPONENT / "v3"
+        check(v3_dir.is_dir(), "chat_index resolves/self-heals onto the v3 scheme dir")
+        check(
+            (v3_dir / name / chat_index_mod._DB_FILENAME).is_file(),
+            "chat_index opens/creates its v3 sqlite db for the surface",
+        )
+        check(
+            v2_session_dir.is_dir() and (v2_session_dir / chat_index_mod._DB_FILENAME).exists(),
+            "old v2 dir is left untouched (never mutated in place, per scheme_migrations contract)",
+        )
+
+        # The index is genuinely usable post-heal, not just non-crashing:
+        # a real settled-turn write/read round-trips through the v3 index.
+        from backend.surface_contract.identity import CONTRACT_VERSION
+        from backend.surface_contract.nodes import NodeKind
+
+        turn_node = chat_index_mod.Node(
+            cv=CONTRACT_VERSION, node_id="turn-1", parent_id=None, turn_id="turn-1",
+            surface_id=surface_id, kind=NodeKind.TURN, ts=1.0, seq=1,
+        )
+        chat_index_mod.merge_settled_turn(
+            surface_id, "turn-1", boundary_seq=1, nodes={"turn-1": turn_node},
+            prompt=None, results=(), runtime_change=None,
+        )
+        healed = chat_index_mod.read_recent_settled_turns(surface_id, limit=10)
+        check(healed is not None and len(healed) == 1, "post-heal write/read round-trips a settled turn")
+        check(healed[0].turn_node_id == "turn-1", "round-tripped turn keeps its identity")
     finally:
         home.release()
 

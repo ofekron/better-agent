@@ -6,6 +6,7 @@ import concurrent.futures
 import functools
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -38,6 +39,13 @@ MOBILE_REQUIREMENTS = "requirements-mobile.txt"
 ACTIVE_POINTER = BACKEND / ACTIVE_POINTER_NAME
 VENV_ROOT = BACKEND / VENV_ROOT_NAME
 BASE_PROBES = ("argon2", "fastapi", "uvicorn", "watchfiles", "mcp.server.fastmcp")
+# A stalled probe subprocess under machine load is not evidence the
+# environment is broken; it just needs a generous ceiling before we stop
+# waiting on it and fall back to trusting the plan marker (see
+# `_probe_environment`).
+PROBE_TIMEOUT_SECONDS = 60
+
+_logger = logging.getLogger(__name__)
 
 
 class DependencyPlanError(RuntimeError):
@@ -288,12 +296,15 @@ def _module_available(module: str) -> bool:
         return False
 
 
-def _probe_runtime_module(python: Path, module: str) -> None:
+def _probe_runtime_module(
+    python: Path, module: str, timeout: float = PROBE_TIMEOUT_SECONDS
+) -> None:
     subprocess.run(
         [str(python), "-c", f"import {module}"],
         check=True,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
@@ -306,6 +317,7 @@ def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
         return
     python = _python_in(env_dir)
     failures: list[tuple[str, BaseException]] = []
+    timed_out: list[str] = []
     workers = _runtime_probe_workers(len(probes))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         pending = {
@@ -313,16 +325,29 @@ def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
             for module in probes
         }
         for future in concurrent.futures.as_completed(pending):
+            module = pending[future]
             try:
                 future.result()
+            except subprocess.TimeoutExpired:
+                # A stalled `python -c "import X"` subprocess under load is
+                # not staleness — staleness is decided by the plan hash +
+                # marker (already validated by the caller). Trust the
+                # marker rather than forcing a full rebuild on load alone.
+                timed_out.append(module)
             except (OSError, subprocess.SubprocessError) as exc:
-                failures.append((pending[future], exc))
-    if not failures:
-        return
-    modules = ", ".join(sorted(module for module, _ in failures))
-    raise DependencyPlanError(
-        f"backend dependency environment failed runtime module probes: {modules}"
-    ) from failures[0][1]
+                failures.append((module, exc))
+    if failures:
+        modules = ", ".join(sorted(module for module, _ in failures))
+        raise DependencyPlanError(
+            f"backend dependency environment failed runtime module probes: {modules}"
+        ) from failures[0][1]
+    if timed_out:
+        _logger.warning(
+            "dependency environment probe timed out after %ss for modules: %s "
+            "(trusting the plan marker instead of forcing a rebuild)",
+            PROBE_TIMEOUT_SECONDS,
+            ", ".join(sorted(timed_out)),
+        )
 
 
 def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:
@@ -423,8 +448,35 @@ def _restore_pointer(value: str | None) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _reusable_build(plan_root: Path, plan: dict[str, Any]) -> Path | None:
+    """Find a completed build already sitting under `plan_root` for this
+    plan hash and reuse it instead of paying for another `uv venv` + `uv pip
+    install`.
+
+    Concurrent activations (multiple node runtimes, repeated installer
+    invocations, a previous crash right after `os.replace`) can leave
+    several sibling build directories under the same plan-hash directory.
+    They are functionally identical: same hash, same requirements. The
+    first one that still validates wins.
+    """
+    if not plan_root.is_dir():
+        return None
+    for candidate in sorted(plan_root.iterdir()):
+        if not candidate.is_dir() or candidate.name.startswith(".stage-"):
+            continue
+        try:
+            _assert_environment(candidate, plan)
+        except DependencyPlanError:
+            continue
+        return candidate
+    return None
+
+
 def _build_environment(uv: str, plan: dict[str, Any]) -> Path:
     plan_root = VENV_ROOT / str(plan["hash"])
+    reusable = _reusable_build(plan_root, plan)
+    if reusable is not None:
+        return reusable
     build_id = uuid.uuid4().hex
     stage = plan_root / f".stage-{build_id}"
     env_dir = plan_root / build_id

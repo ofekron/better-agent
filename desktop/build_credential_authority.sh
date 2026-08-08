@@ -49,14 +49,14 @@ if [ "$needs_build" -eq 1 ]; then
   fi
   rm -rf "$DIR/build/CredentialAuthority" "$DIR/dist/BetterAgentCredentialAuthority"
   (cd "$DIR" && "$VENV/bin/pyinstaller" --noconfirm CredentialAuthority.spec)
-fi
 
-if [ "$(uname -s)" = "Darwin" ]; then
-  if ! bash "$DIR/local_codesign.sh" verify "$TARGET" >/dev/null 2>&1; then
-    bash "$DIR/local_codesign.sh" sign "$TARGET"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if ! bash "$DIR/local_codesign.sh" verify "$TARGET" >/dev/null 2>&1; then
+      bash "$DIR/local_codesign.sh" sign "$TARGET"
+    fi
   fi
-fi
 
-"$TARGET" --self-test
+  "$TARGET" --self-test
+fi
 
 printf '%s\n' "$TARGET"
