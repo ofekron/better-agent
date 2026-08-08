@@ -1,4 +1,4 @@
-# Backend test suite sharded across the owner's self-hosted runners.
+# Backend test suite sharded across self-hosted runners.
 #
 # Security posture (public repo + self-hosted runners):
 # - Triggers are push-to-dev and manual dispatch ONLY — never pull_request,
@@ -7,9 +7,9 @@
 #   contributors' workflow runs (fork-pr-contributor-approval).
 # - checkout uses persist-credentials: false; jobs need no repo secrets.
 #
-# Shard count is 2, matching the exact number of physical self-hosted
-# runners registered under the "ba-tests" label (the owner's arm64 Mac +
-# the Lenovo x64 box — see the per-arch branch below). More shards than
+# Shard count is 2, matching the number of physical self-hosted runners
+# registered under the "ba-tests" label (one arm64, one x64 — see the
+# per-arch branch below). More shards than
 # runners buys nothing: GitHub can only run as many matrix jobs concurrently
 # as there are idle runners, so a 3rd/4th shard just queues behind the first
 # two on whichever machine frees up first, paying a full extra checkout +
@@ -62,9 +62,9 @@ jobs:
       # anything, using docker itself as the privilege boundary (root
       # inside a throwaway container, not the unprivileged `runner` user
       # gaining privileges) — no sudoers changes needed. Linux-only:
-      # macOS/Docker Desktop already remaps bind-mount ownership, so the
-      # `arm64` (owner's Mac) runner in this same matrix never accumulates
-      # root-owned files in the first place.
+      # macOS/Docker Desktop already remaps bind-mount ownership, so a
+      # macOS runner in this same matrix never accumulates root-owned
+      # files in the first place.
       - name: Restore workspace ownership before checkout (self-hosted Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -97,27 +97,24 @@ jobs:
       # scripts/lib/docker-test-lifecycle.sh). Keyed off runner.arch, not
       # runner.name, so this is independent of the shard matrix and doesn't
       # need updating if a runner is renamed:
-      #   - arm64 == the owner's Mac. It's also their PRIMARY interactive
-      #     machine (8 cores; has hit load 30+ under concurrent CI+dev
-      #     work), so CI must never be able to starve foreground use.
-      #     Owner-set budget: 40% of the box (3 CPUs / 6g), AND a halved
-      #     cgroup CPU-share weight (512 vs docker's default 1024): the
-      #     weight only costs the container CPU when something else is
-      #     actually contending, so an idle Mac still lets the container
-      #     burst up to its ceiling (fast), while a busy interactive
-      #     session pushes the container's share down (invisible).
-      #   - anything else == the Lenovo (WSL2 Ubuntu "TestApe", x64,
-      #     docker-ce inside WSL). It's a dedicated test box, not used
-      #     interactively, so there's no foreground work to protect —
-      #     owner-set budget 70% (5 CPUs / 5g), which also leaves the
-      #     WSL VM (8 cores / 7g total) enough headroom never to OOM the
-      #     runner process itself. Default CPU share (no reason to
-      #     deprioritize on a box nothing competes with).
+      #   - arm64 == a shared workstation that is also used interactively,
+      #     so CI must never be able to starve foreground work. Budget:
+      #     3 CPUs / 6g, AND a halved cgroup CPU-share weight (512 vs
+      #     docker's default 1024). The weight only costs the container
+      #     CPU when something else is actually contending, so an idle
+      #     host still lets the container burst to its ceiling (fast),
+      #     while active foreground use pushes its share down (invisible).
+      #   - anything else == a dedicated test host (x64, docker-ce on
+      #     Linux), not used interactively, so there is no foreground work
+      #     to protect. Budget: 5 CPUs / 5g, sized to leave the host
+      #     enough headroom never to OOM the runner process itself.
+      #     Default CPU share — nothing competes with it.
       # BETTER_AGENT_TEST_XDIST sets the pytest-xdist worker count
       # (docker_test_xdist_pytest_args in scripts/lib/docker-test-lifecycle.sh
       # turns this into `-n <value> --dist loadfile`) equal to this job's
       # BETTER_AGENT_TEST_CPUS — one worker per whole CPU the container is
-      # capped to, so workers never contend with each other for a core. `--dist loadfile` is what makes this safe: every test in
+      # capped to, so workers never contend with each other for a core.
+      # `--dist loadfile` is what makes this safe: every test in
       # a file stays on one worker PROCESS, so the module-level state leaks
       # this suite has hit before (worker_store attribute leak, unscoped
       # monkeypatches — see git history on backend/scripts/conftest.py and
@@ -130,10 +127,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Owner-set budgets: 40% of the Mac, 70% of the Lenovo. Both
-          # boxes are 8-core, so 3.2 and 5.6 CPUs — taken as whole CPUs
-          # (3 and 5) so the cap never exceeds the budget and the xdist
-          # worker count can match it exactly, one worker per whole CPU.
+          # Whole-CPU budgets so each cap matches its xdist worker count
+          # exactly — one worker per whole CPU (see the rationale above
+          # for why the two runner classes get different budgets).
           if [ "${{ runner.arch }}" = "ARM64" ]; then
             echo "BETTER_AGENT_TEST_CPUS=3" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
