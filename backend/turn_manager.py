@@ -4033,17 +4033,25 @@ class TurnManager:
                         app_session_id[:8],
                     )
 
-                lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
-                    app_session_id,
-                )
-                if lifecycle_msg_id:
+                # Use the lifecycle_message_id THIS call was invoked with
+                # (the caller's turn-owned id, threaded in as a parameter)
+                # instead of re-deriving it from the mutable per-session
+                # `in_flight_lifecycle_msg_id` slot. That slot can already
+                # hold a different turn's id by the time provider spawn
+                # completes, so re-fetching here could mark the WRONG
+                # lifecycle id as sent — leaving THIS turn's own id never
+                # marked sent even though its provider genuinely started
+                # (proven by the `turn_start` event that follows), so a
+                # later cancel/crash misreports it as
+                # `aborted_before_send`.
+                if lifecycle_message_id:
                     # Record delivery BEFORE the emit so a cancel landing
                     # in the emit gap still sees the prompt as sent.
-                    self._c.user_prompt_manager.mark_sent(lifecycle_msg_id)
+                    self._c.user_prompt_manager.mark_sent(lifecycle_message_id)
                     try:
                         await emit_sent(
                             app_session_id=app_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
+                            lifecycle_msg_id=lifecycle_message_id,
                             run_id=run_id,
                             agent_sid=current_session_id,
                         )
