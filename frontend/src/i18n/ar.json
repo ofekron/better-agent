@@ -1266,6 +1266,8 @@
   "message.workerTurnLabel": "عامل",
   "message.subSessionTurnLabel": "جلسة فرعية",
   "message.sessionTurnLabel": "جلسة",
+  "message.eventsCount_one": "حدث {{count}}",
+  "message.eventsCount_other": "{{count}} أحداث",
   "newSession.machineVersionMismatch": "عدم تطابق الإصدار",
   "newSession.machineDirty": "تغييرات محلية",
   "rateLimit.continueOnAnotherProvider": "المتابعة على مزوّد آخر",

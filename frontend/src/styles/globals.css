@@ -10118,7 +10118,10 @@ button.run-badge-clickable:focus-visible {
 /* Message Group (prompt + response)       */
 /* ======================================= */
 
-.turn-group {
+/* `.surface-turn` (native) shares this rule body verbatim with legacy's
+   `.turn-group` — one turn-level rhythm, not a duplicated ruleset. */
+.turn-group,
+.surface-turn {
   margin: 0 auto 22px;
   max-width: var(--conversation-measure);
 }
@@ -10159,8 +10162,12 @@ button.run-badge-clickable:focus-visible {
 }
 
 /* Children of a turn group sit to the right of a vertical line, visually
-   grouping the entire assistant response under the prompt that triggered it. */
-.turn-group-children {
+   grouping the entire assistant response under the prompt that triggered it.
+   `.surface-turn-body` (native — TurnView.tsx: running indicator, body,
+   stopped notice, result, usage) shares this rule body verbatim with
+   legacy's `.turn-group-children`. */
+.turn-group-children,
+.surface-turn-body {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -10170,7 +10177,8 @@ button.run-badge-clickable:focus-visible {
   border-inline-start: 0;
 }
 
-.turn-group-children::before {
+.turn-group-children::before,
+.surface-turn-body::before {
   content: "";
   position: absolute;
   inset-block: 0;
@@ -10184,13 +10192,23 @@ button.run-badge-clickable:focus-visible {
   );
 }
 
-.turn-group.is-running > .user-message-box {
+/* `.surface-turn[data-live="true"]` (TurnView.tsx's own `isLivePhase`
+   result, ALL of chat-panel.md's live phases — queued/starting/running/
+   awaiting_interaction/reconnecting/stopping, state.ts's `LIVE_PHASES` —
+   not just backend phase "running" literally, so this stays correct for
+   every live sub-phase, same authority `isLivePhase`/`RunningIndicator`
+   already use) is the native equivalent of legacy's `.turn-group.is-
+   running` (itself `isStreaming || sessionRunning`, an equally broad
+   "this turn is active" signal, not a single named sub-state). */
+.turn-group.is-running > .user-message-box,
+.surface-turn[data-live="true"] > .user-message-box {
   border-color: color-mix(in srgb, var(--signal-violet) 52%, var(--border-subtle));
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16),
     0 0 0 1px color-mix(in srgb, var(--signal-violet) 10%, transparent);
 }
 
-.turn-group.is-running > .turn-group-children::before {
+.turn-group.is-running > .turn-group-children::before,
+.surface-turn[data-live="true"] > .surface-turn-body::before {
   width: 2px;
   background: linear-gradient(
     to bottom,
@@ -10212,7 +10230,8 @@ button.run-badge-clickable:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .turn-group.is-running > .turn-group-children::before {
+  .turn-group.is-running > .turn-group-children::before,
+  .surface-turn[data-live="true"] > .surface-turn-body::before {
     animation: none;
   }
 }
@@ -10287,7 +10306,14 @@ button.run-badge-clickable:focus-visible {
 
 
 /* Timeline block — a consecutive group of events from one entity. */
-.timeline-block {
+/* `.surface-collapsible` (leaf/Collapsible.tsx — the generic disclosure
+   chrome shared by every native structural container's own collapse
+   control) shares this outer-wrapper rule body verbatim with legacy's
+   `.timeline-block`/`.collapsible-timeline-block` — both are just a
+   bordered flex-column box; per-kind color-coding stays a separate,
+   not-yet-ruled-on question. */
+.timeline-block,
+.surface-collapsible {
   display: flex;
   flex-direction: column;
   margin: 8px 0;
@@ -10406,7 +10432,8 @@ button.run-badge-clickable:focus-visible {
   }
 }
 
-.timeline-block-body {
+.timeline-block-body,
+.surface-collapsible-body {
   padding: 10px 14px;
   border-top: 1px solid var(--border);
   display: flex;
@@ -10428,17 +10455,46 @@ button.run-badge-clickable:focus-visible {
   width: 100%;
 }
 
-.timeline-toggle-header:hover {
+/* `.surface-collapsible-header` — legacy split this same visual role
+   across TWO classes on one button (`.timeline-entity-header`'s flex
+   layout + `.timeline-toggle-header`'s toggle styling, both above); the
+   native header is a single class carrying an arbitrary caller-supplied
+   `header` node next to the caret, so it needs both sets of declarations
+   merged into one rule rather than requiring two class names at the call
+   site. Values copied verbatim from those two legacy rules — border/
+   padding/hover baseline chrome, no new visual language. */
+.surface-collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  cursor: pointer;
+  border: none;
+  padding: 8px 12px;
+  margin: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: calc(12px * var(--app-font-scale));
+  font-weight: 600;
+  text-align: start;
+}
+
+.timeline-toggle-header:hover,
+.surface-collapsible-header:hover {
   background: var(--bg-hover);
 }
 
-.timeline-toggle-header .collapse-arrow {
+.timeline-toggle-header .collapse-arrow,
+.surface-collapsible-header .collapse-arrow {
   font-size: calc(12px * var(--app-font-scale));
   color: var(--text-muted);
   transition: transform 0.15s ease;
+  flex-shrink: 0;
 }
 
-.timeline-toggle-header:hover .collapse-arrow {
+.timeline-toggle-header:hover .collapse-arrow,
+.surface-collapsible-header:hover .collapse-arrow {
   color: var(--accent);
 }
 
@@ -14219,6 +14275,61 @@ button.run-badge-clickable:focus-visible {
   .auto-action-group-count,
   .auto-action-group-body-shell,
   .auto-action-group-body {
+    transition: none;
+  }
+}
+
+/* ======================================= */
+/* Native surface — Explanation container   */
+/* ======================================= */
+
+/* `.surface-explanation` — chat-panel.md's Explanation (Text? + Item*):
+   the box that visually groups a turn's own leading assistant text with
+   the burst of tool/thinking/failure/etc. items that follow it before the
+   next AssistantText boundary (nodes/Container.tsx's `ExplanationView`).
+   DOM containment for this level was always correct (backend derive.py's
+   `derive_body` real parent_id nesting, `attach_body_items`) — this
+   container simply carried no CSS of its own, so a correctly-nested group
+   of items rendered flush with its surrounding siblings, indistinguishable
+   from an unstyled flat list (the "lost nesting" regression). Reuses
+   `.auto-action-group`'s box language (the closest legacy analog — a
+   burst-of-items group) rather than a bespoke ruleset, since an
+   Explanation plays the identical "group these items visually" role, now
+   generically for any Item kind instead of only tool-call bursts. */
+.surface-explanation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-inline-start: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-secondary) 86%, transparent);
+  min-width: 0;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+/* Extended/live explanation gets the same subtle "open" emphasis
+   `.auto-action-group.open` uses; collapsed stays the plain box above. */
+.surface-explanation[data-mode="extended"],
+.surface-explanation[data-mode="live"] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+/* The leading assistant text sits flush with the box's own padding —
+   MessageBox's own `margin: 5px 0` would otherwise double up with the
+   flex `gap` above it. */
+.surface-explanation > [data-testid="surface-assistant-text"] .message-box {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface-explanation {
     transition: none;
   }
 }

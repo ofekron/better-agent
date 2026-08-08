@@ -1266,6 +1266,8 @@
   "message.workerTurnLabel": "Worker",
   "message.subSessionTurnLabel": "Sous-session",
   "message.sessionTurnLabel": "Session",
+  "message.eventsCount_one": "{{count}} événement",
+  "message.eventsCount_other": "{{count}} événements",
   "newSession.machineVersionMismatch": "version différente",
   "newSession.machineDirty": "modifications locales",
   "rateLimit.continueOnAnotherProvider": "Continuer avec un autre fournisseur",

@@ -64,8 +64,13 @@ export function CollapsibleBlock({
         aria-label={open ? (t("message.collapseMessageAria") as string) : (t("message.expandMessageAria") as string)}
         style={{ minHeight: 44, minWidth: 44 }}
       >
-        <span className="surface-collapsible-caret" aria-hidden="true">
-          {open ? "▾" : "▸"}
+        {/* App-wide caret glyphs (`▶`/`▼`) and `.collapse-arrow` class,
+         * matching every other collapsible in the app (legacy's
+         * `CollapsibleTimelineBlock`/`.sub-agent-header`/
+         * `.auto-action-group-header`) rather than a distinct glyph
+         * family. */}
+        <span className="collapse-arrow" aria-hidden="true">
+          {open ? "▼" : "▶"}
         </span>
         {header}
       </button>

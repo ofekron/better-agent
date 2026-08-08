@@ -1266,6 +1266,8 @@
   "message.workerTurnLabel": "Worker",
   "message.subSessionTurnLabel": "Unter-Sitzung",
   "message.sessionTurnLabel": "Sitzung",
+  "message.eventsCount_one": "{{count}} Ereignis",
+  "message.eventsCount_other": "{{count}} Ereignisse",
   "newSession.machineVersionMismatch": "Versionskonflikt",
   "newSession.machineDirty": "lokale Änderungen",
   "rateLimit.continueOnAnotherProvider": "Bei anderem Anbieter fortsetzen",
