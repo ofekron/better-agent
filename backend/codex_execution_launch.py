@@ -207,8 +207,17 @@ def pinned_launch(chain: LaunchChain) -> Iterator[PinnedLaunch]:
         # The /proc/self/fd fast path launches argv[0] with no real parent
         # directory, so a sibling binary resolved by codex relative to its
         # own executable's directory could never be found there. Only take
-        # this path when there is no sibling to co-locate.
-        if not chain.sibling_components and Path("/proc/self/fd").is_dir():
+        # this path when there is no sibling to co-locate. Shebang mode's
+        # interpreter component (position 0) must still pass
+        # `_trusted_system_interpreter` before it can be pinned and
+        # executed; that gate only runs in the tempdir path below, so
+        # shebang launches always go through it instead of the fd
+        # fast path, which has no mechanism to enforce the gate.
+        if (
+            chain.mode != "shebang"
+            and not chain.sibling_components
+            and Path("/proc/self/fd").is_dir()
+        ):
             argv = list(chain.argv_prefix)
             for index, fd in zip(chain.component_argv_indexes, handles):
                 argv[index] = f"/proc/self/fd/{fd}"
