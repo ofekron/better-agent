@@ -91,6 +91,8 @@ class _Coordinator:
 
 
 async def _run_tests() -> None:
+    import config_store
+
     sessions = _SessionManager()
     coordinator = _Coordinator(sessions)
     fake_session_module = type(sys)("session_manager")
@@ -103,6 +105,15 @@ async def _run_tests() -> None:
         manager.ensure_caller,
         manager.dispatch,
     )
+    # _Spec.build_config() pins a synthetic fork-mode provider_id ("provider")
+    # that isn't registered in config_store; resolve_config's fork-capability
+    # check (provisioning/config.py::_validate_config) would otherwise reject
+    # it before any lifecycle logic under test runs.
+    original_resolve_provider_ref = config_store.resolve_provider_ref
+    config_store.resolve_provider_ref = lambda provider_id: {
+        "id": provider_id,
+        "supports_fork": True,
+    }
     dispatches: list[str] = []
 
     async def _dispatch(_spec, _cfg, *, base_session_id, caller_session_id, **_kwargs):
@@ -195,6 +206,7 @@ async def _run_tests() -> None:
         await manager.run(spec, "off-loop")
         assert lifecycle_threads and lifecycle_threads[-1] != loop_thread
     finally:
+        config_store.resolve_provider_ref = original_resolve_provider_ref
         manager.ensure_session, manager.ensure_caller, manager.dispatch = saved
         old_session, old_main = saved_modules
         if old_session is None:
