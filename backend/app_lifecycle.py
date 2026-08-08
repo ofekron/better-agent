@@ -360,7 +360,12 @@ async def on_startup():
         not os.environ.get("BETTER_AGENT_TEST_MODE")
         and installation_profile.integrations_enabled()
     ):
-        await asyncio.to_thread(session_store.start_root_change_owner)
+        # 60s: the owner's initial storage scan is load-sensitive; a tight
+        # readiness bound turns a slow-but-healthy boot into a hard
+        # STARTUP_FAILURE loop (observed 2026-08-08 at machine load 100).
+        await asyncio.to_thread(
+            session_store.start_root_change_owner, 60.0,
+        )
     session_manager.start_persistence()
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
