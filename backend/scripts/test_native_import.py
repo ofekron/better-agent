@@ -137,11 +137,15 @@ def test_claude_enumerate_and_import():
     )
     assert loaded.get("last_active_runner") == "native"
 
-    # The stamp marks the native session BA-managed, so it must drop out
-    # of subsequent enumeration instead of being re-offered for import.
+    # Stamping the native sid for continuation must NOT hide the session:
+    # an imported conversation is a real user conversation, not a BA-spawned
+    # orchestration artifact, so it stays enumerated. The import registry —
+    # not `_ba_managed_native_ids` — is the single authority on "already
+    # imported", and it is what keeps a re-import idempotent (see
+    # `test_idempotent_reimport`) and what the import job counts as skipped.
     again = native_import.enumerate_native_sessions([PROVIDER_ID])
-    assert not any(s.native_id == sid for s in again), (
-        "stamped native session re-enumerated as importable"
+    assert any(s.native_id == sid for s in again), (
+        "imported native session dropped out of enumeration"
     )
     return sess, root_id
 

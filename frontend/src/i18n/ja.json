@@ -1266,6 +1266,7 @@
   "message.workerTurnLabel": "ワーカー",
   "message.subSessionTurnLabel": "サブセッション",
   "message.sessionTurnLabel": "セッション",
+  "message.teamModeLabel": "チーム",
   "message.eventsCount_one": "{{count}} 件のイベント",
   "message.eventsCount_other": "{{count}} 件のイベント",
   "newSession.machineVersionMismatch": "バージョン不一致",

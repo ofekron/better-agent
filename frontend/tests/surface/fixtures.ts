@@ -42,8 +42,15 @@ export function turnNode(
   turnId: string,
   manifest: ChildManifestWire = { renderable_child_count: 0, has_children: false },
   surfaceId: string = SESSION,
+  /** Team-vs-native turn chip source (backend `nodes.py`'s `Node.
+   * orchestration_mode`) — trailing optional param, same append-without-
+   * breaking-existing-callers convention `promptNode`'s `intentId` used. */
+  orchestrationMode: string | null = null,
 ): NodeWire {
-  return node({ node_id: `turn:${turnId}`, turn_id: turnId, kind: "turn", child_manifest: manifest, surface_id: surfaceId });
+  return node({
+    node_id: `turn:${turnId}`, turn_id: turnId, kind: "turn", child_manifest: manifest, surface_id: surfaceId,
+    orchestration_mode: orchestrationMode,
+  });
 }
 
 /** `intentId` (trailing, optional, default null matching every pre-existing

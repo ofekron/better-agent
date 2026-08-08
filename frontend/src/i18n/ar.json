@@ -1266,6 +1266,7 @@
   "message.workerTurnLabel": "عامل",
   "message.subSessionTurnLabel": "جلسة فرعية",
   "message.sessionTurnLabel": "جلسة",
+  "message.teamModeLabel": "فريق",
   "message.eventsCount_one": "حدث {{count}}",
   "message.eventsCount_other": "{{count}} أحداث",
   "newSession.machineVersionMismatch": "عدم تطابق الإصدار",

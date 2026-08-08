@@ -247,7 +247,66 @@ async def _run() -> bool:
         "streaming reconnect snapshot rebuilds worker panels before watermark",
         str(streaming_msg),
     ) and ok
+
+    ok = await _check_sync_write_then_barrier(sid) and ok
     return ok
+
+
+async def _check_sync_write_then_barrier(sid: str) -> bool:
+    """A synchronous journal write followed by the sync barrier must find
+    its row already folded — the case `native_import.import_session` runs.
+
+    `submit_event_sync` acks as soon as the writer thread commits the row,
+    then hands the `EVENT_JOURNAL_WRITTEN` publish to the bound loop
+    fire-and-forget. So the drainer command reliably lands AFTER the
+    writing thread has already called the barrier. Barriering the drainer
+    alone found no state for the root and returned having waited for
+    nothing, leaving `msg.events` empty — which `import_session` reads as
+    "no importable events" and tears the session down. Asserted with no
+    polling or sleeps on purpose: the barrier must be deterministic, not
+    merely likely.
+    """
+    from event_bus_subscribers import await_session_content_projection_sync
+    from event_journal import publish_event_sync
+
+    msg_id = "msg-sync-barrier"
+    session_manager.append_assistant_msg(
+        sid, {"id": msg_id, "role": "assistant", "content": "", "events": []},
+    )
+
+    def _journal_then_barrier() -> None:
+        publish_event_sync(
+            session_id=sid,
+            context_id=sid,
+            event_type="agent_message",
+            data={
+                "uuid": "sync-barrier-row",
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "sync"}]},
+            },
+            source="native_import",
+            message_id=msg_id,
+        )
+        await_session_content_projection_sync(sid)
+
+    # Off the loop: the barrier blocks, and the fold it waits on can only
+    # be driven by the loop this coroutine is running on.
+    await asyncio.to_thread(_journal_then_barrier)
+
+    folded = session_manager.get(sid) or {}
+    folded_msg = next(
+        (m for m in folded.get("messages") or [] if m.get("id") == msg_id),
+        {},
+    )
+    uuids = [
+        (event.get("data") or {}).get("uuid")
+        for event in folded_msg.get("events") or []
+    ]
+    return _check(
+        uuids == ["sync-barrier-row"],
+        "sync journal write is folded before the sync barrier returns",
+        str(folded_msg),
+    )
 
 
 def main() -> int:

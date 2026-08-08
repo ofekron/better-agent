@@ -25,6 +25,7 @@ ROOT = Path(__file__).parents[1]
 _API_MODULES = (
     "main.py",
     "ws_chat.py",
+    "ws_outbox.py",
     "surface_commands.py",
     "machine_nodes_api.py",
     "user_prefs_api.py",
@@ -171,9 +172,7 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     monitor_source = source[monitor_start:monitor_end]
     assert 'logger.warning("event loop lag %.3fs", lag)' in monitor_source
 
-    outbox_start = source.index("class _WebSocketOutbox:")
-    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
-    outbox_source = source[outbox_start:outbox_end]
+    outbox_source = (ROOT / "ws_outbox.py").read_text(encoding="utf-8")
     assert "logger.warning(" in outbox_source
     assert '"slow WebSocket send type=%s elapsed_ms=%.1f"' in outbox_source
 
@@ -249,9 +248,7 @@ def test_queued_logging_does_not_block_caller_on_slow_handler() -> None:
 
 def test_websocket_json_serializes_off_loop() -> None:
     source = _api_source()
-    outbox_start = source.index("class _WebSocketOutbox:")
-    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
-    outbox_source = source[outbox_start:outbox_end]
+    outbox_source = (ROOT / "ws_outbox.py").read_text(encoding="utf-8")
     ws_start = source.index("async def ws_callback(event_dict):")
     ws_end = source.index("# Per-connection token", ws_start)
     ws_source = source[ws_start:ws_end]
@@ -2259,7 +2256,7 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
     ]
     shutdown_source = main_source[main_source.index("async def on_shutdown()") :]
     assert startup_source.index(
-        "await asyncio.to_thread(session_store.start_root_change_owner)"
+        "await asyncio.to_thread(\n            session_store.start_root_change_owner,"
     ) < startup_source.index("session_manager.start_persistence()")
     assert pipeline_source.index(
         "await asyncio.to_thread(session_manager.shutdown_persistence)"

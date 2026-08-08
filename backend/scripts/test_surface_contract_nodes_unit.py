@@ -1,8 +1,8 @@
 """Dedicated authoritative owner for `surface_contract/nodes.py` (ADR 0006 §1).
 
 The module is the closed, versioned serialization of the chat-panel.md
-content-plane grammar: eleven StrEnums, three structural frozensets, an
-eighteen-member payload union, and the core Node/Run/Approval/Sidecar
+content-plane grammar: fourteen StrEnums, three structural frozensets, a
+nineteen-member payload union, and the core Node/Run/UserInteraction/Sidecar
 dataclasses. Importing the module executes every definition (so incidental
 line coverage reads ~100%), but nothing asserts the contract. This owner
 locks every invariant so a dropped enum member, a drifted frozenset, or a
@@ -30,8 +30,7 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc-test-surface-contract-nodes-unit-")
 
 from backend.surface_contract.nodes import (  # noqa: E402
-    Approval,
-    ApprovalState,
+    ApprovalDecision,
     AssistantTextPayload,
     Attachment,
     ChildManifest,
@@ -39,12 +38,16 @@ from backend.surface_contract.nodes import (  # noqa: E402
     CompactionPayload,
     ContentStatus,
     ContinuationSessionPayload,
+    DELEGATE_CHOICE_REF_PREFIX,
     DiagnosticCode,
     DiagnosticPayload,
     FactPayload,
     FailurePayload,
+    FailureResolution,
+    FailureSeverity,
     HarnessChangePayload,
     InstructionWidgetPayload,
+    interaction_fact_payload,
     LifecycleNoticeKind,
     LifecycleNoticePayload,
     ModelChangePayload,
@@ -62,14 +65,22 @@ from backend.surface_contract.nodes import (  # noqa: E402
     SteeringMessagePayload,
     STRUCTURAL_KINDS,
     SUBAGENT_TURN_KINDS,
+    SubAgentTurnPayload,
     TargetRef,
     ThinkingPayload,
     ToolInteractionPayload,
+    TOOL_APPROVAL_REF_PREFIX,
     TypedPromptPayload,
     UnknownPayload,
-    UserInteractionState,
+    Usage,
+    usage_from_raw,
+    UserInteraction,
+    UserInteractionKind,
     UserInteractionPayload,
+    UserInteractionState,
+    WORKER_APPROVAL_REF_PREFIX,
     WorkerInteractionPayload,
+    USER_INPUT_REF_PREFIX,
 )
 
 
@@ -143,6 +154,7 @@ def test_send_mode_membership_and_values():
         "QUEUE": "queue",
         "INTERRUPT": "interrupt",
         "STEER": "steer",
+        "ALTER": "alter",
     }
 
 
@@ -175,10 +187,26 @@ def test_small_enums_membership_and_values():
         "RESOLVED": "resolved",
         "CANCELLED": "cancelled",
     }
-    assert _members(ApprovalState) == {
-        "PENDING": "pending",
-        "APPROVED": "approved",
-        "DENIED": "denied",
+    assert _members(UserInteractionKind) == {
+        "APPROVAL": "approval",
+        "CHOICE": "choice",
+        "INPUT": "input",
+    }
+    assert _members(ApprovalDecision) == {
+        "APPROVE": "approve",
+        "DENY": "deny",
+    }
+    assert _members(FailureSeverity) == {
+        "INFO": "info",
+        "WARNING": "warning",
+        "ERROR": "error",
+    }
+    assert _members(FailureResolution) == {
+        "NONE": "none",
+        "RETRY": "retry",
+        "FIX_CREDENTIAL": "fix_credential",
+        "CHOOSE_FALLBACK": "choose_fallback",
+        "OPEN_SETTINGS": "open_settings",
     }
 
 
@@ -264,6 +292,7 @@ def test_node_payload_union_membership():
         LifecycleNoticePayload,
         FactPayload,
         UnknownPayload,
+        SubAgentTurnPayload,
         type(None),
     }
     assert set(typing.get_args(NodePayload)) == expected
@@ -314,21 +343,28 @@ def test_tool_interaction_payload_fields_and_defaults():
         "tool_name",
         "args",
         "result",
-        "approval_ref",
+        "interaction_ref",
         "ui_kind",
         "derived_view",
     ]
     _assert_frozen_slots(ToolInteractionPayload)
     d = _field_defaults(ToolInteractionPayload)
     assert d["result"] is None
-    assert d["approval_ref"] is None
+    assert d["interaction_ref"] is None
     assert d["ui_kind"] is None
     assert d["derived_view"] is None
 
 
-def test_steering_message_payload_fields():
-    assert _field_names(SteeringMessagePayload) == ["text", "target"]
+def test_steering_message_payload_fields_and_defaults():
+    assert _field_names(SteeringMessagePayload) == ["text", "target", "attachments"]
     _assert_frozen_slots(SteeringMessagePayload)
+    assert _field_defaults(SteeringMessagePayload)["attachments"] == ()
+
+
+def test_subagent_turn_payload_fields_and_defaults():
+    assert _field_names(SubAgentTurnPayload) == ["label", "created"]
+    _assert_frozen_slots(SubAgentTurnPayload)
+    assert _field_defaults(SubAgentTurnPayload)["created"] is False
 
 
 def test_model_change_payload_fields():
@@ -353,9 +389,12 @@ def test_worker_interaction_payload_fields():
     _assert_frozen_slots(WorkerInteractionPayload)
 
 
-def test_result_payload_fields():
-    assert _field_names(ResultPayload) == ["result_kind"]
+def test_result_payload_fields_and_defaults():
+    assert _field_names(ResultPayload) == ["result_kind", "text", "is_error"]
     _assert_frozen_slots(ResultPayload)
+    d = _field_defaults(ResultPayload)
+    assert d["text"] is None
+    assert d["is_error"] is False
 
 
 def test_compaction_payload_fields_and_defaults():
@@ -375,9 +414,20 @@ def test_continuation_session_payload_fields_and_defaults():
 
 
 def test_failure_payload_fields_and_defaults():
-    assert _field_names(FailurePayload) == ["code", "text", "data"]
+    assert _field_names(FailurePayload) == [
+        "code",
+        "text",
+        "data",
+        "severity",
+        "retryable",
+        "resolution",
+    ]
     _assert_frozen_slots(FailurePayload)
-    assert _field_defaults(FailurePayload)["data"] is None
+    d = _field_defaults(FailurePayload)
+    assert d["data"] is None
+    assert d["severity"] == FailureSeverity.ERROR
+    assert d["retryable"] is False
+    assert d["resolution"] == FailureResolution.NONE
 
 
 def test_diagnostic_payload_fields_and_defaults():
@@ -386,12 +436,12 @@ def test_diagnostic_payload_fields_and_defaults():
     assert _field_defaults(DiagnosticPayload)["data"] is None
 
 
-def test_user_interaction_payload_fields_and_defaults():
-    assert _field_names(UserInteractionPayload) == ["kind", "request", "state", "response"]
+def test_user_interaction_payload_fields():
+    # Render anchor only — carries no state/kind of its own; resolves via
+    # the UserInteraction resource keyed by interaction_ref.
+    assert _field_names(UserInteractionPayload) == ["interaction_ref"]
     _assert_frozen_slots(UserInteractionPayload)
-    d = _field_defaults(UserInteractionPayload)
-    assert d["state"] == UserInteractionState.PENDING
-    assert d["response"] is None
+    assert _field_defaults(UserInteractionPayload) == {"interaction_ref": dataclasses.MISSING}
 
 
 def test_lifecycle_notice_payload_fields_and_defaults():
@@ -411,21 +461,111 @@ def test_unknown_payload_fields():
 
 
 def test_attachment_fields():
-    assert _field_names(Attachment) == ["name", "media_type", "ref"]
+    assert _field_names(Attachment) == ["name", "media_type", "ref", "size"]
     _assert_frozen_slots(Attachment)
+    # None when byte size is not cheaply derivable — never a guessed/zero
+    # placeholder.
+    assert _field_defaults(Attachment)["size"] is None
 
 
-def test_target_ref_fields():
+def test_target_ref_fields_and_defaults():
     assert _field_names(TargetRef) == ["session_id", "turn_id"]
     _assert_frozen_slots(TargetRef)
+    # None when only the target session is known and no turn is resolvable
+    # yet — never fabricated.
+    assert _field_defaults(TargetRef)["turn_id"] is None
 
 
 # ------------------------------------------------------ core node dataclasses
 
 
 def test_child_manifest_fields():
-    assert _field_names(ChildManifest) == ["renderable_child_count", "has_children"]
+    assert _field_names(ChildManifest) == [
+        "renderable_child_count",
+        "has_children",
+        "started_ts",
+        "ended_ts",
+    ]
     _assert_frozen_slots(ChildManifest)
+    # Group time span (earliest/latest member ts) — both None only when the
+    # container has no children at all, never a guessed/zero ts.
+    d = _field_defaults(ChildManifest)
+    assert d["started_ts"] is None
+    assert d["ended_ts"] is None
+
+
+def test_usage_fields_and_defaults():
+    assert _field_names(Usage) == [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    _assert_frozen_slots(Usage)
+    d = _field_defaults(Usage)
+    assert d["cache_creation_input_tokens"] is None
+    assert d["cache_read_input_tokens"] is None
+
+
+def test_usage_from_raw_non_dict_is_none():
+    assert usage_from_raw(None) is None
+    assert usage_from_raw("not a dict") is None
+    assert usage_from_raw(42) is None
+
+
+def test_usage_from_raw_empty_dict_is_all_none():
+    usage = usage_from_raw({})
+    assert usage == Usage(
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
+
+
+def test_usage_from_raw_derives_total_only_when_both_present():
+    assert usage_from_raw({"input_tokens": 10}).total_tokens is None
+    assert usage_from_raw({"output_tokens": 5}).total_tokens is None
+    usage = usage_from_raw({"input_tokens": 10, "output_tokens": 5})
+    assert usage.total_tokens == 15
+
+
+def test_usage_from_raw_full_shape():
+    usage = usage_from_raw(
+        {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_creation_input_tokens": 3,
+            "cache_read_input_tokens": 7,
+        }
+    )
+    assert usage == Usage(
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        cache_creation_input_tokens=3,
+        cache_read_input_tokens=7,
+    )
+
+
+def test_usage_from_raw_ignores_non_int_fields():
+    usage = usage_from_raw(
+        {
+            "input_tokens": "10",
+            "output_tokens": None,
+            "cache_creation_input_tokens": "3",
+            "cache_read_input_tokens": None,
+        }
+    )
+    assert usage == Usage(
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
 
 
 def test_node_fields_and_defaults():
@@ -444,6 +584,8 @@ def test_node_fields_and_defaults():
         "sidecar_ref",
         "target_ref",
         "child_manifest",
+        "usage",
+        "orchestration_mode",
     ]
     _assert_frozen_slots(Node)
     d = _field_defaults(Node)
@@ -454,6 +596,8 @@ def test_node_fields_and_defaults():
         "sidecar_ref",
         "target_ref",
         "child_manifest",
+        "usage",
+        "orchestration_mode",
     ):
         assert d[name] is None
 
@@ -492,15 +636,58 @@ def test_run_fields():
     _assert_frozen_slots(Run)
 
 
-def test_approval_fields():
-    assert _field_names(Approval) == [
-        "approval_ref",
-        "subject",
-        "summary",
-        "risk_scope",
+def test_user_interaction_resource_fields_and_defaults():
+    # Session-scoped cross-cutting resource — the parent of every
+    # UserInteraction kind (approval/choice/input); request/response are
+    # kind-shaped dicts, not a per-kind dataclass union.
+    assert _field_names(UserInteraction) == [
+        "interaction_ref",
+        "kind",
+        "request",
         "state",
+        "response",
     ]
-    _assert_frozen_slots(Approval)
+    _assert_frozen_slots(UserInteraction)
+    assert _field_defaults(UserInteraction)["response"] is None
+
+
+def test_interaction_ref_prefixes():
+    assert TOOL_APPROVAL_REF_PREFIX == "tool_approval:"
+    assert WORKER_APPROVAL_REF_PREFIX == "worker_approval:"
+    assert DELEGATE_CHOICE_REF_PREFIX == "delegate_choice:"
+    assert USER_INPUT_REF_PREFIX == "user_input:"
+
+
+def test_interaction_fact_payload_without_response():
+    payload = interaction_fact_payload(
+        "tool_approval:abc",
+        UserInteractionKind.APPROVAL,
+        {"subject": "run rm"},
+    )
+    assert payload == {
+        "interaction_ref": "tool_approval:abc",
+        "kind": "approval",
+        "request": {"subject": "run rm"},
+        "state": "pending",
+    }
+    assert "response" not in payload
+
+
+def test_interaction_fact_payload_with_response():
+    payload = interaction_fact_payload(
+        "tool_approval:abc",
+        UserInteractionKind.APPROVAL,
+        {"subject": "run rm"},
+        state=UserInteractionState.RESOLVED,
+        response={"decision": ApprovalDecision.APPROVE.value},
+    )
+    assert payload == {
+        "interaction_ref": "tool_approval:abc",
+        "kind": "approval",
+        "request": {"subject": "run rm"},
+        "state": "resolved",
+        "response": {"decision": "approve"},
+    }
 
 
 def test_sidecar_fields_and_default_factory():

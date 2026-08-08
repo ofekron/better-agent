@@ -42,13 +42,34 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   frontend/scripts/cap-sync.mjs (withMobilePackageJson /
 #   assertNativeRunnerProjection). cap-sync.mjs uses only node: builtins,
 #   so the binary alone suffices — no frontend build, no node_modules.
+# patchelf: rewrites the interpreter's ELF RUNPATH below.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git \
       build-essential \
       libffi-dev \
       nodejs \
+      patchelf \
  && rm -rf /var/lib/apt/lists/*
+
+# Debian's official python:3.13-slim builds CPython as a shared library and
+# tags the interpreter with a $ORIGIN-relative RUNPATH ($ORIGIN/../lib) so it
+# finds its co-located libpython*.so without an absolute path baked in. That
+# shape fails backend/provider_binary_relocatability.py's ELF relocatability
+# check (by design: a single-file copy of an interpreter — materialize_sdk_
+# launch's model for materializing an untrusted shebang interpreter — would
+# resolve $ORIGIN relative to the copy's own location, not the original
+# directory, either failing to find libpython or resolving one from an
+# attacker-controlled path). backend/scripts/test_claude_execution_artifact.py
+# shebangs its fixture "claude" CLI to sys.executable and exercises the real
+# materialize-and-validate path, so it needs a genuinely relocatable
+# interpreter here, not a weakened check. libpython's own location is fixed
+# and absolute regardless of where the interpreter binary gets copied, so
+# repointing the RUNPATH at that absolute path (instead of leaving it
+# $ORIGIN-relative) makes the interpreter actually safe to copy — a real fix
+# to the interpreter's relocatability, not a test-only bypass.
+RUN PYTHON_BIN="$(readlink -f "$(command -v python3)")" \
+ && patchelf --set-rpath /usr/local/lib "$PYTHON_BIN"
 
 WORKDIR /repo
 

@@ -3996,6 +3996,8 @@ def _install_public_package_snapshot(
     package_dir: Path,
     package_sha: str,
     repo_root: Path,
+    *,
+    source_type: str = "better_agent_bundled",
 ) -> dict[str, Any]:
     manifest_path = package_dir / "better-agent-extension.json"
     if not manifest_path.exists():
@@ -4020,7 +4022,7 @@ def _install_public_package_snapshot(
         "installed_at": now,
         "updated_at": now,
         "source": {
-            "type": "better_agent_bundled",
+            "type": source_type,
             "repo_url": str(repo_root),
             "extension_path": _PUBLIC_EXTENSION_PATHS[extension_id],
             "ref": "",
@@ -4181,17 +4183,49 @@ def _install_required_marketplace_from_ofekdev(extension_id: str) -> dict[str, A
     return record
 
 
+def _bootstrap_required_marketplace_extension(data: dict[str, Any], extension_id: str) -> bool:
+    """Local bundling is unavailable for a REQUIRED_EXTENSION_IDS member (no
+    configured private checkout, and BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE
+    ruled out this repo's own bundled copy). Fall back to the hosted signed
+    artifact; if even that's unreachable, install a visible placeholder error
+    record so the gap is surfaced instead of silently leaving the extension
+    unregistered."""
+    record = data["extensions"].get(extension_id)
+    if record and record.get("source", {}).get("type") not in {"better_agent_bundled", "private_placeholder", ""}:
+        return False
+    try:
+        installed = _install_required_marketplace_from_ofekdev(extension_id)
+    except ExtensionError as exc:
+        installed = _placeholder_record(extension_id, source_type="private_placeholder", error=str(exc))
+    data["extensions"][extension_id] = installed
+    return True
+
+
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
     changed = False
     default_repo_root = _repo_root()
+    required_default_repo_root = _local_required_marketplace_repo_root()
     configured_repo_root = _required_marketplace_repo_root()
     deleted = set((data.get("deleted_extensions") or {}).keys())
     for extension_id, extension_path in _PUBLIC_EXTENSION_PATHS.items():
         if extension_id in _OBSOLETE_EXTENSION_IDS or extension_id in deleted:
             continue
+        required = extension_id in REQUIRED_EXTENSION_IDS
         repo_root = configured_repo_root
         if repo_root is None or not (repo_root / extension_path).exists():
-            repo_root = default_repo_root
+            repo_root = required_default_repo_root if required else default_repo_root
+        if repo_root is None:
+            # Required extension, local bundling disabled, no configured
+            # private checkout providing it -- bootstrap from a signed
+            # artifact instead of a local package.
+            if _bootstrap_required_marketplace_extension(data, extension_id):
+                changed = True
+            continue
+        source_type = (
+            "better_agent_local"
+            if configured_repo_root is not None and repo_root == configured_repo_root
+            else "better_agent_bundled"
+        )
         package_dir = (repo_root / extension_path).resolve()
         if not package_dir.is_relative_to(repo_root):
             raise ExtensionError("Public extension path escapes repository root")
@@ -4206,6 +4240,7 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
         if (
             record
             and source.get("type") == "better_agent_bundled"
+            and source_type == "better_agent_bundled"
             and source.get("commit_sha") == package_sha
             and install_path_text
             and Path(install_path_text).exists()
@@ -4215,7 +4250,7 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
         install_error = False
         try:
             installed = _install_public_package_snapshot(
-                extension_id, package_dir, package_sha, repo_root
+                extension_id, package_dir, package_sha, repo_root, source_type=source_type
             )
         except Exception as exc:
             # Isolate the failure to this extension. An exception escaping here

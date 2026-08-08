@@ -386,6 +386,7 @@ def _build_turn_view(
     rows: list[dict],
     produced_by_row: list[list[Node]],
     prompt_meta: dict[str, dict] | None = None,
+    orchestration_mode: str | None = None,
 ) -> _TurnView:
     boundary_seq = _row_seq(rows[0])
     raw_nodes, is_sidechain = _finish_normalize(surface_id, turn_id, rows, produced_by_row, prompt_meta)
@@ -429,7 +430,10 @@ def _build_turn_view(
         body_source_raw, is_sidechain, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
     )
 
-    derived = _derive.derive_turn(turn_id, body_source, surface_id=surface_id, cv=CONTRACT_VERSION)
+    derived = _derive.derive_turn(
+        turn_id, body_source, surface_id=surface_id, cv=CONTRACT_VERSION,
+        orchestration_mode=orchestration_mode,
+    )
     turn_node = replace(derived["turn"], parent_id=surface_id)
     prompt = replace(derived["prompt"], parent_id=turn_node.node_id) if derived["prompt"] else None
     result_nodes = derived["result"]
@@ -641,6 +645,18 @@ class ChatSurfaceAdapter(ChatSurface):
 
     # ---- read plane ------------------------------------------------
 
+    @staticmethod
+    def _session_orchestration_mode(session_id: SessionId) -> str | None:
+        """The owning session's frozen `orchestration_mode` — read fresh
+        (no caching: `store_access.get_session_record` is an in-memory
+        lookup, and this value never actually changes for a given
+        `session_id` once the record exists, so caching would add
+        invalidation complexity for zero staleness benefit). None when the
+        session record can't be resolved (e.g. a race with session
+        deletion) — never guessed."""
+        record = store_access.get_session_record(session_id)
+        return record.orchestration_mode if record is not None else None
+
     def open_session(self, session_id: SessionId) -> ProjectionResult[CompactSessionSnapshot]:
         # Only the compact window's turns are ever rendered by this
         # response — building a full `_TurnView` (derive_turn/derive_body,
@@ -654,7 +670,8 @@ class ChatSurfaceAdapter(ChatSurface):
             return fast
         segments, prompt_meta = self._all_segments(session_id)
         window_segments = segments[-_COMPACT_TURN_WINDOW:]
-        window = self._build_turns(session_id, window_segments, prompt_meta)
+        orchestration_mode = self._session_orchestration_mode(session_id)
+        window = self._build_turns(session_id, window_segments, prompt_meta, orchestration_mode)
         older_cursor = None
         if len(segments) > len(window_segments):
             older_cursor = PageCursor(
@@ -727,7 +744,10 @@ class ChatSurfaceAdapter(ChatSurface):
         trailing_segments = _segment_turns(trailing_rows)
         if not trailing_segments or trailing_segments[-1][0] != trailing_turn_id:
             return None  # a live-path race outran this read — fall back rather than risk a mismatch
-        trailing_view = _build_turn_view(session_id, *trailing_segments[-1], prompt_meta)
+        trailing_view = _build_turn_view(
+            session_id, *trailing_segments[-1], prompt_meta,
+            self._session_orchestration_mode(session_id),
+        )
         window = [self._compact_from_indexed(t) for t in settled] + [_to_compact(trailing_view)]
         oldest_boundary = settled[0].boundary_seq if settled else trailing_view.boundary_seq
         older_cursor = None
@@ -818,7 +838,8 @@ class ChatSurfaceAdapter(ChatSurface):
         segments, prompt_meta = self._all_segments(cursor.surface_id)
         eligible_segments = [s for s in segments if _row_seq(s[1][0]) < boundary]
         page_segments = eligible_segments[-_COMPACT_TURN_WINDOW:]
-        page = self._build_turns(cursor.surface_id, page_segments, prompt_meta)
+        orchestration_mode = self._session_orchestration_mode(cursor.surface_id)
+        page = self._build_turns(cursor.surface_id, page_segments, prompt_meta, orchestration_mode)
         next_cursor = None
         if len(eligible_segments) > len(page_segments):
             next_cursor = PageCursor(
@@ -1036,15 +1057,17 @@ class ChatSurfaceAdapter(ChatSurface):
     @staticmethod
     def _build_turns(
         surface_id: SurfaceId, segments: list[_TurnSegment], prompt_meta: dict[str, dict],
+        orchestration_mode: str | None = None,
     ) -> list[_TurnView]:
         return [
-            _build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta)
+            _build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta, orchestration_mode)
             for turn_id, seg_rows, seg_produced in segments
         ]
 
     def _all_turns(self, surface_id: SurfaceId) -> list[_TurnView]:
         segments, prompt_meta = self._all_segments(surface_id)
-        return self._build_turns(surface_id, segments, prompt_meta)
+        orchestration_mode = self._session_orchestration_mode(surface_id)
+        return self._build_turns(surface_id, segments, prompt_meta, orchestration_mode)
 
     @staticmethod
     def _read_all_rows(
@@ -1161,7 +1184,8 @@ class ChatSurfaceAdapter(ChatSurface):
         # the previous (settled) turn's row range, which `rows` already
         # covers as a safety margin at no extra read cost.
         prompt_meta = _collect_prompt_meta(rows)
-        return [_build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta)]
+        orchestration_mode = self._session_orchestration_mode(surface_id)
+        return [_build_turn_view(surface_id, turn_id, seg_rows, seg_produced, prompt_meta, orchestration_mode)]
 
     # ---- internals: live fact handlers ----------------------------------
 
@@ -1483,7 +1507,10 @@ class ChatSurfaceAdapter(ChatSurface):
             state = self._get_or_create(surface_id)
             with state.lock:
                 prompt_meta = dict(state.prompt_meta)
-            view = _build_turn_view(surface_id, *segments[-1], prompt_meta)
+            view = _build_turn_view(
+                surface_id, *segments[-1], prompt_meta,
+                self._session_orchestration_mode(surface_id),
+            )
             chat_index.merge_settled_turn(
                 surface_id, view.turn_node.node_id, view.boundary_seq, view.index,
                 prompt=view.prompt, results=view.results, runtime_change=view.runtime_change,

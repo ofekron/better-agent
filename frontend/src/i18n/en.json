@@ -1297,6 +1297,7 @@
   "message.workerTurnLabel": "Worker",
   "message.subSessionTurnLabel": "Sub Session",
   "message.sessionTurnLabel": "Session",
+  "message.teamModeLabel": "Team",
   "message.eventsCount_one": "{{count}} event",
   "message.eventsCount_other": "{{count}} events",
   "newSession.machineVersionMismatch": "version mismatch",
