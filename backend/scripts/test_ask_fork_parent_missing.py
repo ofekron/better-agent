@@ -16,6 +16,7 @@ from fastapi import HTTPException  # noqa: E402
 import config_store  # noqa: E402
 import internal_orchestration_api  # noqa: E402
 import main  # noqa: E402
+import _test_authority  # noqa: E402
 from session_manager import (  # noqa: E402
     DelegateForkParentMissing,
     manager as session_manager,
@@ -80,19 +81,26 @@ def test_ask_fork_missing_parent_returns_409_not_500():
         "cwd": "/tmp",
         "run_mode": "fork",
     }
+    # `internal_ask_fork` gates on internal_guards' authority + team-
+    # orchestration runtime-readiness checks, both of which depend on a real
+    # ASGI request/extension state this direct handler call never has. This
+    # test targets the DelegateForkParentMissing -> 409 mapping downstream of
+    # those guards, so stub them the same way test_ask_fork_endpoint_validation
+    # does for handler-logic tests.
     original = main.coordinator.run_delegation
     main.coordinator.run_delegation = raise_parent_missing
     error = None
     try:
-        try:
-            asyncio.run(internal_orchestration_api.internal_ask_fork(
-                body,
-                x_internal_token=main.coordinator.internal_token,
-            ))
-        except HTTPException as exc:
-            error = exc
-        else:
-            raise AssertionError("missing-parent delegation did not raise HTTPException")
+        with _test_authority.stub_internal_authority():
+            try:
+                asyncio.run(internal_orchestration_api.internal_ask_fork(
+                    body,
+                    x_internal_token=main.coordinator.internal_token,
+                ))
+            except HTTPException as exc:
+                error = exc
+            else:
+                raise AssertionError("missing-parent delegation did not raise HTTPException")
     finally:
         main.coordinator.run_delegation = original
 
