@@ -73,8 +73,11 @@ jobs:
             echo "no cached backend test image yet; nothing to restore"
             exit 0
           fi
-          docker run --rm -v "$GITHUB_WORKSPACE:/w" "$image" \
-            chown -R "$(id -u):$(id -g)" /w
+          # --entrypoint: the image's default entrypoint is the pytest
+          # wrapper (docker/entrypoint-test.sh), which would swallow these
+          # args as pytest args — override it to run chown directly.
+          docker run --rm --entrypoint chown -v "$GITHUB_WORKSPACE:/w" "$image" \
+            -R "$(id -u):$(id -g)" /w
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
