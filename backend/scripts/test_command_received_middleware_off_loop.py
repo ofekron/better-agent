@@ -58,14 +58,7 @@ async def _run_middleware(sid: str, payload: dict) -> tuple[dict, bytes]:
     return published[0]["data"], downstream_seen[0]
 
 
-def test_command_received_parses_json_body_off_loop() -> None:
-    sess = session_manager.create(
-        name="command-received-mw", model="gpt-test", cwd="/tmp",
-        orchestration_mode="native", source="cli",
-    )
-    sid = sess["id"]
-    payload = {"seen_at": "2026-08-08T00:00:00Z", "nested": {"a": [1, 2, 3]}}
-
+def _run_with_to_thread_spy(sid: str, payload: dict) -> tuple[dict, bytes, list]:
     original_to_thread = asyncio.to_thread
     to_thread_calls: list[tuple] = []
 
@@ -78,6 +71,22 @@ def test_command_received_parses_json_body_off_loop() -> None:
         event_data, downstream_body = asyncio.run(_run_middleware(sid, payload))
     finally:
         asyncio.to_thread = original_to_thread
+    return event_data, downstream_body, to_thread_calls
+
+
+def test_command_received_parses_small_body_inline() -> None:
+    sess = session_manager.create(
+        name="command-received-mw-small", model="gpt-test", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    payload = {"seen_at": "2026-08-08T00:00:00Z", "nested": {"a": [1, 2, 3]}}
+    body_size = len(json.dumps(payload).encode("utf-8"))
+    assert body_size <= main._COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES, (
+        f"test fixture body ({body_size}B) must stay under the inline-parse threshold"
+    )
+
+    event_data, downstream_body, to_thread_calls = _run_with_to_thread_spy(sid, payload)
 
     # Parity: the durable event carries the exact parsed payload, and the
     # downstream handler still sees the original raw bytes (re-injection).
@@ -87,7 +96,38 @@ def test_command_received_parses_json_body_off_loop() -> None:
     assert downstream_body == json.dumps(payload).encode("utf-8")
 
     json_loads_calls = [c for c in to_thread_calls if c[0] is json.loads]
-    assert json_loads_calls, "json.loads must be offloaded via asyncio.to_thread"
+    assert not json_loads_calls, (
+        "a body under the inline-parse threshold must be parsed on the loop, "
+        "not hopped through asyncio.to_thread"
+    )
+
+
+def test_command_received_offloads_large_body_parse() -> None:
+    sess = session_manager.create(
+        name="command-received-mw-large", model="gpt-test", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    # Pad well past the threshold so the size check is unambiguous regardless
+    # of JSON encoding overhead.
+    padding = "x" * (main._COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES + 4096)
+    payload = {"seen_at": "2026-08-08T00:00:00Z", "padding": padding}
+    body_size = len(json.dumps(payload).encode("utf-8"))
+    assert body_size > main._COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES, (
+        f"test fixture body ({body_size}B) must exceed the inline-parse threshold"
+    )
+
+    event_data, downstream_body, to_thread_calls = _run_with_to_thread_spy(sid, payload)
+
+    assert event_data["payload"] == payload
+    assert event_data["method"] == "PATCH"
+    assert event_data["sid"] == sid
+    assert downstream_body == json.dumps(payload).encode("utf-8")
+
+    json_loads_calls = [c for c in to_thread_calls if c[0] is json.loads]
+    assert json_loads_calls, (
+        "a body over the inline-parse threshold must be offloaded via asyncio.to_thread"
+    )
     assert json_loads_calls[0][1][0] == json.dumps(payload).encode("utf-8")
 
 
@@ -132,21 +172,24 @@ def test_command_received_skips_non_command_methods() -> None:
     assert calls == ["called"]
 
 
-def test_middleware_source_offloads_json_parse() -> None:
+def test_middleware_source_gates_json_parse_by_body_size() -> None:
     source = (main.__file__ and open(main.__file__, encoding="utf-8").read())
+    assert "_COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES = 64 * 1024" in source
     start = source.index("async def ingest_command_received(")
     end = source.index("\ncoordinator = Coordinator()", start)
     body = source[start:end]
+    assert "if len(body_bytes) <= _COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES:" in body
+    assert "payload = json.loads(body_bytes)" in body
     assert "payload = await asyncio.to_thread(json.loads, body_bytes)" in body
-    assert "payload = json.loads(body_bytes)" not in body
 
 
 def main_() -> int:
     tests = [
-        ("command_received parses JSON body off-loop", test_command_received_parses_json_body_off_loop),
+        ("command_received parses small body inline", test_command_received_parses_small_body_inline),
+        ("command_received offloads large body parse", test_command_received_offloads_large_body_parse),
         ("command_received falls back on malformed JSON", test_command_received_falls_back_on_malformed_json),
         ("command_received skips non-command methods", test_command_received_skips_non_command_methods),
-        ("middleware source offloads json parse", test_middleware_source_offloads_json_parse),
+        ("middleware source gates json parse by body size", test_middleware_source_gates_json_parse_by_body_size),
     ]
     failures = 0
     for name, fn in tests:
