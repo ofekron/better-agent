@@ -161,7 +161,7 @@ import {
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { planSessionCreateFailure } from "src/utils/sessionCreateFailure";
 import { isDeletedProfileCreateError, outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
-import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
+import { isBannerQueuedKind, visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
 import {
@@ -1913,7 +1913,11 @@ function AppMain({
           if (d.client_id) {
             offlineDispatchedRef.current.delete(d.client_id);
             removeAckedOfflineAction(_appSessionId, d.client_id);
-            if (d.kind === "queued_behind") {
+            // Banner-worthy kinds (queued_behind, interrupt) clear the
+            // optimistic "Sending…" bubble — the banner is the single
+            // surface for queued state. "send" runs immediately, so it keeps
+            // the bubble and binds its lifecycle id for later failure marking.
+            if (isBannerQueuedKind(d.kind)) {
               removePendingByClientId(d.client_id);
             } else if (d.lifecycle_msg_id) {
               // Bind the optimistic pending entry to its lifecycle id so

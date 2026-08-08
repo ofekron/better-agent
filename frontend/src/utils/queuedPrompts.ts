@@ -16,10 +16,21 @@ const VISIBLE_QUEUE_KINDS = new Set<QueuedPrompt["kind"]>([
   "interrupt",
 ]);
 
+// Single source of truth for "this queued kind lands in the banner". The
+// optimistic "Sending…" bubble is cleared for banner kinds (the banner
+// replaces it), so callers route through here instead of re-listing kinds
+// and drifting — the original bug only checked "queued_behind".
+export function isBannerQueuedKind(kind: string | undefined): boolean {
+  return (
+    kind !== undefined &&
+    VISIBLE_QUEUE_KINDS.has(kind as QueuedPrompt["kind"])
+  );
+}
+
 export function queuedPromptToVisibleBanner(
   prompt: QueuedPrompt,
 ): QueuedBannerState | null {
-  if (!VISIBLE_QUEUE_KINDS.has(prompt.kind)) return null;
+  if (!isBannerQueuedKind(prompt.kind)) return null;
   return {
     id: prompt.id,
     ...(prompt.client_id !== undefined ? { clientId: prompt.client_id } : {}),
