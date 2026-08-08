@@ -103,7 +103,11 @@ def _http(method: str, url: str, token: str, body: dict | None = None) -> dict:
 
 def _main() -> None:
     codeword = f"zebra-lantern-{uuid.uuid4().hex[:6]}"
-    root = Path(tempfile.mkdtemp(prefix="ba-native-cont-live-"))
+    # resolve(): macOS tmp is symlinked (/var -> /private/var); the
+    # session-store storage-identity guard compares a resolved scope path
+    # against ba_home()'s env value, so the home must be pre-resolved or
+    # the two identities mismatch mid-import.
+    root = Path(tempfile.mkdtemp(prefix="ba-native-cont-live-")).resolve()
     home = root / "home"
     work = root / "work"
     auth_dir = root / "_auth"
@@ -234,8 +238,12 @@ def _main() -> None:
         # -------------------------------------------------------- Phase C
         print(f"=== phase C: booting backend on :{port}")
         backend_log = (root / "backend.log").open("ab")
+        # app_lifecycle's startup requires a primary-backend reservation
+        # from a launcher lease — the harness bridge performs that dance.
         backend = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "main:app",
+            [sys.executable,
+             os.path.join(_REPO, "frontend", "tests", "fullstack", "harness",
+                          "reserve_and_launch_backend.py"),
              "--host", "127.0.0.1", "--port", str(port)],
             cwd=_BACKEND, env=env, stdin=subprocess.DEVNULL,
             stdout=backend_log, stderr=backend_log, start_new_session=True,
