@@ -241,6 +241,92 @@ def test_ensure_refuses_downgrade() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# register() validation + _resolve_chain overshoot (the remaining error /
+# validation branches of scheme_migrations not exercised by the happy-path
+# and missing-edge/downgrade tests above). Each uses a component name unique
+# to itself so the in-process registry never collides across tests.
+# --------------------------------------------------------------------------- #
+def test_register_rejects_non_monotonic_version_edge() -> None:
+    # register() fails fast (before returning its decorator) when to_version
+    # is not strictly greater than from_version.
+    for from_v, to_v in ((1, 1), (3, 1)):
+        try:
+            scheme_migrations.register("test_widget_register_monotonic", from_v, to_v)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f"register must reject to_version={to_v} not strictly greater than from_version={from_v}"
+        )
+
+
+_DUP_EDGE_COMPONENT = "test_widget_dup_edge"
+
+
+def test_register_rejects_duplicate_edge_for_same_source_version() -> None:
+    def _noop(src_dir: Path, dst_dir: Path) -> None:
+        pass
+
+    decorator = scheme_migrations.register(_DUP_EDGE_COMPONENT, 1, 2)
+    decorator(_noop)  # first (component, from_version) edge registers fine
+    try:
+        decorator(_noop)  # same source version again -> ambiguous, rejected
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "register must reject a duplicate edge for the same (component, from_version)"
+        )
+
+
+def test_existing_versions_ignores_non_version_entries() -> None:
+    home = _test_home.TestHome.acquire("ba-test-scheme-junk-entry-")
+    try:
+        component = "test_widget_junk_entry"
+        paths.scheme_home(component, 1)  # creates scheme/<component>/v1
+        # A stray non-version entry (a plain file) alongside v1: _existing_versions
+        # must skip it rather than choke, and still resolve v1 as the newest version.
+        (paths.ba_home() / "scheme" / component / "stray.txt").write_text(
+            "noise", encoding="utf-8"
+        )
+
+        target = scheme_migrations.ensure(component, 1)
+        check(
+            target == paths.ba_home() / "scheme" / component / "v1",
+            "ensure ignores non-version entries and returns the matching newest version",
+        )
+    finally:
+        home.release()
+
+
+_OVERSHOOT_COMPONENT = "test_widget_overshoot"
+
+
+@scheme_migrations.register(_OVERSHOOT_COMPONENT, 1, 5)
+def _migrate_widget_overshoot_v1_to_v5(src_dir: Path, dst_dir: Path) -> None:
+    pass  # edge leaps v1 -> v5; ensure(.., 2) must reject it before running
+
+
+def test_resolve_chain_rejects_edge_that_overshoots_target() -> None:
+    home = _test_home.TestHome.acquire("ba-test-scheme-overshoot-")
+    try:
+        paths.scheme_home(_OVERSHOOT_COMPONENT, 1)
+        try:
+            scheme_migrations.ensure(_OVERSHOOT_COMPONENT, 2)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                "ensure must raise when a registered edge overshoots the target version"
+            )
+        check(
+            not (paths.ba_home() / "scheme" / _OVERSHOOT_COMPONENT / "v5").exists(),
+            "ensure validates the overshoot before applying any migration fn (no partial side effects)",
+        )
+    finally:
+        home.release()
+
+
+# --------------------------------------------------------------------------- #
 # Version-bump guard (project rule: "explicit contiguous N -> N+1 migrations
 # and a version-bump test that fails when an edge is missing")
 # --------------------------------------------------------------------------- #
