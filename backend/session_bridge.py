@@ -109,6 +109,25 @@ def list_pending_for_caller(caller_sid: str) -> list[dict]:
     ]
 
 
+def pending_by_caller() -> dict[str, list[dict]]:
+    """Bulk counterpart of `list_pending_for_caller` — ONE pass over
+    `_pending` grouping every record by its `caller_sid`, for a caller
+    (e.g. `store_access.list_pending_interactions_for_sessions`) resolving
+    many sessions' pending delegate-choices at once. Same per-record shape
+    as `list_pending_for_caller`; a caller MUST use this instead of looping
+    the single-id call when it needs more than one session's records."""
+    grouped: dict[str, list[dict]] = {}
+    for did, rec in _pending.items():
+        caller_sid = rec.get("caller_sid")
+        if not isinstance(caller_sid, str) or not caller_sid:
+            continue
+        entry = get_pending(did)
+        if entry is None:
+            continue
+        grouped.setdefault(caller_sid, []).append({"delegation_id": did, **entry})
+    return grouped
+
+
 class BridgeError(Exception):
     """Recoverable error surfaced to the delegate tool as is_error text."""
 

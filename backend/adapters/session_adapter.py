@@ -375,7 +375,14 @@ class SessionSurfaceAdapter(SessionSurface):
         # BEFORE paging, same as the query/needle filter above, never as a
         # parallel filtered-list route.
         if filters is not None and (filters.folder_ref or filters.tag_refs):
-            records = [r for r in records if self._matches_filters(r.id, filters)]
+            # Bulk-resolve organization for every candidate ONCE (not one
+            # store call per record) — see `store_access.
+            # get_session_organizations`'s docstring for why the per-id
+            # call is an O(N) full-store-deepcopy trap at this scale.
+            organizations = store_access.get_session_organizations(r.id for r in records)
+            records = [
+                r for r in records if self._matches_filters(organizations[r.id], filters)
+            ]
 
         page = records[offset : offset + _PAGE_SIZE]
         next_cursor = None
@@ -384,18 +391,29 @@ class SessionSurfaceAdapter(SessionSurface):
                 surface_id=_LIST_SURFACE_ID, snapshot=snapshot, token=str(offset + _PAGE_SIZE),
             )
         project_paths = self._project_paths()
+        # Bulk-resolve the page's organizations and pending-interactions in
+        # one store call each — same rationale as the filter pass above;
+        # this loop used to call `store_access.get_session_organization(
+        # r.id)`/`list_pending_interactions(r.id)` per record, which is
+        # what actually starved the event loop on `/api/sessions` and
+        # `/api/v2/surface/sessions` (see session_organization_store.py's
+        # `organizations_for_sessions` docstring).
+        page_ids = [r.id for r in page]
+        page_organizations = store_access.get_session_organizations(page_ids)
+        page_interactions = store_access.list_pending_interactions_for_sessions(page_ids)
         summaries = tuple(
             _map_summary(
                 r, self._rollup_for(r.id), _project_ref_for(r.cwd, project_paths),
-                store_access.get_session_organization(r.id), self._flags_for(r.id),
-                len(store_access.list_pending_interactions(r.id)),
+                page_organizations[r.id], self._flags_for(r.id),
+                len(page_interactions[r.id]),
             )
             for r in page
         )
         return Ok(SessionPage(sessions=summaries, next_cursor=next_cursor), snapshot)
 
-    def _matches_filters(self, session_id: str, filters: SessionSearchFilters) -> bool:
-        organization = store_access.get_session_organization(session_id)
+    def _matches_filters(
+        self, organization: SessionOrganizationRecord, filters: SessionSearchFilters,
+    ) -> bool:
         if filters.folder_ref and organization.folder_id != filters.folder_ref:
             return False
         if filters.tag_refs:

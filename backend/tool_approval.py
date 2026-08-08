@@ -93,6 +93,18 @@ class ToolApprovalRegistry:
     def list_for_session(self, app_session_id: str) -> list[ToolApproval]:
         return [r for r in self._pending.values() if r.app_session_id == app_session_id]
 
+    def grouped_by_session(self) -> dict[str, list[ToolApproval]]:
+        """Bulk counterpart of `list_for_session` — ONE pass over
+        `_pending` grouping every record by `app_session_id`, for a caller
+        resolving many sessions' pending tool-approvals at once (see
+        `store_access.list_pending_interactions_for_sessions`). A caller
+        MUST use this instead of looping `list_for_session` when it needs
+        more than one session's records."""
+        grouped: dict[str, list[ToolApproval]] = {}
+        for rec in self._pending.values():
+            grouped.setdefault(rec.app_session_id, []).append(rec)
+        return grouped
+
     def public_view(self, rec: ToolApproval) -> dict:
         return {
             "approval_id": rec.approval_id,

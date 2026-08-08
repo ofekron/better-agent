@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -202,22 +203,45 @@ def organization_for_session(session_id: str) -> dict[str, Any]:
     session_id = _clean_text(session_id, "session_id")
     with _lock:
         data = _load()
-        assignment = _assignment(data, session_id)
-        tag_by_id = {t.get("id"): t for t in data["tags"]}
-        tags = [
-            _tag_with_source(tag_by_id[tid], assignment["tag_sources"].get(tid))
-            for tid in assignment["tag_ids"]
-            if tid in tag_by_id
-        ]
+        return _organization_from_data(data, session_id)
+
+
+def _organization_from_data(data: dict[str, Any], session_id: str) -> dict[str, Any]:
+    assignment = _assignment(data, session_id)
+    tag_by_id = {t.get("id"): t for t in data["tags"]}
+    tags = [
+        _tag_with_source(tag_by_id[tid], assignment["tag_sources"].get(tid))
+        for tid in assignment["tag_ids"]
+        if tid in tag_by_id
+    ]
+    return {
+        "folder_id": assignment["folder_id"],
+        "tag_ids": list(assignment["tag_ids"]),
+        "tag_sources": dict(assignment["tag_sources"]),
+        "tag_assignments": [
+            {"tag_id": tag_id, "source": assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL)}
+            for tag_id in assignment["tag_ids"]
+        ],
+        "tags": tags,
+    }
+
+
+def organizations_for_sessions(session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Bulk counterpart of `organization_for_session` — loads and deep-copies
+    the store data ONCE regardless of how many session ids are requested,
+    instead of once per id (`_load()`'s full-store `copy.deepcopy` is
+    otherwise paid N times for an N-session page/filter pass, which is the
+    dominant event-loop-blocking cost on `/api/sessions` and
+    `/api/v2/surface/sessions` at any non-trivial store size — see
+    `adapters/session_adapter.py::list_sessions`/`_matches_filters`, the
+    only callers). Same per-id shape as `organization_for_session`; any
+    caller needing more than one id at a time MUST use this instead of
+    looping the single-id call."""
+    with _lock:
+        data = _load()
         return {
-            "folder_id": assignment["folder_id"],
-            "tag_ids": list(assignment["tag_ids"]),
-            "tag_sources": dict(assignment["tag_sources"]),
-            "tag_assignments": [
-                {"tag_id": tag_id, "source": assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL)}
-                for tag_id in assignment["tag_ids"]
-            ],
-            "tags": tags,
+            sid: _organization_from_data(data, sid)
+            for sid in (_clean_text(s, "session_id") for s in session_ids)
         }
 
 
