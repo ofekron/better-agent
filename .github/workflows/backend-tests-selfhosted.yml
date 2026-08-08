@@ -99,26 +99,26 @@ jobs:
       # need updating if a runner is renamed:
       #   - arm64 == the owner's Mac. It's also their PRIMARY interactive
       #     machine (8 cores; has hit load 30+ under concurrent CI+dev
-      #     work), so CI must never be able to starve foreground use. Cap
-      #     at half the box (4 CPUs / 6g) AND halve the cgroup CPU-share
-      #     weight (512 vs docker's default 1024): the weight only costs
-      #     the container CPU when something else is actually contending,
-      #     so an idle Mac still lets the container burst up to its 4-CPU
-      #     ceiling (fast), while a busy interactive session pushes the
-      #     container's share down (invisible).
+      #     work), so CI must never be able to starve foreground use.
+      #     Owner-set budget: 40% of the box (3.2 CPUs / 6g), AND a halved
+      #     cgroup CPU-share weight (512 vs docker's default 1024): the
+      #     weight only costs the container CPU when something else is
+      #     actually contending, so an idle Mac still lets the container
+      #     burst up to its ceiling (fast), while a busy interactive
+      #     session pushes the container's share down (invisible).
       #   - anything else == the Lenovo (WSL2 Ubuntu "TestApe", x64,
       #     docker-ce inside WSL). It's a dedicated test box, not used
       #     interactively, so there's no foreground work to protect —
-      #     just leave headroom so the WSL VM (8 cores / 7g total) never
-      #     OOMs the runner process itself: 6 CPUs / 5g, default CPU
-      #     share (no reason to deprioritize on a box nothing competes
-      #     with).
+      #     owner-set budget 70% (5.6 CPUs / 5g), which also leaves the
+      #     WSL VM (8 cores / 7g total) enough headroom never to OOM the
+      #     runner process itself. Default CPU share (no reason to
+      #     deprioritize on a box nothing competes with).
       # BETTER_AGENT_TEST_XDIST sets the pytest-xdist worker count
       # (docker_test_xdist_pytest_args in scripts/lib/docker-test-lifecycle.sh
-      # turns this into `-n <value> --dist loadfile`) equal to this same job's
-      # BETTER_AGENT_TEST_CPUS — one xdist worker per CPU the container is
-      # actually capped to, so workers never contend with each other for the
-      # same core. `--dist loadfile` is what makes this safe: every test in
+      # turns this into `-n <value> --dist loadfile`) to the FLOOR of this
+      # job's BETTER_AGENT_TEST_CPUS — xdist requires an integer, and one
+      # worker per WHOLE CPU keeps workers from contending with each other
+      # for the same core, with the fractional remainder left as headroom. `--dist loadfile` is what makes this safe: every test in
       # a file stays on one worker PROCESS, so the module-level state leaks
       # this suite has hit before (worker_store attribute leak, unscoped
       # monkeypatches — see git history on backend/scripts/conftest.py and
@@ -131,15 +131,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Owner-set budgets: 40% of the Mac, 70% of the Lenovo. Both
+          # boxes are 8-core, so 3.2 and 5.6 CPUs respectively. Worker
+          # count is the FLOOR of the CPU budget (3 and 5), never the
+          # rounded-up value: pytest-xdist needs an integer, and one
+          # worker per whole CPU keeps workers from contending for the
+          # same core while leaving the fractional remainder as headroom.
           if [ "${{ runner.arch }}" = "ARM64" ]; then
-            echo "BETTER_AGENT_TEST_CPUS=4" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_CPUS=3.2" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_CPU_SHARES=512" >> "$GITHUB_ENV"
-            echo "BETTER_AGENT_TEST_XDIST=4" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_XDIST=3" >> "$GITHUB_ENV"
           else
-            echo "BETTER_AGENT_TEST_CPUS=6" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_CPUS=5.6" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=5g" >> "$GITHUB_ENV"
-            echo "BETTER_AGENT_TEST_XDIST=6" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_XDIST=5" >> "$GITHUB_ENV"
           fi
       - name: Run backend test shard ${{ matrix.shard }}/2
         shell: bash
