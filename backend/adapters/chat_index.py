@@ -193,6 +193,25 @@ SCHEME_VERSION = 3
 _PREVIEW_CHARS = 240
 _DB_FILENAME = "index.sqlite3"
 
+
+# Every version bump here has only ever added nullable columns (see the
+# version-history comment above `SCHEME_VERSION`), and the journal remains
+# the sole source of truth — this module rebuilds itself losslessly on any
+# miss. So each edge is intentionally a fresh-start no-op: `scheme_home`
+# already creates `dst_dir` before this runs, and old rows are left behind
+# in `src_dir` for a still-running older process to keep reading (per
+# `scheme_migrations`'s never-mutate-in-place contract), not copied
+# forward. A future column that genuinely needs old data preserved must
+# replace the relevant no-op with a real copy-forward migration.
+@scheme_migrations.register(SCHEME_COMPONENT, 1, 2)
+def _migrate_v1_to_v2(src_dir: Path, dst_dir: Path) -> None:
+    del src_dir, dst_dir
+
+
+@scheme_migrations.register(SCHEME_COMPONENT, 2, 3)
+def _migrate_v2_to_v3(src_dir: Path, dst_dir: Path) -> None:
+    del src_dir, dst_dir
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,

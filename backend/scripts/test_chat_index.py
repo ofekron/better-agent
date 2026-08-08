@@ -37,6 +37,7 @@ import perf  # noqa: E402  (bare — matches every other perf-instrumented backe
 import backend.adapters.chat_adapter as chat_adapter_mod  # noqa: E402
 import backend.adapters.chat_index as chat_index_mod  # noqa: E402
 import backend.adapters.store_access as store_access_mod  # noqa: E402
+import backend.scheme_migrations as scheme_migrations_mod  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
@@ -687,7 +688,28 @@ def test_steering_message_payload_no_attachments_round_trips_empty() -> None:
     assert reconstructed.attachments == ()
 
 
+def test_chat_index_scheme_version_has_contiguous_chain_from_v1() -> None:
+    """Fails the moment someone bumps SCHEME_VERSION in
+    backend/adapters/chat_index.py without registering the matching
+    contiguous scheme_migrations edge(s) for the "chat_index" component,
+    starting from v1 (project rule: "explicit contiguous N -> N+1
+    migrations and a version-bump test that fails when an edge is
+    missing")."""
+    edges = scheme_migrations_mod.registered_edges(chat_index_mod.SCHEME_COMPONENT)
+    cur = 1
+    target = chat_index_mod.SCHEME_VERSION
+    assert target >= 1, "SCHEME_VERSION must be >= 1"
+    while cur < target:
+        assert cur in edges, (
+            f"missing scheme_migrations.register('chat_index', {cur}, ...) "
+            f"edge: SCHEME_VERSION={target} has no contiguous chain from v1"
+        )
+        cur = edges[cur]
+    assert cur == target, "chat_index migration chain lands exactly on SCHEME_VERSION"
+
+
 _TESTS = [
+    test_chat_index_scheme_version_has_contiguous_chain_from_v1,
     test_steering_message_payload_attachments_survive_sqlite_round_trip,
     test_steering_message_payload_no_attachments_round_trips_empty,
     test_fold_on_turn_transition_persists_settled_turn_with_subagent,
