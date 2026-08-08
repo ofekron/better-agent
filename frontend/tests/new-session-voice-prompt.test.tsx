@@ -93,7 +93,22 @@ describe("new session modal voice mode", () => {
 
   it("dictates into the initial prompt and creates on the send command", async () => {
     seedOfflineCaches();
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    // Every other endpoint rejects (offline), but `HarnessProfileSelector`'s
+    // `GET /api/harness-profiles` gates the Create button on its own fetch
+    // settling — via `trackedFetch`'s real retry-with-backoff (~3s of real
+    // `setTimeout` delays) on a bare rejection. Resolve that one endpoint so
+    // the button becomes usable without waiting out the real backoff.
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.toString()
+        : input.url;
+      if (url.endsWith("/api/harness-profiles")) {
+        return Promise.resolve(new Response(JSON.stringify({ profiles: [] }), { status: 200 }));
+      }
+      return Promise.reject(new TypeError("offline"));
+    });
     const onCreate = vi.fn().mockResolvedValue(true);
 
     const modal = render(
