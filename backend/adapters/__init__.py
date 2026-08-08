@@ -85,6 +85,7 @@ from backend.adapters.projection import BusBoundProjection, SurfaceProjection
 from backend.adapters.provider_adapter import ProviderConfigSurfaceAdapter
 from backend.adapters.runs_adapter import RunsSurfaceAdapter
 from backend.adapters.session_adapter import SessionSurfaceAdapter
+from backend.adapters.system_adapter import SystemSurfaceAdapter
 from backend.surface_contract.adapter import BetterAgentAdapter
 
 __all__ = [
@@ -94,11 +95,14 @@ __all__ = [
     "ProviderConfigSurfaceAdapter",
     "RunsSurfaceAdapter",
     "SessionSurfaceAdapter",
+    "SystemSurfaceAdapter",
     "build_adapter",
 ]
 
 
-def build_adapter(command_port=None) -> BetterAgentAdapter:
+def build_adapter(
+    command_port=None, session_command_port=None, system_command_port=None,
+) -> BetterAgentAdapter:
     """Compose the four concrete surfaces into one `BetterAgentAdapter`
     and bind each one's live-plane bus subscriptions. Each concrete
     `bind()` is independently idempotent (re-subscribes under
@@ -112,15 +116,30 @@ def build_adapter(command_port=None) -> BetterAgentAdapter:
     through a constructor/setter — `ChatSurfaceAdapter`'s own edit
     surface for this migration is `submit()` only, so injection happens
     here, at the one call site that already owns both the fresh instance
-    and the port to give it."""
+    and the port to give it. `session_command_port` (a
+    `backend.adapters.command_port.SessionCommandPort`, typically built by
+    `session_commands.build_session_command_port`) is wired onto the
+    session surface's `_command_port` attribute the same way.
+    `system_command_port` (a `backend.adapters.command_port.SystemCommandPort`,
+    typically built by `system_commands.build_system_command_port`) is
+    wired onto the system surface's `_command_port` attribute the same
+    way (ADR 0011)."""
     chat = ChatSurfaceAdapter()
     if command_port is not None:
         chat._command_port = command_port
     providers = ProviderConfigSurfaceAdapter()
     sessions = SessionSurfaceAdapter()
+    if session_command_port is not None:
+        sessions._command_port = session_command_port
     runs = RunsSurfaceAdapter()
+    system = SystemSurfaceAdapter()
+    if system_command_port is not None:
+        system._command_port = system_command_port
     chat.bind()
     providers.bind()
     sessions.bind()
     runs.bind()
-    return BetterAgentAdapter(chat=chat, providers=providers, sessions=sessions, runs=runs)
+    system.bind()
+    return BetterAgentAdapter(
+        chat=chat, providers=providers, sessions=sessions, runs=runs, system=system,
+    )

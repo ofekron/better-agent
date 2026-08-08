@@ -507,6 +507,23 @@ def _seed_from_sessions_if_empty() -> list[dict]:
     return seeded
 
 
+def session_counts_by_cwd() -> dict[str, int]:
+    """Real per-project session totals, keyed by session `cwd` — the SAME
+    identity a project's `path` is matched against everywhere else in this
+    module (`add_project`/`touch_project`/`remove_project`). Single owner
+    of this computation: `projects_api.get_projects` and
+    `backend.adapters.session_adapter.SessionSurfaceAdapter.projects` both
+    call this instead of each deriving their own count, so the two
+    surfaces can never disagree."""
+    counts: dict[str, int] = {}
+    for s in session_manager.list():
+        cwd = s.get("cwd") or ""
+        if not cwd:
+            continue
+        counts[cwd] = counts.get(cwd, 0) + 1
+    return counts
+
+
 def list_projects() -> list[dict]:
     """Return projects sorted by `last_used` descending. Each row
     carries `node_id` so the frontend can group/filter by machine."""

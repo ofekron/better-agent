@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, type MutableRefObject } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
 import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { useThrottledValue } from "../hooks/useThrottledValue";
@@ -7,6 +7,7 @@ import { isUnanchoredRun } from "../utils/runTargets";
 import { useTranslation } from "react-i18next";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { eventBus } from "../lib/eventBus";
+import { submitResolveInteraction, useInteractionResolveSocket } from "../lib/interactionResolveSocket";
 import {
   peekPendingMessageFocus,
   clearPendingMessageFocus,
@@ -43,6 +44,7 @@ import { userFacingForks } from "../hooks/useSession";
 import { buildThreadColorMap } from "../threadColors";
 import { ForkSplitView } from "./ForkSplitView";
 import { readNativeSurfaceFlag } from "../surface/flag";
+import { useSurfaceStore } from "../surface/useSurfaceStore";
 import { ChatSurfaceView } from "../surface/ChatSurfaceView";
 import { ForkSplitView as NativeForkSplitView } from "../surface/ForkSplitView";
 import { SessionTabs } from "./SessionTabs";
@@ -66,6 +68,23 @@ const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
 const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
+
+/** The queued-banner UI (InputArea.tsx) stays legacy-projection-driven no
+ * matter what (see surface/state.ts's `editQueued`/`deleteQueued`
+ * docstring — the native surface has no live representation of a queued
+ * prompt to render from) — App.tsx keeps owning `queuedBySession`'s local
+ * optimistic-update bookkeeping unconditionally. Only the WIRE that
+ * carries the actual edit/delete command should switch to the native
+ * `/ws/v2/surface` intent when eligible; this is that narrow seam. Chat.tsx
+ * is the sole owner of the per-session `SurfaceStore` instance (see
+ * `nativeStore` below), so it populates this ref rather than App.tsx
+ * reaching into the store directly. `null` means "not eligible right now,
+ * use the legacy transport" — same eligibility gate `nativeSendEligible`
+ * uses (native store exists AND its socket is open). */
+export interface NativeQueuedTransport {
+  deleteQueued: (queuedId: string) => void;
+  editQueued: (queuedId: string, text: string) => void;
+}
 
 function assistantSpeechText(message: ChatMessage | undefined): string {
   if (!message || message.isStreaming) return "";
@@ -199,6 +218,7 @@ function ToolApprovalCard({
   onResolved: (approvalId: string) => void;
 }) {
   const { t } = useTranslation();
+  useInteractionResolveSocket();
   const [busy, setBusy] = useState(false);
   const toolName =
     approval.tool_name ||
@@ -209,15 +229,28 @@ function ToolApprovalCard({
     if (busy) return;
     setBusy(true);
     try {
-      await fetch(
-        `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ approved }),
-        },
+      // ADR 0006 §5: tool-use approval is the `approval` UserInteractionKind,
+      // namespaced `tool_approval:{approval_id}`. Native `resolve` intent
+      // first (same store mutation, `backend/surface_commands.py`'s
+      // `_resolve_tool_approval`), legacy REST decide as fallback when the
+      // shared connection isn't open yet.
+      const ack = await submitResolveInteraction(
+        sessionId,
+        `tool_approval:${approval.approval_id}`,
+        "approval",
+        { decision: approved ? "approve" : "deny" },
       );
+      if (!ack) {
+        await fetch(
+          `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ approved }),
+          },
+        );
+      }
       onResolved(approval.approval_id);
     } finally {
       setBusy(false);
@@ -376,6 +409,13 @@ interface Props {
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
   onQueuedEditStart?: (queuedId?: string) => void;
   onQueuedEditFinish?: (queuedId?: string) => void;
+  /** Populated by Chat.tsx (owner of the native `SurfaceStore`) with a
+   * transport App.tsx's `onCancelQueued`/`onQueuedTextEdit` handlers can use
+   * INSTEAD of the legacy WS send when eligible — see `NativeQueuedTransport`'s
+   * docstring. `onQueuedEditStart`/`onQueuedEditFinish` have no native
+   * intent counterpart (no lock/presence concept on the v2 command plane)
+   * and always go through their legacy prop unconditionally. */
+  nativeQueuedTransportRef?: MutableRefObject<NativeQueuedTransport | null>;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
@@ -514,6 +554,7 @@ export function Chat({
   onQueuedTextEdit,
   onQueuedEditStart,
   onQueuedEditFinish,
+  nativeQueuedTransportRef,
   onReviewLastWork,
   onToggleSupervisor,
   onEditSupervisorPrompt,
@@ -565,6 +606,94 @@ export function Chat({
   const showPendingPromptAsRunning =
     !sessionRunning && hasPendingPromptAck(pendingMessages);
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
+
+  // Native send path (Phase I stage 2c): the SAME SurfaceStore instance
+  // ChatSurfaceView renders from — lifted up here rather than owned
+  // internally by ChatSurfaceView, and handed down via its `store` prop
+  // (see that component's docstring), so a native send lands in the exact
+  // tree being rendered instead of an invisible sibling store. `onSend`/
+  // `onSteer`/`onInterrupt` route through `SurfaceStore.sendPrompt` only
+  // when the send is representable on the v2 SendPrompt intent AND the
+  // socket is actually open right now; every other case (attachments —
+  // the backend command port rejects any non-empty `attachments` today;
+  // a supervisor-targeted send — SendPrompt's `target` has no worker/
+  // supervisor concept; offline — `nativeSnapshot?.socketOpen` false)
+  // falls straight through to the ORIGINAL legacy prop unchanged, which
+  // still owns 100% of the offline-durability path (useOfflineQueue) —
+  // deliberately not duplicated here, see App.tsx's `sendPrompt`.
+  const nativeSessionId =
+    readNativeSurfaceFlag() && (focusedSessionId ?? tree?.id ?? session?.id)
+      ? ((focusedSessionId ?? tree?.id ?? session?.id) as string)
+      : null;
+  const { store: nativeStore, snapshot: nativeSnapshot } = useSurfaceStore(nativeSessionId);
+
+  const nativeSendEligible = useCallback(
+    (images: unknown[], files: unknown[]) =>
+      !!nativeStore &&
+      !!nativeSnapshot?.socketOpen &&
+      images.length === 0 &&
+      files.length === 0 &&
+      !(session?.supervisor_enabled && sendTarget === "supervisor"),
+    [nativeStore, nativeSnapshot?.socketOpen, session?.supervisor_enabled, sendTarget],
+  );
+
+  const nativeOnSend = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!nativeSendEligible(images, files)) return onSend(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "queue");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onSend],
+  );
+
+  const nativeOnSteer = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!onSteer) return false;
+      if (!nativeSendEligible(images, files)) return onSteer(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "steer");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onSteer],
+  );
+
+  const nativeOnInterrupt = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!onInterrupt) return false;
+      if (!nativeSendEligible(images, files)) return onInterrupt(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "interrupt");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onInterrupt],
+  );
+
+  // See `NativeQueuedTransport`'s docstring: App.tsx's queued-banner
+  // handlers read this ref at call time to pick a transport, without this
+  // component needing to know anything about the banner's own local-state
+  // bookkeeping. A ref (not state) deliberately — this must never itself
+  // trigger a Chat.tsx re-render, only be read just-in-time.
+  useEffect(() => {
+    if (!nativeQueuedTransportRef) return;
+    nativeQueuedTransportRef.current =
+      nativeStore && nativeSnapshot?.socketOpen
+        ? {
+            deleteQueued: (queuedId: string) => void nativeStore.deleteQueued(queuedId),
+            editQueued: (queuedId: string, text: string) => void nativeStore.editQueued(queuedId, text),
+          }
+        : null;
+  }, [nativeQueuedTransportRef, nativeStore, nativeSnapshot?.socketOpen]);
+
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -660,6 +789,12 @@ export function Chat({
   // from `worker_creation_requested` WS events AND (on mount / cwd
   // change) from the Team Orchestration extension to rehydrate after a
   // reconnect.
+  // Keeps `lib/interactionResolveSocket.ts`'s shared connection warm for
+  // the whole chat view's lifetime — not just while a tool-approval card
+  // happens to be mounted — so a worker-approval resolve (dispatched from
+  // an extension-rendered card via `chatInlineActionContext` below, not a
+  // component of its own here) has a real chance of finding it OPEN.
+  useInteractionResolveSocket();
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   useEffect(() => {
     const cwd = session?.cwd;
@@ -844,24 +979,53 @@ export function Chat({
   const chatInlineActionContext = useMemo(
     () => ({
       workerApprovals: pendingApprovals,
+      // ADR 0006 §5: worker-creation approval is the `approval`
+      // UserInteractionKind, namespaced `worker_approval:{delegation_id}`.
+      // Native `resolve` intent first (`backend/surface_commands.py`'s
+      // `_resolve_worker_approval` calls the SAME `pending_approvals.
+      // approve()`/`.deny()` + coordinator worker-spawn callback the
+      // extension's own REST route ultimately reaches) — the extension
+      // REST call is the fallback when the shared connection isn't open.
       approveWorker: async (delegationId: string, description: string, orchestrationMode: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
-          },
-        );
+        const record = pendingApprovals.find((a) => a.delegation_id === delegationId);
+        const ack = record
+          ? await submitResolveInteraction(
+              record.app_session_id,
+              `worker_approval:${delegationId}`,
+              "approval",
+              { decision: "approve" },
+            )
+          : null;
+        if (!ack) {
+          await fetch(
+            `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
+            },
+          );
+        }
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
       },
       denyWorker: async (delegationId: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
-          { method: "POST" },
-        );
+        const record = pendingApprovals.find((a) => a.delegation_id === delegationId);
+        const ack = record
+          ? await submitResolveInteraction(
+              record.app_session_id,
+              `worker_approval:${delegationId}`,
+              "approval",
+              { decision: "deny" },
+            )
+          : null;
+        if (!ack) {
+          await fetch(
+            `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
+            { method: "POST" },
+          );
+        }
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
@@ -1374,7 +1538,11 @@ export function Chat({
               // (ba.surface_native flag) — the single integration
               // touchpoint into the chat content region for the
               // non-forked case (forks are handled by the branch above).
-              <ChatSurfaceView sessionId={(focusedSessionId ?? tree?.id ?? session?.id) as string} />
+              <ChatSurfaceView
+                sessionId={(focusedSessionId ?? tree?.id ?? session?.id) as string}
+                store={nativeStore}
+                userDisplayName={userDisplayName}
+              />
             ) : (
               <LayoutGroup>
               {displayTurnGroups.map((g) => {
@@ -1540,7 +1708,7 @@ export function Chat({
             />
 
             <ShortcutResponses
-              onSend={(prompt) => onSend(prompt, [], [])}
+              onSend={(prompt) => nativeOnSend(prompt, [], [])}
               isStreaming={effectiveIsStreaming}
               disabled={disabled}
               lastAssistantText={lastAssistantText}
@@ -1548,9 +1716,9 @@ export function Chat({
             />
 
             <InputArea
-              onSend={onSend}
-              onSteer={onSteer}
-              onInterrupt={onInterrupt}
+              onSend={nativeOnSend}
+              onSteer={onSteer ? nativeOnSteer : undefined}
+              onInterrupt={onInterrupt ? nativeOnInterrupt : undefined}
               forkTargetLabel={forkTargetLabel}
               canSteer={!!canSteer}
               onFork={onForkAndSend}

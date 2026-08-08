@@ -4864,11 +4864,18 @@ class SessionManager:
             # `deleted_sids` carries the whole removed subtree (the target
             # plus every descendant fork) so projections that key off session
             # ids — e.g. the ui_selection open-tab list — can prune all of
-            # them, not just the root of the delete.
+            # them, not just the root of the delete. `root_id` is `rid`
+            # taken directly from this call's own parameter, NOT derived
+            # from `self._node_root_id` (which is already popped for every
+            # id in `deleted_sids`, `sid` included, by the loop right
+            # above) — a subscriber that needs to know which SURVIVING root
+            # a fork-only deletion belongs to (`sid != rid`) has no other
+            # reliable way to learn it once this fires.
             self._fire(sid, {
                 "kind": "deleted",
                 "deleted_sids": deleted_sids,
                 "deleted_incarnations": deleted_incarnations,
+                "root_id": rid,
             })
         return True, revocations
 

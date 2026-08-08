@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse
 import installation_capabilities
 import installation_profile
 from env_compat import get_env
+from event_bus import BusEvent, bus
 from paths import ba_home
 
 router = APIRouter()
@@ -155,6 +156,17 @@ async def set_installation_capability(capability: str, body: dict | None = None)
             status_code=503, detail="mobile/desktop API is not configured"
         )
     await _broadcast_global("installation_capabilities_changed", state)
+    # ADR 0011 §8 fact for backend/adapters/system_adapter.py's
+    # `InstallationCapability` live push.
+    try:
+        await bus.publish(BusEvent(
+            type="installation.fire.capability_changed",
+            root_id="system", sid="system",
+            payload={"capability_id": capability},
+            persist=False,
+        ))
+    except Exception:
+        pass
     return state
 
 

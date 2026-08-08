@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
+import { SurfaceClient } from "../adapter/client";
+import type { DetailValueKindWire, RunDetailWire } from "../adapter/wire";
 
 export interface ProcessEntry {
   pid: number;
@@ -26,7 +28,17 @@ interface ProviderInfo {
   popen_pid: number | null;
 }
 
-interface RunDetails {
+/** Legacy `GET /api/sessions/{id}/runs/{run_id}/details` shape — the
+ * fields here (process tree, startup phase, provider popen state) have
+ * no v2 (ADR 0009) equivalent yet: `turn_manager.py`'s live `_run_state`
+ * (pid / startup_phase / stalled_at / last_activity_*) and
+ * `process_inspect.inspect_process_tree(pid)` are both outside
+ * `store_access`'s store allowlist today (see `runs_adapter.py`'s own
+ * `# gap:` comments on `run_detail()`). This interface — and the
+ * "Legacy diagnostics" section below that renders it — stays in place,
+ * clearly bounded, until those facts are persisted somewhere the v2
+ * adapter can read; remove both together at that point, not before. */
+interface LegacyRunDetails {
   run_id: string;
   app_session_id: string;
   kind: string;
@@ -62,19 +74,37 @@ export function fmtMem(kb: number): string {
   return `${(mb / 1024).toFixed(2)} GB`;
 }
 
+function formatDetailValue(kind: DetailValueKindWire, value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (kind === "duration" && typeof value === "number") return `${value.toFixed(1)}s`;
+  return String(value);
+}
+
+const surfaceClient = new SurfaceClient();
+
 /**
  * Diagnostic modal: "why is this run still considered running?".
  *
- * Pulls a snapshot from `/api/sessions/{sid}/runs/{run_id}/details` on
- * open and on Refresh — shows the runner PID + every descendant with
- * status / CPU% / RSS / elapsed / cmdline, plus provider-side
- * jsonl_path / run_dir / cancelled / popen_alive. No WS — diagnostic
- * info, polled on demand.
+ * Primary source: `GET /api/v2/surface/runs/{run_id}` (ADR 0009) —
+ * `RunDetail.entries` is a typed, OPEN-ENDED list (`{key, value_kind,
+ * value}`); rendered generically below (`GenericEntries`), so a new
+ * backend-added entry key shows up with zero client changes.
+ *
+ * Secondary, clearly-bounded "Legacy diagnostics" section: the fields v2
+ * doesn't carry yet (process tree, startup phase, provider popen state —
+ * see `LegacyRunDetails`'s docstring for exactly why) still come from the
+ * pre-existing `/api/sessions/{sid}/runs/{run_id}/details` route,
+ * best-effort (that route 404s for any run outside `turn_manager`'s live
+ * in-memory set, e.g. a completed/historic run — silently omitted then,
+ * never surfaced as an error, since v2's own section already covers that
+ * run honestly). No WS on either source — diagnostic info, polled on
+ * open + Refresh.
  */
 export function RunDetailsModal({ open, sessionId, runId, onClose }: Props) {
   const { t } = useTranslation();
   useBackButtonDismiss(open, onClose);
-  const [details, setDetails] = useState<RunDetails | null>(null);
+  const [v2Detail, setV2Detail] = useState<RunDetailWire | null>(null);
+  const [legacy, setLegacy] = useState<LegacyRunDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -82,18 +112,31 @@ export function RunDetailsModal({ open, sessionId, runId, onClose }: Props) {
     setLoading(true);
     setError(null);
     try {
+      const envelope = await surfaceClient.fetchRunDetail(runId);
+      if (envelope.kind === "ok") {
+        setV2Detail(envelope);
+      } else if (envelope.kind === "rebuilding") {
+        setV2Detail(null);
+      } else {
+        setV2Detail(null);
+        setError(t("runDetails.failedToLoad"));
+      }
+    } catch (e) {
+      setV2Detail(null);
+      setError((e as Error).message || t("runDetails.failedToLoad"));
+    }
+    // Best-effort: only active (turn_manager-tracked) runs have a legacy
+    // entry — a 404/network failure here is expected and silent, never
+    // promoted to the modal's error banner (the v2 fetch above already
+    // owns that).
+    try {
       const r = await fetch(
         `${API}/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/details`,
         { credentials: "include" },
       );
-      if (!r.ok) {
-        const body = await r.text().catch(() => "");
-        throw new Error(`HTTP ${r.status}: ${body || r.statusText}`);
-      }
-      const data: RunDetails = await r.json();
-      setDetails(data);
-    } catch (e) {
-      setError((e as Error).message || t("runDetails.failedToLoad"));
+      setLegacy(r.ok ? ((await r.json()) as LegacyRunDetails) : null);
+    } catch {
+      setLegacy(null);
     } finally {
       setLoading(false);
     }
@@ -115,7 +158,7 @@ export function RunDetailsModal({ open, sessionId, runId, onClose }: Props) {
       >
         <div className="modal-header">
           <h2>
-            {t("runDetails.title")}{details ? ` · ${details.kind}` : ""}
+            {t("runDetails.title")}{legacy ? ` · ${legacy.kind}` : ""}
           </h2>
           <button className="modal-close" onClick={onClose}>
             &times;
@@ -138,10 +181,10 @@ export function RunDetailsModal({ open, sessionId, runId, onClose }: Props) {
               {error}
             </div>
           )}
-          {loading && !details && (
+          {loading && !v2Detail && !legacy && (
             <div style={{ color: "var(--text-secondary)" }}>{t("progress.loading")}</div>
           )}
-          {details && <RunDetailsBody details={details} />}
+          {(v2Detail || legacy) && <RunDetailsBody v2Detail={v2Detail} legacy={legacy} />}
         </div>
         <div className="modal-footer">
           <button
@@ -161,81 +204,115 @@ export function RunDetailsModal({ open, sessionId, runId, onClose }: Props) {
   );
 }
 
-function RunDetailsBody({ details }: { details: RunDetails }) {
+function RunDetailsBody({
+  v2Detail,
+  legacy,
+}: {
+  v2Detail: RunDetailWire | null;
+  legacy: LegacyRunDetails | null;
+}) {
   const { t } = useTranslation();
-  const p = details.provider;
+  const p = legacy?.provider ?? null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <Section title={t("runDetails.run")}>
-        <KV k="run_id" v={details.run_id} mono />
-        <KV k="kind" v={details.kind} />
-        <KV k="pid" v={details.pid == null ? "—" : String(details.pid)} mono />
-        <KV k="started_at" v={details.started_at} mono />
-        <KV k="last_event_at" v={details.last_event_at} mono />
-        <KV k="provider_kind" v={details.provider_kind ?? "—"} />
-        <KV k="startup_phase" v={details.startup_phase ?? "—"} />
-        <KV
-          k="startup_expected_activity"
-          v={details.startup_expected_activity ?? "—"}
-        />
-        <KV
-          k="startup_silence_threshold_seconds"
-          v={details.startup_silence_threshold_seconds == null
-            ? "—"
-            : String(details.startup_silence_threshold_seconds)}
-        />
-        <KV k="startup_phase_started_at" v={details.startup_phase_started_at ?? "—"} mono />
-        <KV k="last_activity_at" v={details.last_activity_at ?? "—"} mono />
-        <KV k="last_activity_kind" v={details.last_activity_kind ?? "—"} />
-        <KV k="stalled_at" v={details.stalled_at ?? "—"} mono />
-        <KV
-          k="target_message_id"
-          v={details.target_message_id ?? t("runDetails.noAnchoredMessage")}
-          mono
-        />
-        {details.delegation_id && (
-          <KV k="delegation_id" v={details.delegation_id} mono />
-        )}
-      </Section>
-
-      {p && (
-        <Section title={t("runDetails.providerState")}>
-          <KV k="provider_kind" v={p.provider_kind ?? "—"} />
-          <KV k="mode" v={p.mode ?? "—"} />
-          <KV k="session_id" v={p.session_id ?? "—"} mono />
-          <KV k="jsonl_path" v={p.jsonl_path ?? "—"} mono />
-          <KV k="run_dir" v={p.run_dir ?? "—"} mono />
-          <KV k="cancelled" v={p.cancelled ? t("common.yes") : t("common.no")} />
-          <KV
-            k="popen_alive"
-            v={
-              p.popen_alive === null
-                ? t("runDetails.noPopen")
-                : p.popen_alive
-                  ? t("common.yes")
-                  : t("runDetails.subprocessGone")
-            }
-          />
-          <KV
-            k="popen_pid"
-            v={p.popen_pid == null ? "—" : String(p.popen_pid)}
-            mono
-          />
+      {v2Detail && (
+        <Section title={t("runDetails.v2Summary")}>
+          <KV k="run_id" v={v2Detail.summary.run_id} mono />
+          <KV k="session_id" v={v2Detail.summary.session_id} mono />
+          <KV k="phase" v={v2Detail.summary.phase} />
+          {/* `entries` is the open-ended, generically-rendered set — a
+              backend-added key (e.g. a future startup_phase fact) shows up
+              here automatically, no client change needed. */}
+          {v2Detail.entries.map((entry) => (
+            <KV
+              key={entry.key}
+              k={entry.key.replace(/^run\.detail\./, "")}
+              v={formatDetailValue(entry.value_kind, entry.value)}
+              mono={entry.value_kind === "ref" || entry.value_kind === "duration"}
+            />
+          ))}
         </Section>
       )}
 
-      <Section
-        title={t("runDetails.processes", { count: details.processes.length })}
-        subtitle={t("runDetails.processesSubtitle")}
-      >
-        {details.processes.length === 0 ? (
-          <div style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
-            {t("runDetails.noPid")}
+      {legacy && (
+        <>
+          <div
+            style={{
+              fontSize: "0.72rem",
+              color: "var(--text-tertiary, #888)",
+            }}
+          >
+            {t("runDetails.legacyDiagnosticsNote")}
           </div>
-        ) : (
-          <ProcessTable rows={details.processes} />
-        )}
-      </Section>
+          <Section title={t("runDetails.legacyDiagnostics")}>
+            <KV k="pid" v={legacy.pid == null ? "—" : String(legacy.pid)} mono />
+            <KV k="started_at" v={legacy.started_at} mono />
+            <KV k="last_event_at" v={legacy.last_event_at} mono />
+            <KV k="startup_phase" v={legacy.startup_phase ?? "—"} />
+            <KV
+              k="startup_expected_activity"
+              v={legacy.startup_expected_activity ?? "—"}
+            />
+            <KV
+              k="startup_silence_threshold_seconds"
+              v={legacy.startup_silence_threshold_seconds == null
+                ? "—"
+                : String(legacy.startup_silence_threshold_seconds)}
+            />
+            <KV k="startup_phase_started_at" v={legacy.startup_phase_started_at ?? "—"} mono />
+            <KV k="last_activity_at" v={legacy.last_activity_at ?? "—"} mono />
+            <KV k="last_activity_kind" v={legacy.last_activity_kind ?? "—"} />
+            <KV k="stalled_at" v={legacy.stalled_at ?? "—"} mono />
+            <KV
+              k="target_message_id"
+              v={legacy.target_message_id ?? t("runDetails.noAnchoredMessage")}
+              mono
+            />
+            {legacy.delegation_id && (
+              <KV k="delegation_id" v={legacy.delegation_id} mono />
+            )}
+          </Section>
+
+          {p && (
+            <Section title={t("runDetails.providerState")}>
+              <KV k="provider_kind" v={p.provider_kind ?? "—"} />
+              <KV k="mode" v={p.mode ?? "—"} />
+              <KV k="session_id" v={p.session_id ?? "—"} mono />
+              <KV k="jsonl_path" v={p.jsonl_path ?? "—"} mono />
+              <KV k="run_dir" v={p.run_dir ?? "—"} mono />
+              <KV k="cancelled" v={p.cancelled ? t("common.yes") : t("common.no")} />
+              <KV
+                k="popen_alive"
+                v={
+                  p.popen_alive === null
+                    ? t("runDetails.noPopen")
+                    : p.popen_alive
+                      ? t("common.yes")
+                      : t("runDetails.subprocessGone")
+                }
+              />
+              <KV
+                k="popen_pid"
+                v={p.popen_pid == null ? "—" : String(p.popen_pid)}
+                mono
+              />
+            </Section>
+          )}
+
+          <Section
+            title={t("runDetails.processes", { count: legacy.processes.length })}
+            subtitle={t("runDetails.processesSubtitle")}
+          >
+            {legacy.processes.length === 0 ? (
+              <div style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
+                {t("runDetails.noPid")}
+              </div>
+            ) : (
+              <ProcessTable rows={legacy.processes} />
+            )}
+          </Section>
+        </>
+      )}
     </div>
   );
 }

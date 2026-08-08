@@ -20,7 +20,7 @@ from backend.surface_contract.identity import (
     SurfaceId,
 )
 from backend.surface_contract.intents import ChatIntent, TransportAck
-from backend.surface_contract.nodes import ChildManifest, Node, Run, Sidecar
+from backend.surface_contract.nodes import ChildManifest, Node, Run, Sidecar, UserInteraction
 
 
 # The `...` control exists iff manifest.renderable_child_count > 0 —
@@ -44,6 +44,10 @@ class CompactSessionSnapshot:
     live_turn_nodes: tuple[Node, ...]
     runs: tuple[Run, ...]
     older_cursor: PageCursor | None
+    # Currently-pending UserInteractions for this session (cold-hydration
+    # analog of the `runs` field above) — live changes arrive as
+    # `user_interaction_upsert` frames (ADR 0006 §5).
+    interactions: tuple[UserInteraction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

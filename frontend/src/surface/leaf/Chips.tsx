@@ -4,13 +4,15 @@
 // (no `Record<string, unknown>` re-parsing — that was only ever needed
 // because the legacy path down-mapped through generic WSEvent.data).
 
-import { useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   FactPayloadWire,
   FailurePayloadWire,
   UserInteractionPayloadWire,
 } from "../../adapter/wire";
+import Icon from "../../components/Icon";
+import { copyToClipboard } from "../../utils/clipboard";
 import { RateLimitBox } from "./Pills";
 
 const FAILURE_SEVERITY_STYLE: Record<string, { color: string; background: string }> = {
@@ -36,33 +38,108 @@ const chipBoxStyle: CSSProperties = {
  * `fix_credential`/`open_settings` resolutions don't have a native-layer
  * settings-deep-link wired yet (that affordance lives in the legacy
  * CredentialErrorFix component, which takes ChatMessage-shaped props) —
- * falls through to the generic chip with its text, a known stage-1 gap. */
+ * falls through to the generic chip with its text, a known stage-1 gap.
+ *
+ * Copy + expand/disclosure chrome mirrors legacy MessageBubble.tsx's
+ * `MessageStatus` error block 1:1 (`.error-block-toggle`/`.collapse-arrow`/
+ * `.error-copy-btn`/`.error-block-body`, `errorCopy.copy`/`errorCopy.copied`
+ * i18n keys — all pre-existing, no new CSS/locale strings needed): the
+ * header toggles a `<pre>` disclosure of the full failure text, and a
+ * separate button copies it via the same `copyToClipboard` util. */
 export function FailureChip({ payload }: { payload: FailurePayloadWire }) {
   const { t } = useTranslation();
   const { code, text, severity, retryable, resolution } = payload;
   const label = t("message.failureChip", { code, defaultValue: text || code });
+  const [expanded, setExpanded] = useState(false);
+  const [copyPhase, setCopyPhase] = useState<"idle" | "copying" | "copied">("idle");
+  const copyResetRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+  }, []);
 
   if (resolution === "choose_fallback") {
     return <RateLimitBox label={label} errorText={text} />;
   }
 
   const palette = FAILURE_SEVERITY_STYLE[severity] ?? FAILURE_SEVERITY_STYLE.error;
+  const copyError = async () => {
+    if (!text || copyPhase === "copying") return;
+    if (copyResetRef.current !== null) {
+      window.clearTimeout(copyResetRef.current);
+      copyResetRef.current = null;
+    }
+    setCopyPhase("copying");
+    if (!(await copyToClipboard(text))) {
+      setCopyPhase("idle");
+      return;
+    }
+    setCopyPhase("copied");
+    copyResetRef.current = window.setTimeout(() => {
+      setCopyPhase("idle");
+      copyResetRef.current = null;
+    }, 1600);
+  };
+
   return (
     <div className="event-diagnostic" style={chipBoxStyle} data-testid="surface-failure-chip">
-      <span
+      <button
+        type="button"
+        className="error-block-toggle"
+        onClick={() => text && setExpanded((v) => !v)}
+        aria-expanded={text ? expanded : undefined}
+        disabled={!text}
         style={{
-          padding: "1px 7px",
-          borderRadius: 999,
-          fontSize: "0.9em",
-          fontWeight: 600,
-          background: palette.background,
-          color: palette.color,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          background: "none",
+          border: "none",
+          padding: 0,
+          color: "inherit",
+          font: "inherit",
+          cursor: text ? "pointer" : "default",
         }}
       >
-        {t(`message.failureSeverity_${severity}`, { defaultValue: severity })}
-      </span>
-      <span>{label}</span>
-      {retryable && <span style={{ opacity: 0.7 }}>{t("message.failureRetryable", { defaultValue: "Retryable" })}</span>}
+        <span
+          style={{
+            padding: "1px 7px",
+            borderRadius: 999,
+            fontSize: "0.9em",
+            fontWeight: 600,
+            background: palette.background,
+            color: palette.color,
+          }}
+        >
+          {t(`message.failureSeverity_${severity}`, { defaultValue: severity })}
+        </span>
+        <span>{label}</span>
+        {retryable && <span style={{ opacity: 0.7 }}>{t("message.failureRetryable", { defaultValue: "Retryable" })}</span>}
+        {text && (
+          <span className="collapse-arrow" aria-hidden="true">
+            {expanded ? "▼" : "▶"}
+          </span>
+        )}
+      </button>
+      {text && (
+        <button
+          type="button"
+          className={`error-copy-btn${copyPhase === "copied" ? " copied" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void copyError();
+          }}
+          disabled={copyPhase === "copying"}
+          aria-label={copyPhase === "copied" ? t("errorCopy.copied") : t("errorCopy.copy")}
+          title={copyPhase === "copied" ? t("errorCopy.copied") : t("errorCopy.copy")}
+        >
+          <Icon name={copyPhase === "copied" ? "check" : "clipboard"} size={13} />
+        </button>
+      )}
+      {expanded && text && (
+        <pre className="error-block-body" style={{ flexBasis: "100%", margin: 0 }}>
+          {text}
+        </pre>
+      )}
     </div>
   );
 }

@@ -23,7 +23,7 @@ import {
 } from "./hooks/useMachines";
 import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { useLatestEventOfTypes } from "./hooks/useLatestEventOfTypes";
-import { Chat } from "./components/Chat";
+import { Chat, type NativeQueuedTransport } from "./components/Chat";
 import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
 import { NodeProviderCredentialStatus } from "./components/NodeProviderCredentialStatus";
 import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthPrompt";
@@ -111,6 +111,10 @@ import { applyAppearancePrefs, type AppearancePrefs } from "./components/Appeara
 import { scaledFontSize } from "./utils/typography";
 import { useRefreshApp } from "./hooks/useRefreshApp";
 import { usePendingUserInteractions } from "./hooks/usePendingUserInteractions";
+import {
+  DELEGATE_CHOICE_REF_PREFIX,
+  tryResolveInteraction,
+} from "./lib/interactionResolveSocket";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
 import { uuidv4 } from "./lib/uuid";
@@ -879,7 +883,7 @@ function AppMain({
   const {
     requests: pendingUserInteractions,
     removeRequest: removePendingUserInteraction,
-  } = usePendingUserInteractions();
+  } = usePendingUserInteractions(currentSession?.id ?? null);
   const [dismissedUserInteractionIds, setDismissedUserInteractionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1509,6 +1513,12 @@ function AppMain({
   // text/attachments until `queued_prompts` snapshots catch up.
   const pendingQueueDraftsRef = useRef<Record<string, PendingQueueDraft[]>>(initialOfflineState.pendingQueueDrafts);
   const metadataUnseenQueuedIdsRef = useRef<Record<string, Set<string>>>({});
+  // Populated by Chat.tsx (owner of the native SurfaceStore) — see
+  // `NativeQueuedTransport`'s docstring. Read at call time inside
+  // `performCancelQueued`/`handleQueuedTextEdit` below to pick a transport
+  // for the queued-banner's edit/delete actions; `null` means fall back to
+  // the legacy `/ws/chat` transport (`sendCancelQueued`/`sendUpdateQueued`).
+  const nativeQueuedTransportRef = useRef<NativeQueuedTransport | null>(null);
   // Catch the restart regression's other half: a queue-mode offline backlog
   // entry that survived (was never acked) and is re-injected into the
   // composer/pending surfaces on this mount. Logs once per mount. No content
@@ -1849,9 +1859,6 @@ function AppMain({
     },
     onWorkersChanged: handleWorkersChanged,
     onSessionOrganizationChanged: refreshSessions,
-    onProjectMappingsChanged: () => {
-      window.dispatchEvent(new CustomEvent("project_mappings_changed"));
-    },
     onSupervisorEvent: handleSupervisorEvent,
     onPrLink: handlePrLink,
     onExtensionToast: handleExtensionToast,
@@ -5515,7 +5522,16 @@ function AppMain({
 
   const performCancelQueued = useCallback((queuedId?: string) => {
     if (!currentSession) return;
-    const sent = sendCancelQueued(currentSession.id, queuedId);
+    // Native transport when eligible (same gate `sendPrompt` uses — see
+    // NativeQueuedTransport's docstring), else the legacy `/ws/chat` send.
+    // `delete_queued` with no `queuedId` means "clear the whole queue" on
+    // the legacy transport; the native `DeleteQueued` intent has no such
+    // bulk form (one `node_id` per intent — surface_contract/intents.py),
+    // so a bulk clear always falls back to legacy regardless of eligibility.
+    const nativeTransport = queuedId ? nativeQueuedTransportRef.current : null;
+    const sent = nativeTransport
+      ? (nativeTransport.deleteQueued(queuedId!), true)
+      : sendCancelQueued(currentSession.id, queuedId);
     if (!sent) return;
     if (queuedId) {
       metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId);
@@ -5564,7 +5580,14 @@ function AppMain({
         ? base.find((item) => item.id === queuedId) ?? null
         : base[0] ?? null;
       if (!existing) return;
-      const sent = sendUpdateQueued(currentSession.id, existing.id, text);
+      // Native transport when eligible, else the legacy `/ws/chat` send —
+      // see `performCancelQueued`'s comment / NativeQueuedTransport's
+      // docstring. The local optimistic-update below runs identically
+      // either way; only the wire the command goes out on changes.
+      const nativeTransport = nativeQueuedTransportRef.current;
+      const sent = nativeTransport
+        ? (nativeTransport.editQueued(existing.id, text), true)
+        : sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
       setQueuedForSession(currentSession.id, (prev, hasLocalProjection) => {
         const current = hasLocalProjection ? prev : base;
@@ -6150,10 +6173,36 @@ function AppMain({
 
   /** Session-bridge delegate-approval picker → resolve the pending
    * delegation. `picked` confirms the target (unblocks the waiting
-   * `delegate_to_session` tool); `cancel` aborts it. */
+   * `delegate_to_session` tool); `cancel` aborts it.
+   *
+   * ADR 0006 §5: the delegation picker is the `choice` UserInteractionKind,
+   * namespaced `delegate_choice:{delegation_id}`, `picked_ref` = the chosen
+   * session id (or `null`/`"__new__"`, matching `session_bridge.
+   * resolve_delegation`'s own semantics byte-for-byte — see backend/
+   * surface_commands.py's `_resolve_delegate_choice`). Native `resolve`
+   * intent first, same gating + legacy-REST fallback established by
+   * `Chat.tsx`'s `ToolApprovalCard`/worker-approval callbacks. `session_id`
+   * on the intent is the CALLER session (the one whose ask_result carries
+   * this delegation, i.e. `currentSession` here — the picker only ever
+   * renders inside that session's own turn footer) — matches the ref-
+   * scoping check `_resolve_delegate_choice` enforces
+   * (`pending.caller_sid`). The shared `interactionResolveSocket`
+   * connection is kept warm by `Chat.tsx`'s unconditional
+   * `useInteractionResolveSocket()` call, which is mounted whenever this
+   * picker can be visible (it only renders inside `Chat`'s turn footer). */
   const resolveDelegation = useCallback(
-    (delegationId: string, chosenSessionId: string | null) => {
-      void fetch(
+    async (delegationId: string, chosenSessionId: string | null) => {
+      const callerSessionId = currentSession?.id;
+      const resolved = callerSessionId
+        ? await tryResolveInteraction(
+            callerSessionId,
+            `${DELEGATE_CHOICE_REF_PREFIX}${delegationId}`,
+            "choice",
+            { picked_ref: chosenSessionId },
+          )
+        : false;
+      if (resolved) return;
+      await fetch(
         `${SESSION_BRIDGE_API}/delegate/${delegationId}/resolve`,
         {
           method: "POST",
@@ -6162,7 +6211,7 @@ function AppMain({
         },
       );
     },
-    [],
+    [currentSession?.id],
   );
 
   /** Picker → Choose. The actual decision: record the pick on the
@@ -7549,6 +7598,7 @@ function AppMain({
               onQueuedTextEdit={handleQueuedTextEdit}
               onQueuedEditStart={handleQueuedEditStart}
               onQueuedEditFinish={handleQueuedEditFinish}
+              nativeQueuedTransportRef={nativeQueuedTransportRef}
               onReviewLastWork={
                 builtinExtensions.supervisor &&
                 currentSession?.supervisor_enabled &&

@@ -118,6 +118,9 @@ async def apply_initial_session_folder(session_id: str | None, folder_id: str | 
             session_id,
             folder_id,
         )
+        await session_organization_store.publish_organization_fact(
+            "membership_changed", {"session_id": session_id},
+        )
         await broadcast_session_organization_changed([session_id])
     except ValueError as e:
         logger.warning("initial folder assignment failed for %s: %s", session_id[:8], e)
@@ -163,6 +166,9 @@ async def apply_initial_session_organization(
         session_id,
         folder_id,
         tag_ids,
+    )
+    await session_organization_store.publish_organization_fact(
+        "membership_changed", {"session_id": session_id},
     )
     await broadcast_session_organization_changed([session_id])
 
@@ -2306,6 +2312,9 @@ async def create_session_folder(body: dict = Body(default={})):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "folder_upserted", {"folder_id": folder["id"], "project_id": folder["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"folder": folder}
 
@@ -2324,6 +2333,9 @@ async def update_session_folder(folder_id: str, body: dict = Body(default={})):
         raise HTTPException(status_code=404, detail="folder not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "folder_upserted", {"folder_id": folder["id"], "project_id": folder["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"folder": folder}
 
@@ -2360,6 +2372,13 @@ async def delete_session_folder(folder_id: str, mode: str | None = Query(None)):
         raise HTTPException(status_code=400, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail="folder not found")
+    await session_organization_store.publish_organization_fact(
+        "folder_removed",
+        {
+            "folder_ids": preview["folder_ids"],
+            "cleared_session_ids": preview["session_ids"] if delete_mode == "unassign" else [],
+        },
+    )
     await broadcast_session_organization_changed()
     return {"deleted": True, **preview}
 
@@ -2377,6 +2396,9 @@ async def create_session_tag(body: dict = Body(default={})):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "tag_upserted", {"tag_id": tag["id"], "project_id": tag["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"tag": tag}
 
@@ -2395,18 +2417,29 @@ async def update_session_tag(tag_id: str, body: dict = Body(default={})):
         raise HTTPException(status_code=404, detail="tag not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "tag_upserted", {"tag_id": tag["id"], "project_id": tag["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"tag": tag}
 
 
 @router.delete("/api/session-tags/{tag_id}")
 async def delete_session_tag(tag_id: str):
+    # Computed BEFORE deletion — `delete_tag` strips the id from every
+    # assignment, so this is the only chance to know who to refresh.
+    affected = await asyncio.to_thread(
+        session_organization_store.session_ids_with_tag, tag_id,
+    )
     deleted = await asyncio.to_thread(
         session_organization_store.delete_tag,
         tag_id,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="tag not found")
+    await session_organization_store.publish_organization_fact(
+        "tag_removed", {"tag_id": tag_id, "affected_session_ids": affected},
+    )
     await broadcast_session_organization_changed()
     return {"deleted": True}
 
@@ -2448,6 +2481,10 @@ async def update_session_organization(session_id: str, body: dict = Body(default
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if body:
+        await session_organization_store.publish_organization_fact(
+            "membership_changed", {"session_id": session_id},
+        )
     await broadcast_session_organization_changed([session_id])
     return {"session_id": session_id, "organization": org}
 
@@ -2494,6 +2531,9 @@ async def internal_session_organization_create_folder(body: dict = Body(default=
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "folder_upserted", {"folder_id": folder["id"], "project_id": folder["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"folder": folder}
 
@@ -2512,6 +2552,9 @@ async def internal_session_organization_update_folder(body: dict = Body(default=
         raise HTTPException(status_code=404, detail="folder not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "folder_upserted", {"folder_id": folder["id"], "project_id": folder["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"folder": folder}
 
@@ -2552,6 +2595,13 @@ async def internal_session_organization_delete_folder(body: dict = Body(default=
         raise HTTPException(status_code=400, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail="folder not found")
+    await session_organization_store.publish_organization_fact(
+        "folder_removed",
+        {
+            "folder_ids": preview["folder_ids"],
+            "cleared_session_ids": preview["session_ids"] if delete_mode == "unassign" else [],
+        },
+    )
     await broadcast_session_organization_changed()
     return {"deleted": True, **preview}
 
@@ -2569,6 +2619,9 @@ async def internal_session_organization_create_tag(body: dict = Body(default={})
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "tag_upserted", {"tag_id": tag["id"], "project_id": tag["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"tag": tag}
 
@@ -2587,6 +2640,9 @@ async def internal_session_organization_update_tag(body: dict = Body(default={})
         raise HTTPException(status_code=404, detail="tag not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await session_organization_store.publish_organization_fact(
+        "tag_upserted", {"tag_id": tag["id"], "project_id": tag["project_id"]},
+    )
     await broadcast_session_organization_changed()
     return {"tag": tag}
 
@@ -2595,15 +2651,22 @@ async def internal_session_organization_update_tag(body: dict = Body(default={})
 async def internal_session_organization_delete_tag(body: dict = Body(default={})):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
+    tag_id = body.get("tag_id")
+    # Computed BEFORE deletion — `delete_tag` strips the id from every
+    # assignment, so this is the only chance to know who to refresh.
+    affected = await asyncio.to_thread(session_organization_store.session_ids_with_tag, tag_id)
     try:
         deleted = await asyncio.to_thread(
             session_organization_store.delete_tag,
-            body.get("tag_id"),
+            tag_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail="tag not found")
+    await session_organization_store.publish_organization_fact(
+        "tag_removed", {"tag_id": tag_id, "affected_session_ids": affected},
+    )
     await broadcast_session_organization_changed()
     return {"deleted": True}
 
@@ -2669,6 +2732,10 @@ async def internal_session_organization_update_session(
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if any(k in body for k in ("folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids")):
+        await session_organization_store.publish_organization_fact(
+            "membership_changed", {"session_id": session_id},
+        )
     await broadcast_session_organization_changed([session_id])
     return {"session_id": session_id, "organization": org}
 

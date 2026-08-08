@@ -1809,6 +1809,76 @@ def test_async_mssg_panel_watcher_ignores_other_lifecycle_events():
     assert events[-1]["data"]["success"] is True
 
 
+def test_team_message_panel_worker_complete_carries_target_turn_id():
+    """`worker_complete`'s `target_turn_id` (`_team_message_target_turn_
+    id`, `derive.build_subagent_panel_container`'s eventual `TargetRef.
+    turn_id` source) resolves to the target session's OWN canonical
+    TYPED_PROMPT node_id (`user_msg["id"]`, minted once by `_init_turn_
+    messages`) once it's stamped with the SAME `lifecycle_msg_id` the
+    team-message dispatch used — mirroring real `_dispatch_prompt`'s
+    `prompt_params["lifecycle_msg_id"]` threading (`ask_team_message`/
+    `_ask_team_message_wait` in orchestrator.py)."""
+    sender = session_manager.create(
+        name="sender target-turn-id",
+        cwd="/repo",
+        orchestration_mode="team",
+    )
+    target = session_manager.create(
+        name="target target-turn-id",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+    events: list[dict] = []
+
+    async def save(event: dict) -> None:
+        events.append(event)
+
+    coordinator.turn_manager._turn_save_callbacks[sender["id"]] = save
+    coordinator.turn_manager.current_turn_workers[sender["id"]] = []
+
+    async def run() -> dict:
+        user_msg = await coordinator._init_turn_messages(
+            session=session_manager.get(target["id"]),
+            app_session_id=target["id"],
+            prompt="please answer",
+            images=None,
+            source="mssg",
+            lifecycle_msg_id="life-target-turn",
+        )
+        panel = await coordinator._start_team_message_panel(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            target=target,
+            message="please answer",
+            queue_item_id="queue-target-turn",
+            run_mode=team_messaging.SOURCE,
+        )
+        coordinator._watch_team_message_panel(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            lifecycle_msg_id="life-target-turn",
+            panel=panel,
+        )
+        callback = coordinator.ws_callbacks[target["id"]][0]
+        await callback({
+            "type": "user_message_done",
+            "data": {"lifecycle_msg_id": "life-target-turn", "success": True},
+        })
+        # `watch()` runs as its own scheduled task (`loop.create_task`);
+        # give it a chance to observe `done` and journal `worker_complete`
+        # (same pattern `test_async_mssg_panel_watcher_ignores_other_
+        # lifecycle_events` already relies on).
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return user_msg
+
+    user_msg = asyncio.run(run())
+
+    worker_complete = next(e for e in events if e["type"] == "worker_complete")
+    assert worker_complete["data"]["target_turn_id"] == user_msg["id"]
+
+
 def test_sub_session_panel_kind_is_set_on_delegation():
     sender = session_manager.create(
         name="sender panel kind",

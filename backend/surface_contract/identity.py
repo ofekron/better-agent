@@ -19,6 +19,8 @@ ApprovalRef = str
 ProviderId = str
 ProjectRef = str
 IntentId = str
+FolderRef = str
+TagRef = str
 
 
 @dataclass(frozen=True, slots=True)

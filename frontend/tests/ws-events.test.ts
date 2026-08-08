@@ -1,46 +1,69 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
-import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
+import { makeSession } from "./fixtures";
 import { eventBus } from "../src/lib/eventBus";
+import { promptNode, turnNode, compactTurn } from "./surface/fixtures";
 
 describe("WebSocket event handling", () => {
-  it("rewind_complete replaces the session's messages", async () => {
-    const original = [
-      makeUserMsg({ id: "u1", content: "first" }),
-      makeAssistantMsg({ id: "a1", content: "first reply" }),
-      makeUserMsg({ id: "u2", content: "second" }),
-      makeAssistantMsg({ id: "a2", content: "second reply" }),
-    ];
-    const session = makeSession({ messages: original });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
+  it("native surface: resync_required forces a refetch that replaces rewound-away turns", async () => {
+    // Native equivalent of legacy's `rewind_complete` (a full messages[]
+    // replacement pushed inline over the WS). The native protocol has no
+    // frame that carries content directly for a rewind — the backend
+    // instead pushes `resync_required` (adapter/wire.ts), which forces
+    // the client back through the SAME `hydrate()` path used for cold
+    // load and reconnect (surface/state.ts), fetching a fresh REST
+    // snapshot that already reflects the rewind server-side. There is no
+    // separate "rewind" merge/patch logic on the client to test — it is
+    // the ordinary snapshot-replaces-state path with the identity's
+    // `hist_rev` bumped.
+    localStorage.setItem("ba.surface_native", "1");
+    const session = makeSession({ id: "sess-rewind", messages: [] });
+    const h = await renderApp({
+      seed: { sessions: [session] },
+      configureBackend: (backend) => {
+        backend.seedSurface("sess-rewind", {
+          turns: [
+            compactTurn(turnNode("t1"), promptNode("t1", "first"), []),
+            compactTurn(turnNode("t2"), promptNode("t2", "second"), []),
+          ],
+          identity: { incarnation: "mock", render_rev: 1, hist_rev: 0 },
+        });
+      },
+    });
 
-    // User bubbles are always rendered (assistant is hidden when its
-    // turn is auto-collapsed). Count user bubbles to track turn count.
-    const userIdsBefore = h.toJSON().chat.messages
-      .filter((m) => m.role === "user")
-      .map((m) => m.id);
-    expect(userIdsBefore).toEqual(["u1", "u2"]);
+    await h.selectSession("sess-rewind");
+    await h.waitFor(() => h.$$('[data-testid="surface-turn"]').length === 2);
 
-    // Rewind: backend replaces messages with just the first pair.
-    h.emit({
-      type: "rewind_complete",
-      session_id: session.id,
-      messages: [original[0], original[1]],
-    } as unknown as Parameters<typeof h.emit>[0]);
-    await h.flush();
+    // Backend rewinds server-side truth down to just the first turn,
+    // then announces the history changed.
+    h.backend.seedSurface("sess-rewind", {
+      turns: [compactTurn(turnNode("t1"), promptNode("t1", "first"), [])],
+      identity: { incarnation: "mock", render_rev: 2, hist_rev: 1 },
+    });
+    h.emitSurface("sess-rewind", {
+      type: "resync_required",
+      cv: 2,
+      surface_id: "sess-rewind",
+    });
 
-    const userIdsAfter = h.toJSON().chat.messages
-      .filter((m) => m.role === "user")
-      .map((m) => m.id);
-    expect(userIdsAfter).toEqual(["u1"]);
-    // Completed turns default to collapsed; expand to see the assistant.
-    await h.expandTurn("u1");
-    expect(
-      h.toJSON().chat.messages.find((m) => m.id === "a1"),
-    ).toBeDefined();
+    await h.waitFor(() => h.$$('[data-testid="surface-turn"]').length === 1);
+    const remaining = h.$$('[data-testid="surface-turn"]');
+    expect(remaining.map((t) => t.getAttribute("data-turn-id"))).toEqual(["t1"]);
     h.unmount();
   });
+
+  // The legacy "loose manager_event (no active turn) appends to the last
+  // assistant message", "late agent_message (re-emitted after turn
+  // complete) routes by msg_id", and "loose manager_event with no current
+  // session is silently dropped" cases are DELETED, not ported — all three
+  // exercise Strategy.ts's client-side raw-event routing/merge onto a flat
+  // message list, a step the native contract-node protocol has no
+  // equivalent of: every live frame already names its own `node_id`/
+  // `turn_id`, so there is no "which message does this belong to"
+  // ambiguity to route, and nothing to de-duplicate against a "late
+  // re-emitted" delivery or guard for a missing current session (see
+  // streaming-details.test.ts's header comment for the fuller rationale,
+  // same disposition here).
 
   it("projects_changed triggers a refetch of /api/projects", async () => {
     const session = makeSession();
@@ -146,86 +169,6 @@ describe("WebSocket event handling", () => {
       }
       h.unmount();
     }
-  });
-
-  it("loose manager_event (no active turn) appends to the last assistant message", async () => {
-    const userMsg = makeUserMsg({ id: "u", content: "hello" });
-    const assistantMsg = makeAssistantMsg({
-      id: "a",
-      content: "",
-      manager: { session_id: "sid", events: [] },
-    });
-    const session = makeSession({ messages: [userMsg, assistantMsg] });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    await h.flush();
-
-    h.emit({
-      type: "manager_event",
-      data: {
-        event: {
-          type: "claude_message",
-          message: { type: "assistant", content: [{ type: "text", text: "live update" }] },
-        },
-      },
-    });
-    await h.flush();
-
-    // No assertion on rendered text — depends on MessageBubble's flatten;
-    // assert only that nothing crashes and the event count grew.
-    // (Concrete assertion: the assistant container's text now contains the
-    // streamed update if the renderer parses it — best-effort below.)
-    // Completed turns default to collapsed; expand to see the assistant.
-    await h.expandTurn("u");
-    const assistant = h.toJSON().chat.messages.find((m) => m.id === "a");
-    expect(assistant).toBeDefined();
-    h.unmount();
-  });
-
-  it("late agent_message (re-emitted after turn complete) routes by msg_id — no duplicate bubble", async () => {
-    // The routing rule itself is unit-tested in
-    // resolveLiveEventTargetIndex.test.ts (rendering-independent). This
-    // is a smoke check that emitting such a late frame does not crash the
-    // app. (A DOM-level "no duplicate bubble" assertion is unreliable
-    // here while assistant rendering is being reworked — see
-    // resolveLiveEventTargetIndex.test.ts for the locked behavior.)
-    const userMsg = makeUserMsg({ id: "u", content: "anything open here?" });
-    const assistantMsg = makeAssistantMsg({ id: "a1", content: "" });
-    const session = makeSession({ messages: [userMsg, assistantMsg] });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    await h.flush();
-
-    expect(() => {
-      h.emit({
-        type: "agent_message",
-        data: {
-          msg_id: "a1",
-          uuid: "late-51bfa95f",
-          type: "assistant",
-          message: {
-            id: "msg_provider_final",
-            type: "assistant",
-            role: "assistant",
-            model: "glm-5.2",
-            content: [{ type: "text", text: "Nothing open on my end." }],
-            stop_reason: "end_turn",
-          },
-        },
-      });
-    }).not.toThrow();
-    h.unmount();
-  });
-
-  it("loose manager_event with no current session is silently dropped", async () => {
-    const h = await renderApp({ seed: { sessions: [] } });
-    expect(() =>
-      h.emit({
-        type: "manager_event",
-        data: { event: { type: "claude_message", message: "x" } },
-      }),
-    ).not.toThrow();
-    h.unmount();
   });
 
   it("dropping the WS closes connection and the reconnect timer fires no immediate frames", async () => {

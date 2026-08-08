@@ -6,6 +6,7 @@ The coordinator is injected by the composition root — see `configure`.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from typing import Any, Optional
@@ -19,8 +20,35 @@ from event_bus import BusEvent, bus
 from i18n import t
 from session_helpers import session_lite as _session_lite
 from session_manager import manager as session_manager
+from backend.event_bus import bus as _v2_bus
+from backend.event_bus import BusEvent as _V2BusEvent
+from backend.surface_contract.nodes import (
+    USER_INPUT_REF_PREFIX,
+    UserInteractionKind,
+    UserInteractionState,
+    interaction_fact_payload,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# v2 UserInteraction fact producer (ADR 0006 §5) — additive to the legacy
+# `user_input_requested`/`user_input_resolved` WS broadcasts below, which
+# stay as-is; `backend/adapters/chat_adapter.py`'s `_on_interaction_fact`
+# is the one consumer. Every legacy sub-kind here (approval/input/memory)
+# maps onto the ONE `UserInteractionKind.INPUT` — the remaining kind slot
+# not already covered by tool/worker approval (`approval`) or the
+# delegation picker (`choice`).
+
+
+def _publish_interaction_fact(fact_type: str, app_session_id: str, payload: dict) -> None:
+    try:
+        _v2_bus.publish_threadsafe(_V2BusEvent(
+            type=fact_type, root_id=app_session_id, sid=app_session_id,
+            payload=payload, persist=False,
+        ))
+    except Exception:
+        logger.exception("user_input_api: %s publish failed", fact_type)
 
 _coordinator_ref: Any = None
 
@@ -192,15 +220,14 @@ async def get_pending_user_inputs(app_session_id: str | None = None):
     }
 
 
-@router.post("/api/user-input/{request_id}/resolve")
-async def resolve_user_input(request_id: str, body: dict):
-    req = await asyncio.to_thread(user_input_store.get_request, request_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="request not found")
-    if str(body.get("app_session_id") or "").strip() != req.get("app_session_id"):
-        raise HTTPException(status_code=403, detail="session mismatch")
-    if req.get("status") != "pending":
-        return {"success": False, "status": req.get("status")}
+def build_resolve_response(req: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    """Kind-specific response-shape validation/construction — the single
+    source both `resolve_user_input` (REST) and `backend/surface_commands.
+    py`'s `resolve_interaction` v2 routing call, so the two transports
+    validate identically and neither re-derives the rule. Raises
+    `HTTPException` on a malformed shape; the REST route lets it propagate
+    as-is, the v2 path catches it and converts it to a typed
+    `invalid_response` rejection."""
     kind = req.get("kind")
     if kind == "approval":
         approved = body.get("approved")
@@ -214,23 +241,37 @@ async def resolve_user_input(request_id: str, body: dict):
         response: dict[str, Any] = {"approved": approved}
         if alternative:
             response["alternative"] = alternative[:4000]
-    elif kind == "memory":
+        return response
+    if kind == "memory":
         approved = body.get("approved")
         if not isinstance(approved, bool):
             raise HTTPException(status_code=400, detail="approved must be a boolean")
         response = {"approved": approved}
         if approved:
             response["memory_proposal"] = memory_api.validate_memory_proposal(body.get("edited"))
-    else:
-        if not isinstance(body.get("answers"), dict):
-            raise HTTPException(status_code=400, detail="answers object is required")
-        expected = {q["id"] for q in req.get("questions") or []}
-        response = {}
-        for qid in expected:
-            value = str(body["answers"].get(qid) or "").strip()
-            if not value:
-                raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
-            response[qid] = value[:2000]
+        return response
+    if not isinstance(body.get("answers"), dict):
+        raise HTTPException(status_code=400, detail="answers object is required")
+    expected = {q["id"] for q in req.get("questions") or []}
+    response = {}
+    for qid in expected:
+        value = str(body["answers"].get(qid) or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
+        response[qid] = value[:2000]
+    return response
+
+
+@router.post("/api/user-input/{request_id}/resolve")
+async def resolve_user_input(request_id: str, body: dict):
+    req = await asyncio.to_thread(user_input_store.get_request, request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail="request not found")
+    if str(body.get("app_session_id") or "").strip() != req.get("app_session_id"):
+        raise HTTPException(status_code=403, detail="session mismatch")
+    if req.get("status") != "pending":
+        return {"success": False, "status": req.get("status")}
+    response = build_resolve_response(req, body)
     resolved = await asyncio.to_thread(
         user_input_store.resolve_request,
         request_id,
@@ -238,6 +279,14 @@ async def resolve_user_input(request_id: str, body: dict):
     )
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
+    _publish_interaction_fact(
+        "interaction.fire.resolved", str(resolved.get("app_session_id") or ""),
+        interaction_fact_payload(
+            f"{USER_INPUT_REF_PREFIX}{request_id}", UserInteractionKind.INPUT,
+            user_input_store.interaction_request_dict(req),
+            state=UserInteractionState.RESOLVED, response=response,
+        ),
+    )
     await _broadcast_user_input("user_input_resolved", {
         "request_id": request_id,
         "app_session_id": resolved.get("app_session_id"),
@@ -257,6 +306,14 @@ async def cancel_user_input(request_id: str, body: dict):
     resolved = await asyncio.to_thread(user_input_store.cancel_request, request_id)
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
+    _publish_interaction_fact(
+        "interaction.fire.resolved", str(resolved.get("app_session_id") or ""),
+        interaction_fact_payload(
+            f"{USER_INPUT_REF_PREFIX}{request_id}", UserInteractionKind.INPUT,
+            user_input_store.interaction_request_dict(req),
+            state=UserInteractionState.CANCELLED, response={},
+        ),
+    )
     await _broadcast_user_input("user_input_resolved", {
         "request_id": request_id,
         "app_session_id": resolved.get("app_session_id"),
@@ -314,6 +371,13 @@ async def internal_request_user_input(
         memory_proposal=memory_proposal,
     )
     if created:
+        _publish_interaction_fact(
+            "interaction.fire.requested", app_session_id,
+            interaction_fact_payload(
+                f"{USER_INPUT_REF_PREFIX}{public_req['request_id']}", UserInteractionKind.INPUT,
+                user_input_store.interaction_request_dict(public_req),
+            ),
+        )
         await _broadcast_user_input("user_input_requested", public_req)
         await _broadcast_user_input_state(app_session_id)
     wait_timeout = timeout_seconds

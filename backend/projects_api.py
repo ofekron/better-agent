@@ -70,10 +70,15 @@ async def get_projects():
     _, _, aggregate_snapshot = _require_configured()
     projection = await aggregate_snapshot()
     aggs = projection["aggregates"]
+    session_counts = await asyncio.to_thread(project_store.session_counts_by_cwd)
     out: list[dict] = []
     for p in await asyncio.to_thread(project_store.list_projects):
         key = (p.get("path") or "", p.get("node_id") or "primary")
-        out.append({**p, **aggs.get(key, empty_aggregate())})
+        out.append({
+            **p,
+            **aggs.get(key, empty_aggregate()),
+            "session_count": session_counts.get(p.get("path") or "", 0),
+        })
     return {
         "projects": out,
         "epoch": projection["epoch"],

@@ -24,6 +24,8 @@ import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
 import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
+import { sessionSurfaceRegistry } from "../lib/sessionSurfaceRegistry";
+import type { DistributiveOmit, SessionIntentWire } from "../adapter/wire";
 import { eventBus } from "../lib/eventBus";
 import {
   applyOlderMessagePage,
@@ -967,6 +969,29 @@ function preservePostRequestMessages(
   return reconciled;
 }
 
+/** ADR 0008 (Package B): native-when-socket-open/legacy-fallback gating,
+ * same pattern `Chat.tsx`'s native send path (`nativeSendEligible`) and
+ * `useProviderSurfaceSocket.ts`'s `submitProviderIntent` callers already
+ * use. Returns `true` iff the intent was accepted over the shared v2
+ * socket — `false` covers both "socket wasn't actually open" (a race
+ * between `isSocketOpen()` and `submitIntent`) and a genuine rejection,
+ * so every call site's fallback is just "await the legacy REST call
+ * instead", identical to what it did before this migration.
+ *
+ * NOT unified with `lib/nativeOrRestMutation.ts` (throws on rejection
+ * instead of falling back) or `lib/interactionResolveSocket.ts`'s
+ * `tryResolveInteraction` (treats a rejection as terminal, never a REST
+ * retry) — see `nativeOrRestMutation.ts`'s own docstring for why a
+ * rejection means something different for each of the three. */
+async function trySessionIntentV2(
+  intent: DistributiveOmit<SessionIntentWire, "cv" | "intent_id">,
+): Promise<boolean> {
+  const submitted = sessionSurfaceRegistry.submitIntent(intent);
+  if (!submitted) return false;
+  const ack = await submitted;
+  return ack.type === "intent_accepted";
+}
+
 export function useSession(authStatus?: string) {
   const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 3);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -1320,9 +1345,18 @@ export function useSession(authStatus?: string) {
 
   const markSessionOpened = useCallback((sessionId: string, at = new Date().toISOString()) => {
     stampSessionLastOpened(sessionId, at);
-    void fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
-      method: "POST",
-      credentials: "include",
+    // ADR 0008 `mark_opened` intent when the shared v2 socket is open
+    // (`session_commands.py`'s `mark_opened` calls the SAME legacy
+    // `session_detail_api` function this REST route does — pure transport
+    // swap, no behavior difference), REST fallback otherwise. Fire-and-
+    // forget either way, matching this function's pre-existing contract
+    // (synchronous `at` return, no awaited result).
+    void trySessionIntentV2({ kind: "mark_opened", session_id: sessionId }).then((ok) => {
+      if (ok) return;
+      return fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+        method: "POST",
+        credentials: "include",
+      });
     }).catch(() => {});
     return at;
   }, [stampSessionLastOpened]);
@@ -1507,6 +1541,20 @@ export function useSession(authStatus?: string) {
   // Programmatic sidebar refreshes (turn completion, WS deltas, reconnect,
   // metadata updates) are silent — the search spinner is reserved for
   // user-initiated fetches (the filter-change effect).
+  //
+  // ADR 0008 (Package B): stays on legacy `GET /api/sessions`, NOT
+  // repointed to `GET /api/v2/surface/sessions` — `SessionSummary`'s 11
+  // fields are a small fraction of `Session` (types.ts), which this list
+  // populates for row rendering: no v2 equivalent exists for `pinned`,
+  // `fork_count`, `permission`, `harness_profile_id`, `source`,
+  // `worker_eligible`/`agent_rename_allowed`, `selectors_seq`,
+  // `model_history`, `offline_pending`, `bare_config`,
+  // `moved_to/from_session_id`, `agent_session_id`, and more — repointing
+  // this call would silently drop every one of those from every row.
+  // `lib/sessionSurfaceRegistry.ts` instead cold-hydrates its OWN parallel
+  // `GET /api/v2/surface/sessions` list for the NEW v2-only fields
+  // (`project_ref`/`folder_ref`/`tag_refs`/rollup `state`), consumed
+  // separately (see `SessionList.tsx`'s folder/tag UI).
   const fetchSessions = useCallback(async (filterSnapshot?: SessionListFilters) => {
     await fetchSessionPage(0, true, filterSnapshot, undefined, true);
   }, [fetchSessionPage]);
@@ -2734,6 +2782,10 @@ export function useSession(authStatus?: string) {
     [renameSessionNode, updateCachedSessionName]
   );
 
+  // ADR 0008 (Package B) has no `pin`/`unpin` intent at all (verified
+  // against `intents.py`'s `SessionIntent` union and a `grep -rniE
+  // "\bpin\b"` sweep of the surface_contract/adapters tree — zero
+  // matches) — stays 100% legacy REST, no dual-path possible.
   const togglePin = useCallback(
     async (sessionId: string, pinned: boolean) => {
       const response = await fetch(`${API}/api/sessions/${sessionId}/pin`, {
@@ -2750,6 +2802,7 @@ export function useSession(authStatus?: string) {
     [applySessionPatchEverywhere]
   );
 
+  // Same "no v2 intent exists" gap as `togglePin` above.
   const unpinOtherSessions = useCallback(
     async (keepId: string) => {
       const response = await fetch(`${API}/api/sessions/${keepId}/unpin-others`, {
@@ -2774,12 +2827,21 @@ export function useSession(authStatus?: string) {
 
   const archiveSession = useCallback(
     async (sessionId: string, archived: boolean) => {
-      await fetch(`${API}/api/sessions/${sessionId}/archive`, {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ archived }),
+      // ADR 0008 `archive_session`/`unarchive_session` when the shared v2
+      // socket is open, REST fallback otherwise — same thin-wrapper
+      // equivalence as `markSessionOpened` above.
+      const viaV2 = await trySessionIntentV2({
+        kind: archived ? "archive_session" : "unarchive_session",
+        session_id: sessionId,
       });
+      if (!viaV2) {
+        await fetch(`${API}/api/sessions/${sessionId}/archive`, {
+          method: "PUT",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived }),
+        });
+      }
       setSessions((prev) =>
         sortForList(
           prev
@@ -2791,6 +2853,36 @@ export function useSession(authStatus?: string) {
     [sortForList]
   );
 
+  // CORRECTED PREMISE (re-audited): `assign_project`'s v2 intent is NOT
+  // "fire-and-forget with no result" — `SurfaceSocket.submit()` resolves a
+  // real accept/reject promise, and `sessionSurfaceRegistry
+  // .waitForRefUpsert`/`submitIntentAwaitingRef` (event-driven completion:
+  // the new session's id arrives via a `SessionSummaryUpsert` carrying
+  // this intent's `intent_id`, per `backend/adapters/session_adapter.py`'s
+  // `_run_command`) genuinely resolves the new session's ref — proven
+  // end-to-end by
+  // `test_assign_project_ref_stamps_intent_id_on_new_session_upsert`.
+  //
+  // The REMAINING, narrower blocker (traced to this function's one actual
+  // caller, `App.tsx`'s move-session modal, outside this pass's file
+  // grant): it destructures `created.cwd` / `created.node_id` / `created
+  // .id` from this function's `Promise<Session>` return value.
+  // `node_id` has ZERO representation anywhere in ADR 0008's
+  // `SessionSelectors`/`SessionSummary` (multi-node topology is out of
+  // that contract's scope), and `Session` itself carries 50+ further
+  // fields (provider display, model history, drafts, …) no `v2` frame
+  // supplies. Populating a `Session`-shaped return from a `SessionSummary`
+  // alone would either fabricate missing fields or silently return a
+  // degraded object to any OTHER present/future consumer of this
+  // function's return type — a real regression risk, not a shortcut worth
+  // taking. Until either (a) `node_id`+the rest of `Session`'s fields get
+  // a v2 home, or (b) `App.tsx`'s call site is narrowed to the 3 fields it
+  // actually reads (a change outside this pass's grant), the MUTATION
+  // itself stays on the single legacy REST route — which already IS
+  // `session_commands.py`'s `assign_project`'s same underlying
+  // `session_detail_api.move_session_to_project` call, so there is no
+  // "second implementation," only one transport currently able to deliver
+  // the full result this call site's contract requires.
   const moveSessionToProject = useCallback(
     async (sessionId: string, cwd: string): Promise<Session> => {
       const opId = `session:move:${sessionId}`;
@@ -2828,6 +2920,8 @@ export function useSession(authStatus?: string) {
     [sortForList]
   );
 
+  // No `worker_eligible`/`agent_rename_allowed` concept anywhere in ADR
+  // 0008's `SessionIntent` union — stays 100% legacy REST.
   const toggleWorkerEligible = useCallback(
     async (sessionId: string, worker_eligible: boolean) => {
       await fetch(`${API}/api/sessions/${sessionId}/worker_eligible`, {
@@ -2863,12 +2957,22 @@ export function useSession(authStatus?: string) {
       const opId = `session:rename:${sessionId}`;
       startOp(opId);
       try {
-        await fetch(`${API}/api/sessions/${sessionId}/rename`, {
-          method: "PUT",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
+        // ADR 0008 `rename_session` when the shared v2 socket is open,
+        // REST fallback otherwise — same thin-wrapper equivalence as
+        // `archiveSession`/`markSessionOpened` above.
+        const viaV2 = await trySessionIntentV2({
+          kind: "rename_session",
+          session_id: sessionId,
+          title: name,
         });
+        if (!viaV2) {
+          await fetch(`${API}/api/sessions/${sessionId}/rename`, {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+        }
       } finally {
         completeOp(opId);
       }

@@ -20,6 +20,19 @@ interface CollapsibleBlockProps {
    * than guessing from a separately-owned boolean. */
   open?: boolean;
   onToggle?: (open: boolean) => void;
+  /** Rendered as a sibling row below the header ONLY while collapsed —
+   * chat-panel grammar's boundary-inline collapse preview (legacy's
+   * `.collapse-ellipsis` + last-item-preview row, e.g.
+   * MessageBubble.tsx's `SubAgentBlock`). Omitted entirely once expanded
+   * (the real body takes over) and whenever the caller has nothing to
+   * preview — never a second, always-visible row. */
+  collapsedExtra?: ReactNode;
+  /** Rendered as a sibling of the toggle `<button>` (never inside it) —
+   * for interactive header content (e.g. SubAgentTurnView's target_ref
+   * link) that the HTML content model forbids nesting inside a `<button>`
+   * (interactive content can't contain interactive content). Always
+   * visible regardless of open state, unlike `collapsedExtra`. */
+  headerExtra?: ReactNode;
 }
 
 export function CollapsibleBlock({
@@ -30,6 +43,8 @@ export function CollapsibleBlock({
   testId,
   open: controlledOpen,
   onToggle,
+  collapsedExtra,
+  headerExtra,
 }: CollapsibleBlockProps) {
   const { t } = useTranslation();
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
@@ -54,7 +69,8 @@ export function CollapsibleBlock({
         </span>
         {header}
       </button>
-      {open && <div className="surface-collapsible-body">{children}</div>}
+      {headerExtra}
+      {open ? <div className="surface-collapsible-body">{children}</div> : collapsedExtra}
     </div>
   );
 }

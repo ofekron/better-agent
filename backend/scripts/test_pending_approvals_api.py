@@ -43,6 +43,7 @@ from pending_approvals_api import (  # noqa: E402
     internal_approve_pending_approval,
     internal_deny_pending_approval,
     internal_list_pending_approvals,
+    publish_requested_fact,
 )
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -66,6 +67,14 @@ class FakeGuards:
     def require_role_internal(self, role: str) -> None:
         if not self.authorized:
             raise HTTPException(status_code=403, detail="invalid internal token")
+
+
+class FakeBus:
+    def __init__(self) -> None:
+        self.published: list[Any] = []
+
+    def publish_threadsafe(self, event: Any) -> None:
+        self.published.append(event)
 
 
 class FakeStore:
@@ -97,6 +106,7 @@ def _reset() -> None:
     pa._resolve_approval = None
     pa.internal_guards = FakeGuards(authorized=True)
     pa.pending_approvals = FakeStore()
+    pa.bus = FakeBus()
 
 
 def _expect_http(coro: Any, code: int, name: str) -> None:
@@ -305,6 +315,67 @@ def test_deny_store_outcomes() -> None:
     _check(store.last_deny == "D1", "deny: forwards delegation_id")
 
 
+# --------------------------------------------------------------------------- #
+# publish_requested_fact (B2 ruling — A0-2/B2: the "requested" live push)
+# --------------------------------------------------------------------------- #
+def test_publish_requested_fact_publishes_interaction_fire_requested() -> None:
+    _reset()
+    bus_fake = pa.bus
+    rec = {
+        "cwd": "/tmp/proj",
+        "justification": "need a researcher",
+        "proposed_description": "Researcher",
+        "proposed_orchestration_mode": "native",
+    }
+    publish_requested_fact("dt_1", "sess-1", rec)
+
+    _check(len(bus_fake.published) == 1, "publish_requested_fact: publishes exactly one event")
+    event = bus_fake.published[0]
+    _check(event.type == "interaction.fire.requested",
+           "publish_requested_fact: event type is interaction.fire.requested",
+           f"got {event.type!r}")
+    _check(event.root_id == "sess-1" and event.sid == "sess-1",
+           "publish_requested_fact: root_id/sid are the app_session_id")
+    _check(event.persist is False, "publish_requested_fact: persist=False (mirrors resolved-fact)")
+    payload = event.payload
+    _check(payload.get("interaction_ref") == "worker_approval:dt_1",
+           "publish_requested_fact: interaction_ref uses WORKER_APPROVAL_REF_PREFIX",
+           f"got {payload.get('interaction_ref')!r}")
+    _check(payload.get("state") == "pending",
+           "publish_requested_fact: state defaults to pending (not resolved)",
+           f"got {payload.get('state')!r}")
+    _check(payload.get("response") is None,
+           "publish_requested_fact: no response yet (unresolved)")
+    request = payload.get("request") or {}
+    _check(request.get("cwd") == "/tmp/proj" and request.get("justification") == "need a researcher"
+           and request.get("proposed_description") == "Researcher",
+           "publish_requested_fact: request dict mirrors _worker_approval_request_dict(rec)",
+           f"got {request!r}")
+
+
+def test_publish_requested_fact_noop_without_app_session_id() -> None:
+    _reset()
+    bus_fake = pa.bus
+    publish_requested_fact("dt_1", "", {"cwd": "/x"})
+    _check(bus_fake.published == [], "publish_requested_fact: no app_session_id -> no publish")
+
+
+def test_publish_requested_fact_swallows_publish_errors() -> None:
+    _reset()
+
+    class ExplodingBus:
+        def publish_threadsafe(self, event: Any) -> None:
+            raise RuntimeError("boom")
+
+    pa.bus = ExplodingBus()
+    try:
+        publish_requested_fact("dt_1", "sess-1", {"cwd": "/x"})
+        _check(True, "publish_requested_fact: a bus publish failure is caught, not raised")
+    except Exception as exc:  # noqa: BLE001
+        _check(False, "publish_requested_fact: a bus publish failure is caught, not raised",
+               f"raised {exc!r}")
+
+
 if __name__ == "__main__":
     tests = [
         test_configure_binds_both_caps,
@@ -320,6 +391,9 @@ if __name__ == "__main__":
         test_deny_unauthorized_403,
         test_deny_missing_delegation_id_400,
         test_deny_store_outcomes,
+        test_publish_requested_fact_publishes_interaction_fire_requested,
+        test_publish_requested_fact_noop_without_app_session_id,
+        test_publish_requested_fact_swallows_publish_errors,
     ]
     for t in tests:
         t()

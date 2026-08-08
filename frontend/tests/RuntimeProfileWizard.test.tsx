@@ -116,6 +116,38 @@ vi.mock("../src/components/ProviderForm", async (importOriginal) => {
   };
 });
 
+// Package D (ADR 0007): the installable-kind catalog is fetched from the
+// backend (`GET /api/v2/surface/providers/installable`) via
+// `useInstallableProviders`, not a static frontend array — mocked here
+// with a single "claude" entry mirroring the real backend catalog's
+// values (`backend/adapters/provider_adapter.py`'s `_TEMPLATES`) so this
+// file's template-seeding assertions (effort/model defaults) keep testing
+// the wizard's OWN seeding logic, not the fetch itself.
+vi.mock("../src/hooks/useInstallableProviders", () => ({
+  useInstallableProviders: () => ({
+    templates: [
+      {
+        id: "claude",
+        label: "Claude",
+        blurb: "",
+        defaults: {
+          name: "Claude",
+          kind: "claude",
+          mode: "subscription",
+          base_url: "",
+          config_dir: "",
+          default_model: "claude-opus-5[1m]",
+          default_reasoning_effort: "medium",
+        },
+        formSchema: [],
+      },
+    ],
+    loading: false,
+    error: null,
+  }),
+  formSchemaForProviderKind: () => [],
+}));
+
 import { RuntimeProfileWizard } from "../src/components/RuntimeProfileWizard";
 
 // --- fixtures / helpers -----------------------------------------------------

@@ -63,6 +63,8 @@ from backend.surface_contract.frames import (
     TextDelta,
     TurnLifecycle,
     TurnPhase,
+    Usage,
+    UserInteractionUpsert,
 )
 from backend.surface_contract.identity import (
     CONTRACT_VERSION,
@@ -72,7 +74,6 @@ from backend.surface_contract.identity import (
     Ok,
     PageCursor,
     ProjectionResult,
-    Rebuilding,
     SessionId,
     SidecarRef,
     StaleCursor,
@@ -86,16 +87,24 @@ from backend.surface_contract.intents import (
     EditQueued,
     IntentAccepted,
     IntentRejected,
+    ResolveInteraction,
+    Rewind,
     SendPrompt,
     Stop,
     TransportAck,
 )
 from backend.surface_contract.nodes import (
     ContentStatus,
+    DELEGATE_CHOICE_REF_PREFIX,
     Node,
     NodeKind,
     RUNTIME_CHANGED_KINDS,
+    SUBAGENT_TURN_KINDS,
     Sidecar,
+    UserInteraction,
+    UserInteractionKind,
+    UserInteractionState,
+    usage_from_raw,
 )
 
 logger = logging.getLogger(__name__)
@@ -202,6 +211,15 @@ class _SurfaceState:
     # tool_use_id -> unresolved (result=None) tool_interaction Node, for the
     # currently-live turn only; reset whenever a new turn boundary is seen.
     pending_tool_uses: dict[str, Node] = field(default_factory=dict)
+    # delegation_id -> {node_id: WORKER_INTERACTION Node}, every fact
+    # journaled so far for that delegation, currently-live turn only;
+    # reset whenever a new turn boundary is seen (same scope/reset rule as
+    # `pending_tool_uses`; node_id-keyed so a hypothetical re-processed
+    # row can never double-count). `_process_row` rebuilds that
+    # delegation's WORKER_TURN/SUB_SESSION_TURN/SESSION_TURN container
+    # from this on every new fact via `derive.build_subagent_panel_
+    # container` (see its docstring).
+    worker_turn_facts: dict[str, dict[NodeId, Node]] = field(default_factory=dict)
     # render_rev -> journal seq as-of that bump, so a resubscribing cursor's
     # render_rev can be turned back into a replay baseline. Bounded so a
     # long-lived surface can't grow this unboundedly.
@@ -385,6 +403,21 @@ def _build_turn_view(
         n for n in raw_nodes
         if n.kind not in RUNTIME_CHANGED_KINDS and n.kind != NodeKind.FAILURE
     ]
+    # Compaction-replay children segregate out BEFORE derive_body, exactly
+    # like sidechain content below — see `derive.extract_compaction_
+    # children`'s docstring. `compaction_children` (compaction node_id ->
+    # its own children) is reattached to `index` once the compaction
+    # node's FINAL Node is known, below.
+    body_source_raw, compaction_children = _derive.extract_compaction_children(body_source_raw)
+    # SubAgentTurn family (worker/sub_session/session): every WORKER_
+    # INTERACTION fact for one delegation_id groups into ONE panel
+    # container BEFORE derive_body runs — same "must never flat-merge"
+    # rule as sidechain content below, see `derive.build_subagent_turns_
+    # for_panels`'s docstring. `panel_index` holds every grouped fact,
+    # merged into `index` below.
+    body_source_raw, panel_index = _derive.build_subagent_turns_for_panels(
+        body_source_raw, surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+    )
     # chat-panel.md grammar: sidechain content segregates into its own
     # NATIVE_SUBAGENT_TURN structural node(s) BEFORE derive_turn runs — it
     # must never flat-merge into the turn's own body (see
@@ -416,6 +449,17 @@ def _build_turn_view(
 
     body_items, body_index = _derive.attach_body_items(derived["body"], parent_id=turn_node.node_id)
     index.update(body_index)
+    # Reattach each compaction node's own children now that its FINAL Node
+    # (possibly Explanation-wrapped) is in `index`, and give the compaction
+    # node itself a real `child_manifest` — see `derive.extract_compaction_
+    # children`'s docstring.
+    for compaction_id, children in compaction_children.items():
+        owner = index.get(compaction_id)
+        if owner is None:
+            continue
+        index[compaction_id] = replace(owner, child_manifest=_derive.compaction_child_manifest(children))
+        for child in children:
+            index[child.node_id] = child
     trailing_item = body_items[-1] if body_items else None
 
     # The live turn's "extended form" (live_nodes) is bounded to this
@@ -429,11 +473,15 @@ def _build_turn_view(
     # subagent without an extra round trip; anything deeper, or any
     # EARLIER subagent turn in the same live turn, is fetched on demand.
     bounded_nodes = list(index.values())
-    if trailing_item is not None and trailing_item.kind == NodeKind.NATIVE_SUBAGENT_TURN:
+    if trailing_item is not None and trailing_item.kind in SUBAGENT_TURN_KINDS:
         bounded_nodes.extend(
             n for n in subagent_index.values() if n.parent_id == trailing_item.node_id
         )
+        bounded_nodes.extend(
+            n for n in panel_index.values() if n.parent_id == trailing_item.node_id
+        )
     index.update(subagent_index)
+    index.update(panel_index)
 
     return _TurnView(
         turn_id=turn_id, boundary_seq=boundary_seq, turn_node=turn_node, prompt=prompt,
@@ -462,6 +510,11 @@ def _path_to(index: dict[NodeId, Node], node_id: NodeId) -> tuple[NodeId, ...]:
 
 
 _WORKER_SIDECAR_PANEL_KIND = "worker_panel"
+# Honest terminal status for a `sidecar_ref` that will NEVER resolve to a
+# `WorkerRecord` — distinct from the running/complete/failed statuses a
+# REAL worker record produces (`_worker_sidecar_status`). See
+# `fetch_sidecar`'s docstring for why this is `Ok`, not `Rebuilding`.
+_WORKER_SIDECAR_STATUS_NOT_FOUND = "not_found"
 
 
 def _worker_sidecar_status(success: bool | None) -> str:
@@ -504,6 +557,25 @@ def _map_worker_sidecar(ref: SidecarRef, worker: WorkerRecord) -> Sidecar:
     )
 
 
+def _map_pending_interactions(session_id: SessionId) -> tuple[UserInteraction, ...]:
+    """Cold-hydration source for `CompactSessionSnapshot.interactions` —
+    every currently-pending UserInteraction across the 3 legacy mechanisms,
+    read through `store_access` (the one sanctioned door adapters have onto
+    persistent/in-memory stores). Pending-only, mirroring the legacy
+    stores' own scope (see `store_access.list_pending_interactions`'s
+    docstring) — resolved ones arrive live via `UserInteractionUpsert`
+    instead."""
+    return tuple(
+        UserInteraction(
+            interaction_ref=rec.interaction_ref,
+            kind=UserInteractionKind(rec.kind),
+            request=rec.request,
+            state=UserInteractionState.PENDING,
+        )
+        for rec in store_access.list_pending_interactions(session_id)
+    )
+
+
 def _searchable_text(node: Node) -> str | None:
     payload = node.payload
     if payload is None:
@@ -536,9 +608,24 @@ class ChatSurfaceAdapter(ChatSurface):
         self._control_lock = threading.Lock()
 
     def bind(self) -> None:
-        """Idempotent: attaches the two live-plane bus subscriptions.
-        Calling this again (e.g. after a reconnect) re-subscribes under
-        the same deterministic names rather than duplicating."""
+        """Idempotent: attaches the live-plane bus subscriptions. Calling
+        this again (e.g. after a reconnect) re-subscribes under the same
+        deterministic names rather than duplicating.
+
+        `session.fire.msg_ask_result_set` is an EXISTING fact
+        (`session_manager.set_msg_ask_result`, fired both when the
+        session-bridge delegation picker is first stamped AND when it's
+        resolved) — no new producer needed for that mechanism; this is a
+        pure consumer addition. See `_on_ask_result_set`.
+
+        `interaction.fire.requested`/`interaction.fire.resolved` are NEW
+        facts published by the tool-approval and worker-creation-approval
+        mutation sites (`backend/tool_approvals_api.py`,
+        `backend/pending_approvals_api.py`, and their v2-direct-mutation
+        counterparts in `backend/surface_commands.py`'s
+        `resolve_interaction`) — self-contained payloads a single generic
+        handler maps straight onto a `UserInteraction`. See
+        `_on_interaction_fact`."""
         self._binder.bind(
             [
                 (EVENT_JOURNAL_WRITTEN, self._on_event_written),
@@ -546,6 +633,9 @@ class ChatSurfaceAdapter(ChatSurface):
                 ("lifecycle.turn_complete", self._on_lifecycle),
                 ("lifecycle.turn_stopped", self._on_lifecycle),
                 ("user_message_failed", self._on_user_message_failed),
+                ("session.fire.msg_ask_result_set", self._on_ask_result_set),
+                ("interaction.fire.requested", self._on_interaction_fact),
+                ("interaction.fire.resolved", self._on_interaction_fact),
             ]
         )
 
@@ -576,6 +666,7 @@ class ChatSurfaceAdapter(ChatSurface):
             session_id=session_id, surface_id=session_id, instruction_widget=None,
             turns=tuple(_to_compact(t) for t in window), live_turn_nodes=live_nodes,
             runs=(), older_cursor=older_cursor,
+            interactions=_map_pending_interactions(session_id),
         )
         self._ensure_seeded(session_id, window)
         # Exclude the last window turn: it may still be the live trailing
@@ -648,6 +739,7 @@ class ChatSurfaceAdapter(ChatSurface):
             session_id=session_id, surface_id=session_id, instruction_widget=None,
             turns=tuple(window), live_turn_nodes=trailing_view.live_nodes,
             runs=(), older_cursor=older_cursor,
+            interactions=_map_pending_interactions(session_id),
         )
         perf.record_count("chat_adapter.open_session.index_fast_path")
         return Ok(snapshot, state.projection.snapshot())
@@ -790,18 +882,33 @@ class ChatSurfaceAdapter(ChatSurface):
     def fetch_sidecar(
         self, session_id: SessionId, sidecar_ref: SidecarRef
     ) -> ProjectionResult[Sidecar]:
-        # gap: nothing in backend/adapters/normalize.py (not in this
-        # worktree's editable set) stamps Node.sidecar_ref for
-        # WORKER_INTERACTION nodes yet, so no producer exists for the ref
-        # this consumes — `sidecar_ref` is treated as the worker's Better
-        # Agent session id (agent_session_id / WorkerPanel.worker_session_id
-        # in frontend/src/types.ts), the only identifier
+        # `sidecar_ref` is treated as the worker's Better Agent session id
+        # (agent_session_id / WorkerPanel.worker_session_id in
+        # frontend/src/types.ts), the only identifier
         # backend/stores/worker_store.py indexes workers by. No other
         # sidecar kind (panel_kind) has a store source reachable here.
+        #
+        # `derive.build_subagent_panel_container` stamps `sidecar_ref` from
+        # the SAME `worker_session_id` every SubAgentTurn-family fact
+        # carries — real when the target happens to be a REGISTERED worker
+        # (`stores/worker_store.py`'s standing delegate-able roster,
+        # populated only by `workers_api.py`'s `upsert_worker`), which is
+        # NOT true for most ask/delegate_task/Task-tool delegation targets
+        # (confirmed: neither flow ever calls `upsert_worker` — a
+        # PERMANENT absence for those refs, not a race to retry through).
+        # `Rebuilding` would loop forever for them; an honest terminal
+        # `Ok(Sidecar(status="not_found"))` lets a caller stop asking
+        # without fabricating worker data that will never exist.
         worker = store_access.get_worker_record(sidecar_ref)
-        if worker is None:
-            return Rebuilding(retry_after_ms=None)
         state = self._get_or_create(session_id)
+        if worker is None:
+            return Ok(
+                Sidecar(
+                    sidecar_ref=sidecar_ref, panel_kind=_WORKER_SIDECAR_PANEL_KIND,
+                    status=_WORKER_SIDECAR_STATUS_NOT_FOUND, payload={},
+                ),
+                state.projection.snapshot(),
+            )
         return Ok(_map_worker_sidecar(sidecar_ref, worker), state.projection.snapshot())
 
     # ---- live plane --------------------------------------------------
@@ -864,6 +971,10 @@ class ChatSurfaceAdapter(ChatSurface):
             coro = port.edit_queued(intent.session_id, intent.node_id, intent.text)
         elif isinstance(intent, DeleteQueued):
             coro = port.delete_queued(intent.session_id, intent.node_id)
+        elif isinstance(intent, Rewind):
+            coro = port.rewind(intent.session_id, intent.node_id)
+        elif isinstance(intent, ResolveInteraction):
+            coro = port.resolve_interaction(intent.session_id, intent.interaction_ref, intent.response)
         elif isinstance(intent, SendPrompt):
             # The only rejection determinable without an await: no text and
             # no attachments can never be a valid prompt (mirrors the
@@ -985,6 +1096,7 @@ class ChatSurfaceAdapter(ChatSurface):
             turns = self._ensure_seeded_turns_bounded(surface_id)
         seq = event_journal_reader.current_seq(surface_id) or 0
         pending: dict[str, Node] = {}
+        worker_facts: dict[str, dict[NodeId, Node]] = {}
         if turns:
             for n in turns[-1].live_nodes:
                 if (
@@ -995,12 +1107,22 @@ class ChatSurfaceAdapter(ChatSurface):
                     and not n.node_id.endswith(_RESULT_SUFFIX)
                 ):
                     pending[n.node_id[len(_TOOL_PREFIX):]] = n
+            # Seed from the FULL turn index (not just `live_nodes`, which
+            # only eagerly includes a TRAILING panel's own children) — a
+            # mid-turn reconnect needs every delegation's accumulated
+            # facts so far to rebuild its container correctly on the next
+            # live fact, regardless of which panel is chronologically last.
+            for n in turns[-1].index.values():
+                delegation_id = _derive.delegation_id_of(n)
+                if delegation_id:
+                    worker_facts.setdefault(delegation_id, {})[n.node_id] = n
         with state.lock:
             if state.seeded:
                 return state
             state.current_turn_id = turns[-1].turn_id if turns else None
             state.last_seq = seq
             state.pending_tool_uses = pending
+            state.worker_turn_facts = worker_facts
             state.current_prompt_row = turns[-1].prompt_row if turns else None
             state.current_turn_boundary_seq = turns[-1].boundary_seq if turns else None
             # render_rev 0 (never bumped) is what open_session's snapshot
@@ -1222,6 +1344,12 @@ class ChatSurfaceAdapter(ChatSurface):
                 coalesced[n.node_id] = n
             return turn_id, touches
         produced = normalize_journal_row(row, surface_id=surface_id, turn_id="_", cv=CONTRACT_VERSION)
+        # A compaction row's own children are produced alongside it in this
+        # SAME list (`normalize._compaction_replay_children`) — fill in the
+        # compaction node's `child_manifest` before broadcast; see
+        # `derive.attach_compaction_manifests`'s docstring for why no
+        # extraction is needed on this flat per-row delivery path.
+        produced = _derive.attach_compaction_manifests(produced)
         prompt_node = next((n for n in produced if n.kind == NodeKind.TYPED_PROMPT), None)
         if (
             prompt_node is not None
@@ -1234,6 +1362,7 @@ class ChatSurfaceAdapter(ChatSurface):
         if prompt_node is not None:
             turn_id = prompt_node.node_id
             state.pending_tool_uses = {}
+            state.worker_turn_facts = {}
             state.current_prompt_row = row
             state.current_turn_boundary_seq = _row_seq(row)
         if turn_id is None:
@@ -1264,6 +1393,27 @@ class ChatSurfaceAdapter(ChatSurface):
                 # node_id resolves to the identical Node wherever it's
                 # observed.
                 n = replace(n, parent_id=_turn_node_id(turn_id))
+            elif n.kind == NodeKind.WORKER_INTERACTION:
+                # SubAgentTurn family, live path: nest this fact under its
+                # delegation's own WORKER_TURN/SUB_SESSION_TURN/SESSION_
+                # TURN container (constructing it on the delegation's
+                # first-seen fact, rebuilding it on every later one) —
+                # `state.worker_turn_facts` accumulates every fact seen so
+                # far for that delegation, same scope as `pending_tool_
+                # uses`. A fact with no recoverable delegation_id (never
+                # observed in practice — every producer always sends one)
+                # is left unparented rather than silently dropped.
+                delegation_id = _derive.delegation_id_of(n)
+                if delegation_id:
+                    container_id = _derive.worker_turn_container_id(delegation_id)
+                    n = replace(n, parent_id=container_id)
+                    facts = state.worker_turn_facts.setdefault(delegation_id, {})
+                    facts[n.node_id] = n
+                    container = _derive.build_subagent_panel_container(
+                        list(facts.values()), surface_id=surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+                    )
+                    touches += 1
+                    coalesced[container.node_id] = container
             merged = self._merge_live_node(state, n)
             touches += 1
             coalesced[merged.node_id] = merged
@@ -1431,6 +1581,16 @@ class ChatSurfaceAdapter(ChatSurface):
             state.pending_tool_uses[n.node_id[len(_TOOL_PREFIX):]] = n
         return n
 
+    @staticmethod
+    def _usage_from_payload(raw: object) -> Usage | None:
+        """`event.payload.get("usage")` is `trace_collector._normalize_
+        token_usage`'s dict shape (`_publish_terminal_lifecycle`'s own
+        docstring) — the SAME shape `nodes.usage_from_raw` parses (also
+        used by `derive`'s SubAgentTurn-family panel construction from a
+        journaled `worker_complete` fact's `token_usage`); this is a thin
+        alias kept for this file's existing call site."""
+        return usage_from_raw(raw)
+
     async def _on_lifecycle(self, event: BusEvent) -> None:
         phase_by_type = {
             "lifecycle.turn_start": TurnPhase.RUNNING,
@@ -1490,10 +1650,11 @@ class ChatSurfaceAdapter(ChatSurface):
                 closing_turn_id = turn_id
                 closing_boundary_seq = state.current_turn_boundary_seq
 
+        usage = self._usage_from_payload(event.payload.get("usage")) if phase != TurnPhase.RUNNING else None
         state.projection.broadcast(
             TurnLifecycle(
                 cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot,
-                turn_id=turn_id, phase=phase, reason=reason,
+                turn_id=turn_id, phase=phase, reason=reason, usage=usage,
             )
         )
         if closing_turn_id is not None and closing_boundary_seq is not None:
@@ -1564,6 +1725,87 @@ class ChatSurfaceAdapter(ChatSurface):
             NodeUpsert(cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot, node=node)
         )
 
+    async def _on_ask_result_set(self, event: BusEvent) -> None:
+        """`session_manager.set_msg_ask_result`'s `session.fire.
+        msg_ask_result_set` fact, filtered to the session-bridge delegation
+        picker's own `purpose` (`session_bridge._await_picker`/
+        `_mark_picker_resolved`) — this is the ONE of the 3 legacy
+        interaction mechanisms that ALREADY publishes a bus fact for both
+        its requested AND resolved transitions (the Ask-singleton's own
+        `propose_sessions` picker uses the same field but never sets
+        `purpose`, so it's naturally excluded — that flow isn't one of the
+        3 mechanisms this contract recast unifies). No new producer needed;
+        see `bind`'s docstring."""
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        ask_result = payload.get("ask_result")
+        if not isinstance(ask_result, dict) or ask_result.get("purpose") != "delegate_approval":
+            return
+        delegation_id = ask_result.get("delegation_id")
+        if not isinstance(delegation_id, str) or not delegation_id:
+            return
+        surface_id = event.root_id
+        resolved = bool(ask_result.get("resolved"))
+        response = {"picked_ref": ask_result.get("chosen_session_id") or None} if resolved else None
+        interaction = UserInteraction(
+            interaction_ref=f"{DELEGATE_CHOICE_REF_PREFIX}{delegation_id}",
+            kind=UserInteractionKind.CHOICE,
+            request={
+                "candidates": list(ask_result.get("session_ids") or ()),
+                "prompt_preview": ask_result.get("prompt_preview", ""),
+                "create_new": bool(ask_result.get("create_new", False)),
+            },
+            state=UserInteractionState.RESOLVED if resolved else UserInteractionState.PENDING,
+            response=response,
+        )
+        state = self._ensure_seeded(surface_id)
+        with state.lock:
+            snapshot = state.projection.snapshot()
+        state.projection.broadcast(
+            UserInteractionUpsert(
+                cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot,
+                user_interaction=interaction,
+            )
+        )
+
+    async def _on_interaction_fact(self, event: BusEvent) -> None:
+        """`interaction.fire.requested`/`interaction.fire.resolved` —
+        self-contained facts published by the tool-approval and
+        worker-creation-approval mutation sites (see `bind`'s docstring).
+        Payload is already shaped like `UserInteraction`'s own fields
+        (`interaction_ref`, `kind`, `request`, `state`, `response?`), so
+        one generic handler covers both mechanisms and both transitions —
+        unlike the session-bridge choice mechanism (`_on_ask_result_set`),
+        which reuses a differently-shaped pre-existing fact."""
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        interaction_ref = payload.get("interaction_ref")
+        kind = payload.get("kind")
+        state = payload.get("state")
+        if not (
+            isinstance(interaction_ref, str) and interaction_ref
+            and isinstance(kind, str) and isinstance(state, str)
+        ):
+            return
+        try:
+            interaction = UserInteraction(
+                interaction_ref=interaction_ref,
+                kind=UserInteractionKind(kind),
+                request=dict(payload.get("request") or {}),
+                state=UserInteractionState(state),
+                response=payload.get("response"),
+            )
+        except ValueError:
+            return
+        surface_id = event.root_id
+        state_obj = self._ensure_seeded(surface_id)
+        with state_obj.lock:
+            snapshot = state_obj.projection.snapshot()
+        state_obj.projection.broadcast(
+            UserInteractionUpsert(
+                cv=CONTRACT_VERSION, surface_id=surface_id, snapshot=snapshot,
+                user_interaction=interaction,
+            )
+        )
+
     def _replay(self, state: _SurfaceState, cursor: SurfaceCursor, emit: Emit) -> None:
         with state.lock:
             implied_seq = state.render_seq_history.get(cursor.render_rev, 0)
@@ -1583,6 +1825,14 @@ class ChatSurfaceAdapter(ChatSurface):
             finished, is_sidechain = _finish_normalize(
                 cursor.surface_id, turn_id, seg_rows, seg_produced, prompt_meta,
             )
+            # Same bound as `_build_turn_view`, for the SubAgentTurn family's
+            # worker/sub_session/session panels: a resubscribing cursor must
+            # not be flooded with raw WORKER_INTERACTION facts either — kept
+            # excludes them (still reachable via children() once their own
+            # container exists from the next open_session/children() call).
+            kept, _panel_extra = _derive.build_subagent_turns_for_panels(
+                finished, surface_id=cursor.surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+            )
             # Same bound as `_build_turn_view`: a resubscribing cursor must
             # not be flooded with raw sidechain descendants either — kept
             # excludes them (they're still reachable via children() once
@@ -1590,7 +1840,11 @@ class ChatSurfaceAdapter(ChatSurface):
             # children() call); non-sidechain nodes (including runtime_
             # change/failure) pass through unaffected.
             kept, _extra = _derive.build_subagent_turns(
-                finished, is_sidechain, surface_id=cursor.surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
+                kept, is_sidechain, surface_id=cursor.surface_id, turn_id=turn_id, cv=CONTRACT_VERSION,
             )
+            # Fill in any compaction node's `child_manifest` from its own
+            # children, still present (flat) in `kept` — see
+            # `derive.attach_compaction_manifests`'s docstring.
+            kept = _derive.attach_compaction_manifests(kept)
             for n in kept:
                 emit(NodeUpsert(cv=CONTRACT_VERSION, surface_id=cursor.surface_id, snapshot=snapshot, node=n))

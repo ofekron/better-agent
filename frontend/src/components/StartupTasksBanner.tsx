@@ -3,21 +3,31 @@ import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus, type BusEventMap } from "src/lib/eventBus";
+import { SurfaceClient } from "../adapter/client";
+import { subscribeSystemFrames } from "../lib/systemFeedRegistry";
 import type { StartupTask } from "../types";
+
+const systemClient = new SurfaceClient();
 
 /** Non-blocking banner that surfaces backend startup work (migrations,
  * recovery scans, jsonl replay) so the user sees what's running and
  * isn't confused by sessions whose state is still being rehydrated.
  *
  * Authoritative state lives in the backend's `startup_task_registry`;
- * this component pulls a snapshot from `GET /api/startup_tasks` on
- * mount and applies live deltas from the `startup_task_changed` event bus
- * fact published when the WS frame arrives.
+ * this component pulls a snapshot from `GET /api/startup_tasks` (legacy)
+ * AND `GET /api/v2/surface/host-startup-tasks` (ADR 0011 §7) on mount and
+ * applies live deltas from BOTH the legacy `startup_task_changed` event
+ * bus fact and the v2 `host_startup_task_upsert`/`_cleared` feed — dual,
+ * kept intentionally (no gap forces this; two convergent sources are
+ * harmless for a change-only, idempotent-by-`id` merge, and removing the
+ * legacy half is a follow-up once the whole app's `/ws/chat` root-event
+ * plane is confirmed retirable, not this pass's call to make alone).
  *
- * Convergence rule: WS is the live truth, REST is a backfill. The
- * mount-time REST merge only fills in tasks WS hasn't already
- * delivered — overwriting a fresher WS state with a stale REST
- * snapshot would flip a `done` row back to `running`.
+ * Convergence rule: whichever source's fact arrives, is the live truth,
+ * REST/v2-GET are only a backfill. A mount-time snapshot merge only
+ * fills in tasks neither live source has already delivered — overwriting
+ * a fresher live state with a stale snapshot would flip a `done` row
+ * back to `running`.
  *
  * `done` rows are evicted N seconds after their `finished_at`
  * (server-stamped). Running and failed rows stay until completion,
@@ -90,6 +100,52 @@ export function StartupTasksBanner() {
       setTasks((prev) => ({ ...prev, [task.id]: task }));
     }
     return eventBus.subscribe("startup_task_changed", onDelta);
+  }, []);
+
+  // v2 (ADR 0011 §7) hydrate + live overlay — dual with the legacy path
+  // above. `HostStartupTask` (backend `system_surface.py`) has no `error`
+  // field at all (honest gap — the concern was never modeled with one);
+  // an error message only ever comes from the legacy path, so a v2-driven
+  // update PRESERVES whatever `error` the row already carries rather than
+  // clobbering it with `null`.
+  useEffect(() => {
+    let cancelled = false;
+    systemClient
+      .fetchHostStartupTasks()
+      .then((envelope) => {
+        if (cancelled || envelope.kind !== "ok") return;
+        setTasks((prev) => {
+          const next = { ...prev };
+          for (const task of envelope.tasks) {
+            if (!(task.id in next)) {
+              next[task.id] = { ...task, error: null };
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // Same posture as the legacy REST catch above — the live feed
+        // populates as facts arrive.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return subscribeSystemFrames((frame) => {
+      if (frame.type === "host_startup_task_cleared") {
+        setTasks({});
+        return;
+      }
+      if (frame.type !== "host_startup_task_upsert") return;
+      const task = frame.task;
+      setTasks((prev) => ({
+        ...prev,
+        [task.id]: { ...task, error: prev[task.id]?.error ?? null },
+      }));
+    });
   }, []);
 
   // Time-based eviction: every tick, drop `done` rows older than the

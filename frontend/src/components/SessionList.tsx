@@ -7,7 +7,6 @@ import {
   API,
   createSessionFolder,
   createSessionTag,
-  fetchSessionOrganization,
   updateSessionOrganization,
 } from "../api";
 import { SessionStatusBadge } from "./SessionStatusBadge";
@@ -37,6 +36,7 @@ import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
 import { markSessionUnread, type SessionStatusKey } from "../lib/sessionRegistry";
+import { sessionSurfaceRegistry, useFoldersV2, useModelFacetV2, useTagsV2 } from "../lib/sessionSurfaceRegistry";
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import {
   SESSION_SORT_LABEL,
@@ -51,6 +51,44 @@ import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 import { providerDisplayName } from "../utils/providerDisplayName";
+import type {
+  FolderUpsertFrame,
+  SessionFolderWire,
+  SessionTagWire,
+  SessionsFrame,
+  TagUpsertFrame,
+} from "../adapter/wire";
+
+/** `SessionFolderWire`/`SessionTagWire` (v2) -> legacy `SessionFolder`/
+ * `SessionTag` (types.ts) — same identifier space (`folder_ref`/`tag_ref`
+ * ARE `folder_id`/`tag_id`, per `session_adapter.py`'s `list_folders`/
+ * `list_tags`), just renamed fields plus two legacy-only display fields
+ * (`created_at`/`updated_at`) `SessionFolderWire`/`SessionTagWire` don't
+ * carry — verified unused by anything in this file besides `Session` rows
+ * themselves (which are untouched, still legacy-sourced), so an empty
+ * placeholder is honest here, not a silent data loss. */
+function mapFolderWireToLegacy(folder: SessionFolderWire): SessionFolder {
+  return {
+    id: folder.folder_ref,
+    project_id: folder.project_ref,
+    parent_folder_id: folder.parent_folder_ref,
+    name: folder.name,
+    order: folder.order,
+    created_at: "",
+    updated_at: "",
+  };
+}
+
+function mapTagWireToLegacy(tag: SessionTagWire): SessionTag {
+  return {
+    id: tag.tag_ref,
+    project_id: tag.project_ref,
+    name: tag.name,
+    color: tag.color,
+    created_at: "",
+    updated_at: "",
+  };
+}
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -1742,9 +1780,46 @@ function SessionListImpl({
       document.removeEventListener("keydown", onKey);
     };
   }, [ctxMenu]);
-  const [folders, setFolders] = useState<SessionFolder[]>([]);
-  const [tags, setTags] = useState<SessionTag[]>([]);
-  const [modelFacet, setModelFacet] = useState<string[]>([]);
+  // ADR 0008 (Package B): the folder/tag CATALOG (available folders/tags
+  // to assign) now sources from the v2 `sessions` feed instead of the
+  // legacy `fetchSessionOrganization` one-shot snapshot — real incremental
+  // push (`folder_upsert`/`folder_removed`/`tag_upsert`/`tag_removed`)
+  // keeps this in sync across tabs, which the legacy path never did (a
+  // folder/tag created in another tab only appeared here on remount,
+  // since nothing but `session_organization_changed` -> `refreshSessions`
+  // -> `GET /api/sessions` ever refreshed it, and that call doesn't touch
+  // the catalog at all). `folder_ref`/`tag_ref` are the SAME raw ids
+  // legacy `folder_id`/`tag_id` already use (`session_adapter.py`'s
+  // `list_folders`/`list_tags`: `folder_ref=record.id`), so this is a
+  // drop-in source, not a remapped identifier space. Per-session
+  // membership (which folder/tags a row itself carries) is UNCHANGED —
+  // still read straight off each `Session` row's own `folder_id`/
+  // `session_tags` (see `sessionTagIds` below), not from this catalog.
+  // Mutations (create/rename/move/delete folder; create/assign/remove tag)
+  // stay on legacy REST (`updateSessionOrganization`'s synchronous
+  // `{organization}` result body drives `applyAckedOrganization`'s
+  // optimistic echo, and `createAndAssignFolder`/`createAndAssignTag`
+  // chain a create's synchronous new-id into an immediate assign — neither
+  // has a v2 equivalent: `IntentAccepted` carries only `intent_id`, no
+  // result payload, same completion-contract gap as `moveSessionToProject`
+  // in useSession.ts).
+  const foldersV2 = useFoldersV2(projectId || undefined);
+  const tagsV2 = useTagsV2(projectId || undefined);
+  const folders = useMemo<SessionFolder[]>(
+    () => [...foldersV2.map(mapFolderWireToLegacy)].sort(sortFolders),
+    [foldersV2],
+  );
+  const tags = useMemo<SessionTag[]>(
+    () => [...tagsV2.map(mapTagWireToLegacy)].sort((a, b) => a.name.localeCompare(b.name)),
+    [tagsV2],
+  );
+  // B11 (parity audit): the "Model" filter's facet — like folders/tags
+  // above, now sourced from the live v2 `sessions` feed (`selectors.model`,
+  // already streamed on every session) instead of the legacy one-shot
+  // `GET /api/session-organization` `models` field, which had no live-push
+  // equivalent at all (a project's model facet only ever updated on this
+  // component's mount/project-switch or an explicit post-mutation refetch).
+  const modelFacet = useModelFacetV2(projectId || undefined);
   const [ackedOrganizationBySession, setAckedOrganizationBySession] = useState<
     Record<string, AckedSessionOrganization>
   >({});
@@ -1981,29 +2056,11 @@ function SessionListImpl({
   const [bulkFolderPopover, setBulkFolderPopover] = useState<PopoverAnchor | null>(null);
   const [bulkTagPopover, setBulkTagPopover] = useState<PopoverAnchor | null>(null);
 
-  const refreshOrganization = useCallback(async () => {
-    if (!projectId) {
-      setFolders([]);
-      setTags([]);
-      setModelFacet([]);
-      return;
-    }
-    try {
-      const snapshot = await fetchSessionOrganization(projectId);
-      setFolders(
-        [...snapshot.folders].sort(sortFolders),
-      );
-      setTags([...snapshot.tags].sort((a, b) => a.name.localeCompare(b.name)));
-      setModelFacet([...(snapshot.models ?? [])].sort((a, b) => a.localeCompare(b)));
-      setOrgError(null);
-    } catch (err) {
-      setOrgError(err instanceof Error ? err.message : "Failed to load organization");
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    void refreshOrganization();
-  }, [refreshOrganization]);
+  // B11: folders/tags/modelFacet now ALL come from live v2 sources
+  // (`useFoldersV2`/`useTagsV2`/`useModelFacetV2` above) — no snapshot
+  // refetch remains for this component to own. `orgError` below is set
+  // directly by each mutation's own catch block (native-intent or REST
+  // fallback), never by a proactive refresh.
 
   useEffect(() => {
     if (Object.keys(ackedOrganizationBySession).length === 0) return;
@@ -2283,8 +2340,51 @@ function SessionListImpl({
     }));
   }, [setAckedOrganizationBySession]);
 
+  // ADR 0008 `assign_folder`/`assign_tags`/`create_folder`/`create_tag`
+  // intents exist and are wired end-to-end (Package B backend outcomes) —
+  // the ORIGINAL "no v2 equivalent: IntentAccepted carries only intent_id"
+  // premise was wrong (SurfaceSocket.submit resolves a real accept/reject
+  // promise; a create's server-generated ref arrives via the matching
+  // FolderUpsert/TagUpsert, see `sessionSurfaceRegistry.
+  // submitIntentAwaitingRef`'s docstring). Migrated below, native-when-
+  // socket-open/legacy-REST-fallback, same gating idiom `useSession.ts`'s
+  // other dual-path mutations use.
+  //
+  // `applyAckedOrganization`'s optimistic echo no longer needs the
+  // server's response body for an ASSIGN (not create): the desired
+  // folder_id/tag_ids ARE the input the caller already knows, so a
+  // successful v2 ack echoes them directly. One real, DOCUMENTED
+  // difference from the legacy path: `session_commands.py`'s
+  // `assign_folder`/`assign_tags` call `session_organization_store`
+  // directly (the same store the legacy REST route uses) but skip
+  // `session_listing_api.py`'s own `broadcast_session_organization_changed`
+  // (a route-handler-level side effect, not inside the shared store
+  // function) — so the underlying legacy `sessions[].folder_id`/
+  // `session_tags` cache this component also reads (`sessionTagIds`)
+  // won't itself refresh via that WS event when the v2 path is taken.
+  // User-visible rendering is unaffected (the acked-override at
+  // `{...session, ...acked}` above already masks this — see its own
+  // self-clear effect), so this is not a regression, just a cache-
+  // reconciliation nuance to know about if that override is ever removed.
+  const isFolderUpsertFrame = (frame: SessionsFrame): frame is FolderUpsertFrame =>
+    frame.type === "folder_upsert";
+  const isTagUpsertFrame = (frame: SessionsFrame): frame is TagUpsertFrame =>
+    frame.type === "tag_upsert";
+
   const moveToFolder = useCallback(async (sessionId: string, folderId: string | null) => {
     try {
+      const submitted = sessionSurfaceRegistry.submitIntent({
+        kind: "assign_folder", session_id: sessionId, folder_ref: folderId,
+      });
+      if (submitted) {
+        const ack = await submitted;
+        if (ack.type === "intent_rejected") {
+          setOrgError(ack.message || "Failed to move session");
+          return;
+        }
+        applyAckedOrganization(sessionId, { folder_id: folderId });
+        return;
+      }
       const result = await updateSessionOrganization(sessionId, { folder_id: folderId });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
@@ -2300,23 +2400,55 @@ function SessionListImpl({
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
+      const created = await sessionSurfaceRegistry.submitIntentAwaitingRef(
+        { kind: "create_folder", session_id: null, project_ref: projectId, name: trimmed, parent_folder_ref: null },
+        isFolderUpsertFrame,
+      );
+      if (created) {
+        if (!created.ok) {
+          setOrgError(created.message || "Failed to create folder");
+          return;
+        }
+        const folderId = created.frame?.folder.folder_ref;
+        if (folderId) await moveToFolder(sessionId, folderId);
+        return;
+      }
       const folder = await createSessionFolder(projectId, trimmed);
       const result = await updateSessionOrganization(sessionId, { folder_id: folder.id });
       applyAckedOrganization(sessionId, result.organization);
-      await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create folder");
     }
-  }, [projectId, applyAckedOrganization, refreshOrganization]);
+  }, [projectId, applyAckedOrganization, moveToFolder]);
 
   const setSessionTags = useCallback(async (sessionId: string, tagIds: string[]) => {
     try {
+      const submitted = sessionSurfaceRegistry.submitIntent({
+        kind: "assign_tags", session_id: sessionId, source: "manual",
+        add_tag_refs: null, remove_tag_refs: null, sync_tag_refs: tagIds,
+      });
+      if (submitted) {
+        const ack = await submitted;
+        if (ack.type === "intent_rejected") {
+          setOrgError(ack.message || "Failed to update tags");
+          return;
+        }
+        // Echo full `SessionTag` objects (name/color the acked shape
+        // requires) resolved from the already-loaded v2 catalog (`tags`
+        // above) — never fabricated from just the id.
+        applyAckedOrganization(sessionId, {
+          tags: tagIds
+            .map((id) => tags.find((t) => t.id === id))
+            .filter((t): t is SessionTag => !!t),
+        });
+        return;
+      }
       const result = await updateSessionOrganization(sessionId, { tag_ids: tagIds });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to update tags");
     }
-  }, [applyAckedOrganization]);
+  }, [applyAckedOrganization, tags]);
   const toggleSelectedTag = async (tagId: string) => {
     const remove = selectedTagIdsForBulk.has(tagId);
     await Promise.all(
@@ -2330,21 +2462,38 @@ function SessionListImpl({
   };
 
   // Create a project tag and assign it to the session in one step (the
-  // inline "Create" affordance in the tag popover). The WS broadcast +
-  // refreshOrganization bring both the tag pool and the session's tags
-  // back in sync; nothing is held as frontend state.
+  // inline "Create" affordance in the tag popover). The WS broadcast keeps
+  // the tag pool and the session's tags in sync; nothing is held as
+  // frontend state.
   const createAndAssignTag = useCallback(async (sessionId: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
+      const created = await sessionSurfaceRegistry.submitIntentAwaitingRef(
+        { kind: "create_tag", session_id: null, name: trimmed, project_ref: projectId, color: null },
+        isTagUpsertFrame,
+      );
+      if (created) {
+        if (!created.ok) {
+          setOrgError(created.message || "Failed to create tag");
+          return;
+        }
+        const tagId = created.frame?.tag.tag_ref;
+        if (tagId) {
+          const existing = sessions.find((s) => s.id === sessionId)?.session_tags ?? [];
+          const ids = new Set(existing.map((tag) => tag.id));
+          ids.add(tagId);
+          await setSessionTags(sessionId, Array.from(ids));
+        }
+        return;
+      }
       const tag = await createSessionTag(trimmed, projectId);
       const result = await updateSessionOrganization(sessionId, { add_tag_ids: [tag.id] });
       applyAckedOrganization(sessionId, result.organization);
-      await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
     }
-  }, [projectId, applyAckedOrganization, refreshOrganization]);
+  }, [projectId, applyAckedOrganization, sessions, setSessionTags]);
   const createAndAssignSelectedTag = async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId || selectedSessions.length === 0) return;
@@ -2357,7 +2506,6 @@ function SessionListImpl({
           return setSessionTags(session.id, Array.from(ids));
         }),
       );
-      await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
     }

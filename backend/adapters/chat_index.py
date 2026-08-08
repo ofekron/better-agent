@@ -32,7 +32,7 @@ Schema (`_ensure_schema`):
     table scan.
   - `headers(node_id PK, parent_id, turn_id, kind, ts, seq, status,
     run_ref, sidecar_ref, target_ref_json, manifest_count,
-    manifest_has_children, preview, payload_json)`: one row per Node this
+    manifest_has_children, preview, payload_json, usage_json)`: one row per Node this
     index has ever folded, keyed by node_id (upsert = latest-wins, same
     convergence rule the journal's own rows use). Indexed on
     `(parent_id, ts, seq)` so "give me container X's ordered children" is
@@ -168,20 +168,26 @@ from backend.surface_contract.nodes import (
     ResultPayload,
     SendMode,
     SteeringMessagePayload,
+    SubAgentTurnPayload,
     TargetRef,
     ThinkingPayload,
     ToolInteractionPayload,
     TypedPromptPayload,
     UnknownPayload,
+    Usage,
     UserInteractionPayload,
-    UserInteractionState,
     WorkerInteractionPayload,
 )
 
 logger = logging.getLogger(__name__)
 
 SCHEME_COMPONENT = "chat_index"
-SCHEME_VERSION = 1
+# v2: adds `headers.usage_json` (SubAgentTurn-family panel-level token
+# usage) — a new nullable column, so bumping this simply starts every
+# surface on a fresh index directory (per-surface path is `.../<sha256
+# (surface_id)>/index.sqlite3` under this version); the journal remains
+# the source of truth and rebuilds it losslessly (see module docstring).
+SCHEME_VERSION = 2
 _PREVIEW_CHARS = 240
 _DB_FILENAME = "index.sqlite3"
 
@@ -220,7 +226,8 @@ CREATE TABLE IF NOT EXISTS headers (
     manifest_count INTEGER,
     manifest_has_children INTEGER,
     preview TEXT,
-    payload_json TEXT
+    payload_json TEXT,
+    usage_json TEXT
 );
 CREATE INDEX IF NOT EXISTS headers_parent_order
     ON headers(parent_id, ts, seq);
@@ -368,6 +375,7 @@ def _node_to_row(node: Node) -> tuple:
     manifest = node.child_manifest
     payload_json = json.dumps(to_wire(node.payload)) if node.payload is not None else None
     target_ref_json = json.dumps(to_wire(node.target_ref)) if node.target_ref is not None else None
+    usage_json = json.dumps(to_wire(node.usage)) if node.usage is not None else None
     return (
         node.node_id,
         node.parent_id,
@@ -383,6 +391,7 @@ def _node_to_row(node: Node) -> tuple:
         (1 if manifest.has_children else 0) if manifest is not None else None,
         _preview_of(node),
         payload_json,
+        usage_json,
     )
 
 
@@ -420,12 +429,18 @@ def _reconstruct_payload(kind: NodeKind, d: dict | None) -> object | None:
     if kind == NodeKind.TOOL_INTERACTION:
         return ToolInteractionPayload(
             tool_name=d["tool_name"], args=d.get("args") or {}, result=d.get("result"),
-            approval_ref=d.get("approval_ref"), ui_kind=d.get("ui_kind"), derived_view=d.get("derived_view"),
+            interaction_ref=d.get("interaction_ref"), ui_kind=d.get("ui_kind"),
+            derived_view=d.get("derived_view"),
         )
     if kind == NodeKind.WORKER_INTERACTION:
         return WorkerInteractionPayload(fact_kind=d["fact_kind"], fact=d.get("fact") or {})
+    if kind in (NodeKind.WORKER_TURN, NodeKind.SUB_SESSION_TURN, NodeKind.SESSION_TURN):
+        return SubAgentTurnPayload(label=d.get("label"), created=bool(d.get("created", False)))
     if kind == NodeKind.STEERING_MESSAGE:
-        return SteeringMessagePayload(text=d["text"], target=d["target"])
+        return SteeringMessagePayload(
+            text=d["text"], target=d["target"],
+            attachments=_reconstruct_attachments(d.get("attachments")),
+        )
     if kind == NodeKind.MODEL_CHANGE:
         return ModelChangePayload(
             from_run_ref=d.get("from_run_ref"), to_run_ref=d["to_run_ref"],
@@ -462,11 +477,7 @@ def _reconstruct_payload(kind: NodeKind, d: dict | None) -> object | None:
             severity=d["severity"], code=DiagnosticCode(d["code"]), text=d["text"], data=d.get("data"),
         )
     if kind == NodeKind.USER_INTERACTION:
-        return UserInteractionPayload(
-            kind=d["kind"], request=d.get("request") or {},
-            state=UserInteractionState(d.get("state", UserInteractionState.PENDING.value)),
-            response=d.get("response"),
-        )
+        return UserInteractionPayload(interaction_ref=d.get("interaction_ref", ""))
     if kind == NodeKind.LIFECYCLE_NOTICE:
         return LifecycleNoticePayload(kind=LifecycleNoticeKind(d["kind"]), data=d.get("data"))
     if kind == NodeKind.FACT:
@@ -488,6 +499,8 @@ def _row_to_node(surface_id: SurfaceId, row: sqlite3.Row) -> Node:
     payload = _reconstruct_payload(kind, payload_dict)
     target_ref_dict = json.loads(row["target_ref_json"]) if row["target_ref_json"] is not None else None
     target_ref = TargetRef(**target_ref_dict) if target_ref_dict is not None else None
+    usage_dict = json.loads(row["usage_json"]) if row["usage_json"] is not None else None
+    usage = Usage(**usage_dict) if usage_dict is not None else None
     return Node(
         cv=CONTRACT_VERSION,
         node_id=row["node_id"],
@@ -503,6 +516,7 @@ def _row_to_node(surface_id: SurfaceId, row: sqlite3.Row) -> Node:
         sidecar_ref=row["sidecar_ref"],
         target_ref=target_ref,
         child_manifest=manifest,
+        usage=usage,
     )
 
 
@@ -561,7 +575,7 @@ def merge_settled_turn(
                 "INSERT OR REPLACE INTO headers("
                 "node_id, parent_id, turn_id, kind, ts, seq, status, run_ref, "
                 "sidecar_ref, target_ref_json, manifest_count, manifest_has_children, "
-                "preview, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "preview, payload_json, usage_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _node_to_row(node),
             )
             max_seq = max(max_seq, node.seq)

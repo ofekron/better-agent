@@ -7,16 +7,26 @@ unconfigured module serves nothing.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Collection
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException
 
 import internal_guards
+from backend.event_bus import BusEvent, bus
+from backend.surface_contract.nodes import (
+    ApprovalDecision,
+    UserInteractionKind,
+    UserInteractionState,
+    WORKER_APPROVAL_REF_PREFIX,
+    interaction_fact_payload,
+)
 from i18n import t
 from stores import pending_approvals
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _ROLE = "team-orchestration"
 
@@ -58,6 +68,71 @@ def _required_delegation_id(body: dict | None) -> str:
     if not delegation_id:
         raise HTTPException(status_code=400, detail="delegation_id is required")
     return delegation_id
+
+
+# v2 UserInteraction fact producer (ADR 0006 §5) — additive to the legacy
+# in-memory `resolve_approval` callback below, which stays as-is;
+# `backend/adapters/chat_adapter.py`'s `_on_interaction_fact` is the one
+# consumer.
+def _worker_approval_request_dict(rec: dict) -> dict:
+    return {
+        "subject": "delegation",
+        "cwd": rec.get("cwd", ""),
+        "justification": rec.get("justification", ""),
+        "proposed_description": rec.get("proposed_description", ""),
+        "risk_scope": rec.get("proposed_orchestration_mode", ""),
+    }
+
+
+# Creation happens outside this file's own routes — `orchestrator.py`'s
+# delegate_task manual-approval gate and `orchs/manager/_approval.py`'s
+# fresh-worker approval handshake both call `pending_approvals.create()`
+# directly (in-process, not over HTTP; unlike `tool_approvals_api.py`,
+# there is no `/api/internal/pending-approvals/request` route for this
+# mechanism). Those two call sites import and call THIS function right
+# where they already emit their own legacy `worker_creation_requested`
+# WS broadcast, so the v2 fact payload-construction logic (mirroring
+# `_worker_approval_request_dict`/`_publish_resolved_fact` below) stays
+# centralized in the one file that owns the UserInteraction shape for this
+# mechanism, instead of being duplicated at both call sites. Without this,
+# a worker-creation approval card only ever appeared on the NEXT cold
+# hydration/reconnect (`store_access.list_pending_interactions`) — never
+# live the moment it was actually requested.
+def publish_requested_fact(delegation_id: str, app_session_id: str, rec: dict) -> None:
+    if not app_session_id:
+        return
+    try:
+        bus.publish_threadsafe(BusEvent(
+            type="interaction.fire.requested", root_id=app_session_id, sid=app_session_id,
+            payload=interaction_fact_payload(
+                f"{WORKER_APPROVAL_REF_PREFIX}{delegation_id}", UserInteractionKind.APPROVAL,
+                _worker_approval_request_dict(rec),
+            ),
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("pending_approvals_api: interaction.fire.requested publish failed")
+
+
+def _publish_resolved_fact(delegation_id: str, rec: dict) -> None:
+    app_session_id = str(rec.get("app_session_id") or "")
+    if not app_session_id:
+        return
+    decision = (
+        ApprovalDecision.APPROVE if rec.get("status") == "approved" else ApprovalDecision.DENY
+    )
+    try:
+        bus.publish_threadsafe(BusEvent(
+            type="interaction.fire.resolved", root_id=app_session_id, sid=app_session_id,
+            payload=interaction_fact_payload(
+                f"{WORKER_APPROVAL_REF_PREFIX}{delegation_id}", UserInteractionKind.APPROVAL,
+                _worker_approval_request_dict(rec),
+                state=UserInteractionState.RESOLVED, response={"decision": decision.value},
+            ),
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("pending_approvals_api: interaction.fire.resolved publish failed")
 
 
 # `x_internal_token` is declared so a request missing the header is
@@ -106,6 +181,7 @@ async def internal_approve_pending_approval(
     early = _resolved_or_error(rec, reason)
     if early is not None:
         return early
+    _publish_resolved_fact(delegation_id, rec)
     resolve_approval(delegation_id, rec)
     return {"status": "approved", "record": rec}
 
@@ -122,5 +198,6 @@ async def internal_deny_pending_approval(
     early = _resolved_or_error(rec, reason)
     if early is not None:
         return early
+    _publish_resolved_fact(delegation_id, rec)
     resolve_approval(delegation_id, rec)
     return {"status": "denied", "record": rec}

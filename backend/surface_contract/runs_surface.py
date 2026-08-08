@@ -35,6 +35,21 @@ class DetailValueKind(StrEnum):
     DURATION = "duration"
     COUNT = "count"
     REF = "ref"
+    # `value` is a JSON-safe `list[dict]` — one row per pid in the run's
+    # descendant process tree (see `run_detail()`'s on-demand
+    # `process_inspect.inspect_process_tree` enrichment). Not a
+    # provider-declared token — no i18n resolution beyond the row shape
+    # itself, which the frontend renders as a table.
+    PROCESS_TREE = "process_tree"
+
+
+class RunKind(StrEnum):
+    """Mirrors `turn_manager.py`'s `Literal["manager", "native", "worker"]`
+    run-state entry `kind` — backend-internal categorization, not a
+    provider display string."""
+    MANAGER = "manager"
+    NATIVE = "native"
+    WORKER = "worker"
 
 
 # phase is an opaque provider-declared token; display resolves via the
@@ -56,6 +71,17 @@ class RunSummary:
     started_at: float
     last_heartbeat_at: float | None
     startup: StartupProgress | None
+    # Everything below is sourced from turn_manager.py's `run.state.*`
+    # facts (event-driven, see `RunsSurfaceAdapter._on_run_state_fact`) —
+    # live-only, in-memory: present while this backend incarnation has
+    # live knowledge of the run, honestly absent (None / False) otherwise,
+    # INCLUDING after a cold restart (never persisted, never stale).
+    kind: RunKind | None
+    target_message_id: str | None
+    delegation_id: str | None
+    pid: int | None
+    stalled_at: float | None
+    recovered_at_startup: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,11 +128,17 @@ class RunSummaryUpsert:
 RunsFrame = RunSummaryUpsert
 
 
+@dataclass(frozen=True, slots=True)
+class RunPage:
+    runs: tuple[RunSummary, ...]
+    next_cursor: PageCursor | None
+
+
 class RunsSurface(ABC):
     @abstractmethod
     def list_runs(
         self, session_id: SessionId | None, cursor: PageCursor | None
-    ) -> ProjectionResult[tuple[RunSummary, ...]]: ...
+    ) -> ProjectionResult[RunPage]: ...
 
     @abstractmethod
     def run_detail(self, run_id: str) -> ProjectionResult[RunDetail]: ...

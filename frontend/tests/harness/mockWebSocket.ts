@@ -98,6 +98,55 @@ export class MockWebSocketController {
     });
   }
 
+  /** The OPEN socket that has actually subscribed to `surfaceId` via a
+   *  `{"surfaces": [{"surface_id": ...}]}` cursor message (the chat-content
+   *  `SurfaceStore`'s own subscribe, `adapter/client.ts`'s `SurfaceSocket.
+   *  open()`) — disambiguates from every OTHER concurrent `/ws/v2/surface`
+   *  connection that shares the exact same URL (feed-only registries:
+   *  runs, providers, sessions, interactionResolve, systemFeed, ... —
+   *  `lib/surfaceFeedSocket.ts`'s `createFeedSocketRegistry` always opens
+   *  with `{"surfaces": []}` first, an EMPTY array, so it never matches a
+   *  real `surfaceId`). A bare URL-substring match (`getCurrentByUrl`)
+   *  cannot tell these apart once more than one is open — content-based
+   *  matching is unambiguous regardless of connection order. */
+  private getCurrentBySurfaceId(surfaceId: string): MockWebSocket {
+    const match = [...this.sockets]
+      .reverse()
+      .find(
+        (ws) =>
+          ws.readyState !== MockWebSocket.CLOSED &&
+          ws.outbound.some((f) => {
+            const surfaces = (f as { surfaces?: Array<{ surface_id?: string }> }).surfaces;
+            return Array.isArray(surfaces) && surfaces.some((s) => s.surface_id === surfaceId);
+          }),
+      );
+    if (!match) {
+      throw new Error(`MockWebSocket: no active instance subscribed to surface "${surfaceId}"`);
+    }
+    return match;
+  }
+
+  /** Same as `emitTo`, targeting the socket subscribed to `surfaceId`
+   *  (see `getCurrentBySurfaceId`) instead of matching by bare URL —
+   *  the safe way to deliver a `ChatFrame` once a second (or third)
+   *  concurrent `/ws/v2/surface` feed-only connection may also be open. */
+  emitToSurface(surfaceId: string, frame: unknown): void {
+    const ws = this.getCurrentBySurfaceId(surfaceId);
+    act(() => {
+      ws.deliverRaw(frame);
+    });
+  }
+
+  /** Same as `emitMany`, targeting the socket whose URL contains
+   *  `urlSubstring` instead of "whichever connected last" — the batched
+   *  (single `act()`) counterpart to calling `emitTo` in a loop. */
+  emitManyTo(urlSubstring: string, frames: unknown[]): void {
+    const ws = this.getCurrentByUrl(urlSubstring);
+    act(() => {
+      for (const frame of frames) ws.deliverRaw(frame);
+    });
+  }
+
   /** All outbound .send() payloads, parsed. */
   get outbound(): OutboundFrame[] {
     return this.sockets.flatMap((ws) => ws.outbound);
@@ -118,6 +167,37 @@ export class MockWebSocketController {
     const ws = this.getCurrent();
     act(() => {
       ws.simulateOpen();
+    });
+  }
+
+  /** Same as `closeCurrent`, targeting the OPEN socket whose URL contains
+   *  `urlSubstring` instead of "whichever connected last" — unsafe once a
+   *  second concurrent socket (e.g. a `/ws/v2/surface` feed connection)
+   *  exists, same rationale as `emitTo`/`getCurrentByUrl`. */
+  closeCurrentByUrl(urlSubstring: string): void {
+    this.autoOpen = false;
+    const ws = this.getCurrentByUrl(urlSubstring);
+    act(() => {
+      ws.simulateClose();
+    });
+  }
+
+  /** Same as `reopenCurrent`, targeting `urlSubstring`'s most-recently
+   *  created instance (NOT open-filtered, unlike `getCurrentByUrl` — the
+   *  instance being reopened is, by construction, the one `closeCurrentByUrl`
+   *  just transitioned to CLOSED). Reopens the SAME mock instance in place
+   *  (no new `WebSocket` object created) — the test-harness shortcut for
+   *  "the underlying connection recovered", bypassing the real client's
+   *  timer-driven reconnect delay (see `useWebSocket.ts`'s `reconnectTimer`)
+   *  the same way untargeted `reopenCurrent` always has. */
+  reopenCurrentByUrl(urlSubstring: string): void {
+    this.autoOpen = true;
+    const match = [...this.sockets].reverse().find((ws) => ws.url.includes(urlSubstring));
+    if (!match) {
+      throw new Error(`MockWebSocket: no instance matching "${urlSubstring}"`);
+    }
+    act(() => {
+      match.simulateOpen();
     });
   }
 }

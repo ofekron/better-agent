@@ -156,23 +156,17 @@ class StartupTaskRegistry:
         for tid in done_ids[:excess]:
             self._tasks.pop(tid, None)
 
-    def _broadcast(self, data: dict) -> None:
-        """Schedule a `startup_task_changed` WS broadcast. Same
-        cross-thread idea as `SessionWSBroadcaster._dispatch`: prefer
-        the running loop (loop-side caller), fall back to the bound
-        loop via `run_coroutine_threadsafe` (worker-thread caller).
-        Each branch is exclusive — the coro is scheduled at most once,
-        and closed otherwise. Silently drops if no loop is bound (e.g.
-        early construction before `bind`)."""
-        if self._coordinator is None:
-            return
-        coro = self._coordinator.broadcast_global("startup_task_changed", data)
-        # Branch 1: there IS a running loop in this thread → schedule
-        # inline and return. If `create_task` itself raises (loop is
-        # closing mid-call), close the coro — falling through to the
-        # bound-loop branch would re-schedule the same (already-
-        # consumed) coroutine and raise "cannot reuse already awaited
-        # coroutine".
+    def _schedule(self, coro, *, what: str) -> None:
+        """Schedule one fire-and-forget coroutine onto whichever loop is
+        reachable right now. Same cross-thread idea as
+        `SessionWSBroadcaster._dispatch`: prefer the running loop (loop-
+        side caller), fall back to the bound loop via
+        `run_coroutine_threadsafe` (worker-thread caller). Each branch is
+        exclusive — the coro is scheduled at most once, and closed
+        otherwise. Silently drops if no loop is bound (e.g. early
+        construction before `bind`). Factored out of `_broadcast` so both
+        the WS broadcast and the ADR 0011 §7 bus fact below share one
+        scheduling mechanism."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -182,18 +176,36 @@ class StartupTaskRegistry:
                 loop.create_task(coro)
                 return
             except Exception:
-                logger.exception("startup_task broadcast: create_task failed")
+                logger.exception("startup_task %s: create_task failed", what)
                 coro.close()
                 return
-        # Branch 2: no running loop in this thread → ship to the bound
-        # loop. Same close-on-failure invariant.
         if self._loop is not None and not self._loop.is_closed():
             try:
                 asyncio.run_coroutine_threadsafe(coro, self._loop)
                 return
             except Exception:
-                logger.exception("startup_task broadcast schedule failed")
+                logger.exception("startup_task %s: schedule failed", what)
         coro.close()
+
+    def _broadcast(self, data: dict) -> None:
+        """Schedule a `startup_task_changed` WS broadcast plus the ADR
+        0011 §7 `startup_tasks.fire.changed` bus fact (for
+        `backend/adapters/system_adapter.py`'s `HostStartupTask` live
+        push) — same `data` shape (`{"task": {...}}` or `{"cleared":
+        True}`), two independent deliveries of the one fact."""
+        if self._coordinator is not None:
+            self._schedule(
+                self._coordinator.broadcast_global("startup_task_changed", data), what="broadcast",
+            )
+        from event_bus import BusEvent, bus
+
+        self._schedule(
+            bus.publish(BusEvent(
+                type="startup_tasks.fire.changed",
+                root_id="system", sid="system", payload=data, persist=False,
+            )),
+            what="bus fact",
+        )
 
 
 # Singleton — imported by main.py + run_recovery + any future startup

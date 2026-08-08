@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import sqlite3
 import threading
 import time
@@ -622,6 +623,97 @@ def patch_session_tags(
         return organization_for_session(session_id)
 
 
+def patch_session_tags_scoped(
+    session_id: str,
+    *,
+    source: str,
+    add: list[Any] | None = None,
+    remove: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Source-scoped delta (ADR 0008 `assign_tags` delta mode): `add`
+    attributes new tags to `source`; `remove` only drops a tag_id when its
+    CURRENTLY recorded source equals `source` — a tag_id currently owned by
+    a different source is left untouched (source-isolation invariant).
+    Unlike `patch_session_tags` above (the legacy manual-only delta path
+    the `PATCH /api/sessions/{id}/organization` route still uses, which
+    removes unconditionally regardless of source), this is the one path
+    the new `assign_tags` intent uses for every source, `manual` included."""
+    session_id = _clean_text(session_id, "session_id")
+    source = _clean_tag_source(source)
+    add = add or []
+    remove = remove or []
+    if not isinstance(add, list) or not isinstance(remove, list):
+        raise ValueError("add and remove must be lists")
+    add_ids = [_clean_text(tag_id, "tag_id") for tag_id in add]
+    remove_ids = {_clean_text(tag_id, "tag_id") for tag_id in remove}
+    with _lock:
+        data = _load()
+        missing = [tag_id for tag_id in add_ids if not _tag(data, tag_id)]
+        if missing:
+            raise ValueError("unknown tag_id")
+        assignment = _assignment(data, session_id)
+        removable = {
+            tag_id for tag_id in remove_ids
+            if assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL) == source
+        }
+        next_ids = [tid for tid in assignment["tag_ids"] if tid not in removable]
+        for tag_id in removable:
+            assignment["tag_sources"].pop(tag_id, None)
+        for tag_id in add_ids:
+            if tag_id not in next_ids:
+                next_ids.append(tag_id)
+            assignment["tag_sources"][tag_id] = source
+        assignment["tag_ids"] = next_ids
+        _save(data)
+        return organization_for_session(session_id)
+
+
+def session_ids_with_tag(tag_id: str) -> list[str]:
+    """Every session_id whose assignment currently references `tag_id` —
+    used to compute `tag_removed`'s `affected_session_ids` fact payload
+    (SessionSurfaceAdapter refreshes each one's summary) BEFORE the tag is
+    deleted, since `delete_tag` itself strips the id from every
+    assignment."""
+    tag_id = _clean_text(tag_id, "tag_id")
+    with _lock:
+        data = _load_shared()
+        return sorted(
+            session_id
+            for session_id, raw in data["assignments"].items()
+            if isinstance(session_id, str)
+            and isinstance(raw, dict)
+            and tag_id in (raw.get("tag_ids") or [])
+        )
+
+
+async def publish_organization_fact(kind: str, payload: dict[str, Any]) -> None:
+    """Owner-side fact for folder/tag/membership mutations
+    (`session_organization.fire.<kind>`) — the single publish site both the
+    legacy REST routes (`backend/session_listing_api.py`) and the ADR 0008
+    `SessionCommandPort` (`backend/session_commands.py`) call after a
+    successful mutation through this module's own functions, so
+    `SessionSurfaceAdapter` (`backend/adapters/session_adapter.py`)
+    projects a live `FolderUpsert`/`FolderRemoved`/`TagUpsert`/`TagRemoved`/
+    summary refresh regardless of which transport triggered the write —
+    one fact source, not a duplicated publish path. Imports `event_bus`
+    locally (not at module load) so this otherwise-pure store stays
+    importable, and testable, without the bus wired up."""
+    from event_bus import BusEvent, bus
+
+    try:
+        await bus.publish(BusEvent(
+            type=f"session_organization.fire.{kind}",
+            root_id="",
+            sid="",
+            payload={**payload, "kind": kind},
+            persist=False,
+        ))
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "session_organization.fire.%s publish failed", kind,
+        )
+
+
 def sync_session_tags_by_source(
     session_id: str,
     *,
@@ -629,10 +721,15 @@ def sync_session_tags_by_source(
     source: str,
     merge: bool = False,
 ) -> dict[str, Any]:
+    """Source-scoped replace: every `tag_ids` entry whose source is
+    exactly `source` is either kept or dropped to match `tag_ids`; every
+    entry whose source differs is left untouched byte-for-byte (ADR 0008
+    `assign_tags` sync mode's source-isolation invariant — ADR 0008 also
+    reuses this verbatim for the `manual` source, so there is no longer a
+    manual-only exception here: the source-isolation guarantee below holds
+    for every source uniformly, including `manual`)."""
     session_id = _clean_text(session_id, "session_id")
     source = _clean_tag_source(source)
-    if source == TAG_SOURCE_MANUAL:
-        raise ValueError("source-specific sync cannot target manual tags")
     if not isinstance(tag_ids, list):
         raise ValueError("tag_ids must be a list")
     cleaned: list[str] = []

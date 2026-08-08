@@ -9,7 +9,7 @@
 
 import { act, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SurfaceStore } from "../../src/surface/state";
+import { isLivePhase, SurfaceStore } from "../../src/surface/state";
 import { MockWebSocketController } from "../harness/mockWebSocket";
 import {
   assistantTextNode,
@@ -24,8 +24,26 @@ import {
   snapshotEnvelope,
   turnNode,
 } from "./fixtures";
-import type { ChatFrame, NodeWire } from "../../src/adapter/wire";
 import type { WSEvent } from "../../src/types";
+
+describe("isLivePhase", () => {
+  // Regression for A0-1: the backend's TurnPhase enum only ever sends
+  // "awaiting_interaction" (surface_contract/frames.py) — AWAITING_APPROVAL
+  // was renamed away. LIVE_PHASES must key off the current wire value.
+  it("treats awaiting_interaction as live", () => {
+    expect(isLivePhase("awaiting_interaction")).toBe(true);
+  });
+
+  it("treats every non-terminal phase as live, terminal phases and null as not-live", () => {
+    for (const phase of ["queued", "starting", "running", "reconnecting", "stopping"] as const) {
+      expect(isLivePhase(phase)).toBe(true);
+    }
+    for (const phase of ["completed", "stopped", "failed"] as const) {
+      expect(isLivePhase(phase)).toBe(false);
+    }
+    expect(isLivePhase(null)).toBe(false);
+  });
+});
 
 describe("SurfaceStore", () => {
   let ws: MockWebSocketController;

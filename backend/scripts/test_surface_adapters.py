@@ -56,6 +56,7 @@ from backend.surface_contract.identity import Ok, Rebuilding  # noqa: E402
 from backend.surface_contract.provider_config_surface import ProviderConfigSurface  # noqa: E402
 from backend.surface_contract.runs_surface import RunPhase, RunsSurface  # noqa: E402
 from backend.surface_contract.session_surface import (
+    SessionRemoved,
     SessionRollupState,
     SessionSummaryUpsert,
     SessionSurface,
@@ -101,6 +102,9 @@ def test_list_sessions_maps_seeded_session() -> None:
     # this sid yet — conservatively IDLE, per _derive_rollup's default.
     assert match.state == SessionRollupState.IDLE
     assert match.attention_markers == ()
+    # B1: `cwd` has no matching Project record — honestly None, not every
+    # ad-hoc working directory treated as a tracked project.
+    assert match.project_ref is None
 
 
 def test_live_refresh_selectors_include_runtime_profile_id() -> None:
@@ -202,15 +206,20 @@ def test_session_deleted_fact_evicts_rollup_cache() -> None:
     running_match = next(s for s in running_result.value.sessions if s.session_id == sid)
     assert running_match.state == SessionRollupState.RUNNING
 
-    # gap: SessionFrame has no deletion/tombstone variant (would need a new
-    # frame type in backend/surface_contract/session_surface.py, not
-    # editable here) — no live frame tells a subscriber the session is
-    # gone; only the adapter's own rollup/summary cache is evicted, visible
-    # here as the rollup resetting to IDLE on the next read.
-    asyncio.run(bus.publish(BusEvent(
-        type="session.fire.deleted", root_id=sid, sid=sid,
-        payload={"kind": "deleted", "deleted_sids": [sid]}, persist=False,
-    )))
+    # B4: SessionRemoved is an authoritative tombstone — a live subscriber
+    # learns of the deletion immediately from the frame itself, not merely
+    # from the rollup resetting to IDLE on a subsequent re-list.
+    received: list = []
+    sub = adapter.subscribe(received.append)
+    try:
+        asyncio.run(bus.publish(BusEvent(
+            type="session.fire.deleted", root_id=sid, sid=sid,
+            payload={"kind": "deleted", "deleted_sids": [sid], "root_id": sid}, persist=False,
+        )))
+        removed = [f for f in received if isinstance(f, SessionRemoved) and f.session_id == sid]
+        assert removed, received
+    finally:
+        sub.close()
     after_result = adapter.list_sessions(None, None)
     after_match = next(s for s in after_result.value.sessions if s.session_id == sid)
     assert after_match.state == SessionRollupState.IDLE
@@ -230,7 +239,10 @@ def test_list_sessions_query_filters_by_title() -> None:
     assert all(needle in s.title.lower() for s in result.value.sessions)
 
 
-def test_projects_maps_seeded_project_with_gap_defaults() -> None:
+def test_projects_maps_seeded_project_real_session_count() -> None:
+    """B1: `session_count` is a real count of sessions whose `cwd` matches
+    the project's `path` (`project_store.session_counts_by_cwd`), not a
+    hardcoded 0."""
     import project_store  # bare — matches store_access._resolve aliasing
 
     project_dir = tempfile.mkdtemp(prefix="ba-surface-project-")
@@ -238,19 +250,20 @@ def test_projects_maps_seeded_project_with_gap_defaults() -> None:
     assert added is not None
 
     adapter = SessionSurfaceAdapter()
-    result = adapter.projects()
-    assert isinstance(result, Ok), result
-    match = next((p for p in result.value if p.project_ref == added["path"]), None)
-    assert match is not None
-    assert match.name == added["name"]
-    # gap: no session-count/order source on ProjectRecord.
-    assert match.session_count == 0
+    empty_result = adapter.projects()
+    assert isinstance(empty_result, Ok), empty_result
+    empty_match = next((p for p in empty_result.value if p.project_ref == added["path"]), None)
+    assert empty_match is not None
+    assert empty_match.name == added["name"]
+    assert empty_match.session_count == 0
 
-
-def test_rearranger_state_is_rebuilding() -> None:
-    adapter = SessionSurfaceAdapter()
-    result = adapter.rearranger_state()
-    assert isinstance(result, Rebuilding)
+    session_store.create_session(name="in project", model="m", cwd=added["path"])
+    session_store.create_session(name="also in project", model="m", cwd=added["path"])
+    populated_result = adapter.projects()
+    populated_match = next(
+        p for p in populated_result.value if p.project_ref == added["path"]
+    )
+    assert populated_match.session_count == 2
 
 
 def test_session_fire_fact_triggers_change_only_upsert() -> None:
@@ -342,17 +355,25 @@ def test_runtime_profiles_maps_seeded_profile() -> None:
     })
 
     adapter = ProviderConfigSurfaceAdapter()
+    # Closure 3 (RuntimeProfile v2 parity): runtime_profiles() now returns
+    # the full RuntimeProfilesSnapshot, not a bare tuple — .profiles.
+    snapshot = adapter.runtime_profiles()
     match = next(
-        (p for p in adapter.runtime_profiles() if p.runtime_profile_id == profile["id"]), None,
+        (p for p in snapshot.profiles if p.runtime_profile_id == profile["id"]), None,
     )
     assert match is not None
     assert match.provider_id == provider["id"]
     assert match.runner == profile["runner"]
+    assert match.deleted_at is None
+    assert snapshot.default_runtime_profile_id is not None
 
 
-def test_installable_catalog_is_empty() -> None:
+def test_installable_catalog_serves_backend_templates() -> None:
     adapter = ProviderConfigSurfaceAdapter()
-    assert adapter.installable_catalog() == ()
+    catalog = adapter.installable_catalog()
+    assert len(catalog) >= 19
+    kinds = {d.kind for d in catalog}
+    assert "claude" in kinds
 
 
 def test_provider_submit_rejects_all_intents() -> None:
@@ -369,7 +390,13 @@ def test_provider_submit_rejects_all_intents() -> None:
 # RunsSurfaceAdapter
 # ---------------------------------------------------------------------------
 
-def _seed_run(app_session_id: str, *, success: bool | None, error: str | None = None) -> str:
+def _seed_run(
+    app_session_id: str,
+    *,
+    success: bool | None,
+    error: str | None = None,
+    turn_id: str | None = None,
+) -> str:
     root = runs_dir.runs_root()
     run_id = f"run-{uuid.uuid4().hex}"
     run_dir = root / run_id
@@ -379,6 +406,10 @@ def _seed_run(app_session_id: str, *, success: bool | None, error: str | None = 
         "jsonl_path": str(run_dir / "stream.jsonl"),
         "app_session_id": app_session_id,
     })
+    if turn_id is not None:
+        # Mirrors `runner.py`'s `turn_dir(run_dir, turn_id)` — the run's
+        # owning turn id is the single child directory name under `turns/`.
+        (run_dir / "turns" / turn_id).mkdir(parents=True, exist_ok=True)
     if success is not None:
         runs_dir.atomic_write_json(run_dir / "complete.json", {"success": success, "error": error})
     return run_id
@@ -393,11 +424,12 @@ def test_list_runs_phase_mapping_completed_failed_running() -> None:
     adapter = RunsSurfaceAdapter()
     result = adapter.list_runs(None, None)
     assert isinstance(result, Ok), result
-    by_id = {r.run_id: r for r in result.value}
+    by_id = {r.run_id: r for r in result.value.runs}
     assert by_id[completed_run].phase == RunPhase.COMPLETED
     assert by_id[failed_run].phase == RunPhase.FAILED
-    assert by_id[running_run].phase == RunPhase.RUNNING
-    # gap: no turn_id / heartbeat source anywhere in store_access.
+    assert by_id[running_run].phase == RunPhase.STARTING
+    # No `turns/<turn_id>` dir seeded for this run — see
+    # test_adapter_runs.py for turn_id/heartbeat coverage.
     assert by_id[completed_run].turn_id is None
     # runner is joined via the run's session -> provider -> runtime profile
     # (see test_list_runs_runner_joined_via_session_provider below); no
@@ -427,7 +459,7 @@ def test_list_runs_runner_joined_via_session_provider() -> None:
     adapter = RunsSurfaceAdapter()
     result = adapter.list_runs(session["id"], None)
     assert isinstance(result, Ok), result
-    match = next(r for r in result.value if r.run_id == run_id)
+    match = next(r for r in result.value.runs if r.run_id == run_id)
     assert match.provider_id == provider["id"]
     assert match.runner == expected_runner
     assert expected_runner
@@ -441,7 +473,7 @@ def test_list_runs_filters_by_session_id() -> None:
     adapter = RunsSurfaceAdapter()
     result = adapter.list_runs(session_id, None)
     assert isinstance(result, Ok), result
-    assert {r.run_id for r in result.value} == {run_id}
+    assert {r.run_id for r in result.value.runs} == {run_id}
 
 
 def test_run_detail_maps_entries_and_missing_is_rebuilding() -> None:
@@ -460,17 +492,43 @@ def test_run_detail_maps_entries_and_missing_is_rebuilding() -> None:
     assert isinstance(missing, Rebuilding)
 
 
-def test_usage_analytics_is_rebuilding() -> None:
+def test_usage_analytics_returns_ok_page_seeded_from_llm_call_log() -> None:
+    """E6: `usage_analytics()` is real now (`backend/adapters/
+    usage_analytics.py`) — see `test_usage_analytics.py` for the full
+    aggregation + pagination + honest-absence coverage. This one
+    integration check proves the adapter is wired through `store_access.
+    list_llm_call_records()`, not the old permanent `Rebuilding` stub."""
+    import llm_call_log
+    from backend.surface_contract.runs_surface import UsageMeasureState
+
+    provider_id = f"prov-{uuid.uuid4().hex}"
+    llm_call_log.append_call(
+        source="turn", reason="test", provider_id=provider_id, model="usage-test-model",
+        trace_id=f"tr_{uuid.uuid4().hex[:12]}", token_usage={"total_tokens": 9},
+    )
+
     adapter = RunsSurfaceAdapter()
-    result = adapter.usage_analytics(None)
-    assert isinstance(result, Rebuilding)
+    rows: list = []
+    cursor = None
+    for _ in range(20):  # bounded walk — other tests may share this process's test home
+        result = adapter.usage_analytics(cursor)
+        assert isinstance(result, Ok), result
+        rows.extend(result.value.rows)
+        cursor = result.value.next_cursor
+        if cursor is None:
+            break
+    match = next(r for r in rows if r.provider_id == provider_id)
+    assert match.model == "usage-test-model"
+    assert match.state == UsageMeasureState.REPORTED
+    assert match.tokens == 9
 
 
 def test_runs_lifecycle_fact_broadcasts_best_effort_run_summary_upsert() -> None:
     from backend.surface_contract.runs_surface import RunSummaryUpsert
 
     session_id = f"app-{uuid.uuid4().hex}"
-    run_id = _seed_run(session_id, success=True)
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    run_id = _seed_run(session_id, success=True, turn_id=turn_id)
 
     adapter = RunsSurfaceAdapter()
     adapter.bind()
@@ -481,13 +539,42 @@ def test_runs_lifecycle_fact_broadcasts_best_effort_run_summary_upsert() -> None
             bus.publish(
                 BusEvent(
                     type="lifecycle.turn_complete", root_id=session_id, sid=session_id,
-                    payload={"reason": "success"}, persist=False,
+                    payload={"reason": "success", "execution_turn_id": turn_id}, persist=False,
                 )
             )
         )
         upserts = [f for f in received if isinstance(f, RunSummaryUpsert)]
         assert upserts, received
         assert upserts[0].summary.run_id == run_id
+        assert upserts[0].summary.turn_id == turn_id
+    finally:
+        sub.close()
+
+
+def test_runs_lifecycle_fact_without_matching_turn_id_does_not_broadcast() -> None:
+    """E5: the exact turn_id match must fail closed — no misattributed
+    push — when no run directory carries this execution_turn_id yet."""
+    from backend.surface_contract.runs_surface import RunSummaryUpsert
+
+    session_id = f"app-{uuid.uuid4().hex}"
+    _seed_run(session_id, success=True, turn_id=f"turn-{uuid.uuid4().hex}")
+
+    adapter = RunsSurfaceAdapter()
+    adapter.bind()
+    received: list = []
+    sub = adapter.subscribe(received.append)
+    try:
+        asyncio.run(
+            bus.publish(
+                BusEvent(
+                    type="lifecycle.turn_complete", root_id=session_id, sid=session_id,
+                    payload={"reason": "success", "execution_turn_id": f"turn-{uuid.uuid4().hex}"},
+                    persist=False,
+                )
+            )
+        )
+        upserts = [f for f in received if isinstance(f, RunSummaryUpsert)]
+        assert not upserts, received
     finally:
         sub.close()
 
@@ -512,21 +599,21 @@ _TESTS = [
     test_session_status_projected_maps_waiting_for_user,
     test_session_deleted_fact_evicts_rollup_cache,
     test_list_sessions_query_filters_by_title,
-    test_projects_maps_seeded_project_with_gap_defaults,
-    test_rearranger_state_is_rebuilding,
+    test_projects_maps_seeded_project_real_session_count,
     test_session_fire_fact_triggers_change_only_upsert,
     test_provider_descriptor_mapping,
     test_provider_suspended_maps_to_suspended_config_state,
     test_provider_api_key_mode_maps_auth_flow_and_credential_status,
     test_runtime_profiles_maps_seeded_profile,
-    test_installable_catalog_is_empty,
+    test_installable_catalog_serves_backend_templates,
     test_provider_submit_rejects_all_intents,
     test_list_runs_phase_mapping_completed_failed_running,
     test_list_runs_runner_joined_via_session_provider,
     test_list_runs_filters_by_session_id,
     test_run_detail_maps_entries_and_missing_is_rebuilding,
-    test_usage_analytics_is_rebuilding,
+    test_usage_analytics_returns_ok_page_seeded_from_llm_call_log,
     test_runs_lifecycle_fact_broadcasts_best_effort_run_summary_upsert,
+    test_runs_lifecycle_fact_without_matching_turn_id_does_not_broadcast,
     test_build_adapter_returns_typed_composition,
 ]
 

@@ -25,13 +25,13 @@ import { LanguageSelector } from "./LanguageSelector";
 import { cacheProviders } from "../utils/providerCache";
 import { providerNickname } from "../utils/providerDisplayName";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
-import {
-  ProviderForm,
-  TemplateGrid,
-  TEMPLATES,
-  type FormPayload,
-  type TemplateId,
-} from "./ProviderForm";
+import { useProviderChanged } from "../hooks/useProviderChanged";
+import { isProviderSocketOpen, submitProviderIntent } from "../hooks/useProviderSurfaceSocket";
+import { nativeOrRestMutation } from "../lib/nativeOrRestMutation";
+import { subscribeSystemFrames, submitSystemIntent } from "../lib/systemFeedRegistry";
+import type { DistributiveOmit, ProviderIntentWire } from "../adapter/wire";
+import { useInstallableProviders, formSchemaForProviderKind } from "../hooks/useInstallableProviders";
+import { ProviderForm, TemplateGrid, type FormPayload, type Template } from "./ProviderForm";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
@@ -82,6 +82,36 @@ async function runBusyAction(
   }
 }
 
+// D4 intent-error-propagation: route a provider mutation through the v2
+// ProviderIntent socket when it's open (native-when-open/legacy-fallback
+// gating), falling back to `restFallback` — the exact REST call this call
+// site ran before — when the socket isn't open, `submitProviderIntent`
+// itself returns `null` (its own not-open contract), or the intent kind
+// has no v2 equivalent yet (`restFallback` is then the ONLY implementation,
+// e.g. logout/activate-runtime-profile — ADR 0007 has no such intents).
+// A v2 rejection (synchronous, or the late async echo `submitProviderIntent`
+// already waits a bounded window for) throws with the real backend
+// message, landing in the SAME `runBusyAction`/`setError` catch every REST
+// failure already uses — one error-surfacing path either way. The actual
+// submit-or-fallback/throw-on-reject gate is `lib/nativeOrRestMutation.ts`
+// (shared with `lib/scheduleMutations.ts`'s `deleteScheduleNativeOrRest`,
+// the same idiom independently derived for the schedules plane); this
+// wrapper's own job is just the provider-specific "no intent at all, or
+// socket not open" pre-check `submitProviderIntent` can't express itself
+// (it has no "no v2 equivalent" concept — that's a call-site fact).
+// Module-level (not a component closure): every field it touches is either
+// a parameter or the module-level `useProviderSurfaceSocket` singleton.
+async function submitProviderMutation(
+  intent: DistributiveOmit<ProviderIntentWire, "cv" | "intent_id" | "session_id"> | null,
+  restFallback: () => Promise<void>,
+): Promise<void> {
+  if (!intent || !isProviderSocketOpen()) {
+    await restFallback();
+    return;
+  }
+  return nativeOrRestMutation(submitProviderIntent(intent), restFallback);
+}
+
 interface Props {
   onClose: () => void;
   onRefreshApp?: () => void;
@@ -96,7 +126,7 @@ type View =
   | { kind: "list" }
   | { kind: "edit"; providerId: string }
   | { kind: "wizard-templates" }
-  | { kind: "wizard-form"; templateId: TemplateId }
+  | { kind: "wizard-form"; templateId: string }
   | { kind: "profile-wizard" }
   | { kind: "mobile" };
 
@@ -338,9 +368,13 @@ export function SettingsPage({
     refetchInstallationProfile();
   }, []);
 
-  useEffect(() => {
-    return eventBus.subscribe("provider_changed", () => refetch());
-  }, []);
+  // Consolidated onto the shared `useProviderChanged` hook (Package D,
+  // ADR 0007) instead of this component's own direct
+  // `eventBus.subscribe("provider_changed", ...)` — same legacy trigger,
+  // PLUS the v2 `"providers"` feed frames (provider_upsert/
+  // credential_state/model_catalog_changed/login_flow_frame), see that
+  // hook's docstring for why both stay active.
+  useProviderChanged(useCallback(() => { void refetch(); }, []));
 
   useEffect(() => {
     return eventBus.subscribe(
@@ -361,6 +395,12 @@ export function SettingsPage({
 
   const activeId = state?.default_provider_id ?? null;
   const providers = state?.providers ?? [];
+  const {
+    templates,
+    loading: installableLoading,
+    error: installableError,
+    retry: retryInstallable,
+  } = useInstallableProviders();
   const content = (
     <>
       {view.kind === "list" && (
@@ -414,14 +454,17 @@ export function SettingsPage({
             setNetworkBindAddress(address);
           })}
           onSuspend={(p, suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
-            await trackPromise(`provider:suspend:${p.id}`, async () => {
-              const r = await fetch(`${API}/api/providers/${p.id}/suspended`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ suspended, ...providerAuthority(p) }),
-              });
-              await requireProviderMutation(r);
-            }).promise;
+            await trackPromise(`provider:suspend:${p.id}`, () => submitProviderMutation(
+              { kind: suspended ? "suspend_provider" : "resume_provider", provider_id: p.id },
+              async () => {
+                const r = await fetch(`${API}/api/providers/${p.id}/suspended`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ suspended, ...providerAuthority(p) }),
+                });
+                await requireProviderMutation(r);
+              },
+            )).promise;
             await refetch();
           })}
           credentialRetryingId={credentialRetryingId}
@@ -429,10 +472,13 @@ export function SettingsPage({
             setCredentialRetryingId(p.id);
             try {
               await runBusyAction(setBusy, setError, "credential retry failed", async () => {
-                await trackPromise(`provider:credential:retry:${p.id}`, async () => {
-                  const r = await fetch(`${API}/api/providers/${p.id}/credential/retry`, { method: "POST" });
-                  if (!r.ok) throw new Error(await r.text());
-                }).promise;
+                await trackPromise(`provider:credential:retry:${p.id}`, () => submitProviderMutation(
+                  { kind: "retry_credential", provider_id: p.id },
+                  async () => {
+                    const r = await fetch(`${API}/api/providers/${p.id}/credential/retry`, { method: "POST" });
+                    if (!r.ok) throw new Error(await r.text());
+                  },
+                )).promise;
                 await refetch();
               });
             } finally {
@@ -442,14 +488,17 @@ export function SettingsPage({
           onDelete={async (p) => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
-              await trackPromise(`provider:delete:${p.id}`, async () => {
-                const r = await fetch(`${API}/api/providers/${p.id}`, {
-                  method: "DELETE",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(providerAuthority(p)),
-                });
-                await requireProviderMutation(r);
-              }).promise;
+              await trackPromise(`provider:delete:${p.id}`, () => submitProviderMutation(
+                { kind: "delete_provider", provider_id: p.id },
+                async () => {
+                  const r = await fetch(`${API}/api/providers/${p.id}`, {
+                    method: "DELETE",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(providerAuthority(p)),
+                  });
+                  await requireProviderMutation(r);
+                },
+              )).promise;
               await refetch();
             });
           }}
@@ -458,33 +507,48 @@ export function SettingsPage({
 
       {view.kind === "wizard-templates" && (
         <WizardTemplates
+          templates={templates}
+          loading={installableLoading}
+          error={installableError}
+          onRetry={retryInstallable}
           onClose={onClose}
           onBack={() => setView({ kind: "list" })}
           onPick={(templateId) => setView({ kind: "wizard-form", templateId })}
         />
       )}
 
-      {view.kind === "wizard-form" && (
+      {view.kind === "wizard-form" && (() => {
+        const tpl = templates.find((t) => t.id === view.templateId);
+        // Only reachable via WizardTemplates picking a real `templates`
+        // entry — `null` here means the fetch is still in flight (fast
+        // navigation edge case), not a broken state.
+        if (!tpl) return null;
+        return (
         <ProviderForm
           mode="create"
-          initial={TEMPLATES.find((t) => t.id === view.templateId)!.defaults}
+          initial={tpl.defaults}
           initialHasKey={false}
+          formSchema={tpl.formSchema}
           onClose={onClose}
           onBack={() => setView({ kind: "wizard-templates" })}
           onSubmit={(payload) => runBusyAction(setBusy, setError, "create failed", async () => {
-            await trackPromise("provider:create", async () => {
-              const r = await fetch(`${API}/api/providers`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-              });
-              if (!r.ok) throw new Error(await r.text());
-            }).promise;
+            await trackPromise("provider:create", () => submitProviderMutation(
+              { kind: "create_provider", provider_kind: payload.kind, config: { ...payload } },
+              async () => {
+                const r = await fetch(`${API}/api/providers`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                });
+                if (!r.ok) throw new Error(await r.text());
+              },
+            )).promise;
             await refetch();
             setView({ kind: "list" });
           })}
         />
-      )}
+        );
+      })()}
 
       {view.kind === "profile-wizard" && (
         <Suspense fallback={<div className="modal-body settings-hint">{t("common.loading", "Loading…")}</div>}>
@@ -507,6 +571,10 @@ export function SettingsPage({
       {view.kind === "edit" && (
         <EditProvider
           providers={providers}
+          templates={templates}
+          installableLoading={installableLoading}
+          installableError={installableError}
+          onRetryInstallable={retryInstallable}
           providerId={view.providerId}
           activeId={activeId}
           busy={busy}
@@ -514,44 +582,60 @@ export function SettingsPage({
           onClose={onClose}
           onBack={() => setView({ kind: "list" })}
           onSubmit={(payload) => runBusyAction(setBusy, setError, "save failed", async () => {
-            await trackPromise(`provider:patch:${view.providerId}`, async () => {
-              const r = await fetch(`${API}/api/providers/${view.providerId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
+            await trackPromise(`provider:patch:${view.providerId}`, () => submitProviderMutation(
+              {
+                kind: "update_provider",
+                provider_id: view.providerId,
+                config_patch: {
                   ...payload,
                   ...providerAuthority(requireProvider(providers, view.providerId)),
-                }),
-              });
-              await requireProviderMutation(r);
-            }).promise;
+                },
+              },
+              async () => {
+                const r = await fetch(`${API}/api/providers/${view.providerId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    ...payload,
+                    ...providerAuthority(requireProvider(providers, view.providerId)),
+                  }),
+                });
+                await requireProviderMutation(r);
+              },
+            )).promise;
             await refetch();
             setView({ kind: "list" });
           })}
           onSuspend={(suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
-            await trackPromise(`provider:suspend:${view.providerId}`, async () => {
-              const provider = requireProvider(providers, view.providerId);
-              const r = await fetch(`${API}/api/providers/${view.providerId}/suspended`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ suspended, ...providerAuthority(provider) }),
-              });
-              await requireProviderMutation(r);
-            }).promise;
+            await trackPromise(`provider:suspend:${view.providerId}`, () => submitProviderMutation(
+              { kind: suspended ? "suspend_provider" : "resume_provider", provider_id: view.providerId },
+              async () => {
+                const provider = requireProvider(providers, view.providerId);
+                const r = await fetch(`${API}/api/providers/${view.providerId}/suspended`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ suspended, ...providerAuthority(provider) }),
+                });
+                await requireProviderMutation(r);
+              },
+            )).promise;
             await refetch();
           })}
           onDelete={async () => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
-              await trackPromise(`provider:delete:${view.providerId}`, async () => {
-                const provider = requireProvider(providers, view.providerId);
-                const r = await fetch(`${API}/api/providers/${view.providerId}`, {
-                  method: "DELETE",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(providerAuthority(provider)),
-                });
-                await requireProviderMutation(r);
-              }).promise;
+              await trackPromise(`provider:delete:${view.providerId}`, () => submitProviderMutation(
+                { kind: "delete_provider", provider_id: view.providerId },
+                async () => {
+                  const provider = requireProvider(providers, view.providerId);
+                  const r = await fetch(`${API}/api/providers/${view.providerId}`, {
+                    method: "DELETE",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(providerAuthority(provider)),
+                  });
+                  await requireProviderMutation(r);
+                },
+              )).promise;
               await refetch();
               setView({ kind: "list" });
             });
@@ -708,9 +792,24 @@ export function ExtensionUiSettingsSection() {
     const unsubscribeExtensions = eventBus.subscribe("extension.catalog", () => {
       void refreshUpdates();
     });
+    // ADR 0011 §4 `extension_catalog` feed — additional live-refresh
+    // trigger alongside the legacy `extension.catalog`/
+    // `extension_updates_changed` pings above (dual SIGNAL; `rows`/
+    // `availableUpdates` stay legacy REST-sourced — v2's
+    // `ExtensionCatalogEntry.available_version` is a documented
+    // always-`None` gap (scan-only, per Package C's own honest-gaps list),
+    // so `refreshUpdates`'s `GET /api/extensions/updates` remains the
+    // sole source for update-availability data).
+    const unsubscribeExtensionsV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "extension_catalog_upsert") {
+        void refresh();
+        void refreshUpdates();
+      }
+    });
     return () => {
       unsubscribeUpdates();
       unsubscribeExtensions();
+      unsubscribeExtensionsV2();
     };
   }, [refresh, refreshUpdates]);
 
@@ -736,6 +835,22 @@ export function ExtensionUiSettingsSection() {
   const toggleExtension = useCallback(
     (id: string, next: boolean) => {
       setRows((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: next } : r)));
+      // Native-when-open (ADR 0011 §4's `enable_extension`/
+      // `disable_extension` -> the SAME `extension_store.set_enabled`
+      // the legacy PATCH route calls), REST fallback otherwise.
+      const native = submitSystemIntent({
+        kind: next ? "enable_extension" : "disable_extension",
+        extension_id: id,
+      });
+      if (native) {
+        void native.then((ack) => {
+          if (ack.type === "intent_rejected") {
+            setRows((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: !next } : r)));
+            setError(ack.message);
+          }
+        });
+        return;
+      }
       void patch(
         `/api/extensions/${encodeURIComponent(id)}/enabled`,
         { enabled: next },
@@ -751,19 +866,27 @@ export function ExtensionUiSettingsSection() {
       setDeletingIds((prev) => new Set(prev).add(id));
       setError("");
       try {
-        const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
-        if (!res.ok) {
-          let detail = "";
-          try {
-            const payload = await res.json();
-            detail = typeof payload.detail === "string" ? payload.detail : "";
-          } catch {
-            detail = await res.text();
+        // Native-when-open (ADR 0011 §4's `uninstall_extension` -> the
+        // SAME `extension_store.uninstall` the legacy DELETE route calls).
+        const native = submitSystemIntent({ kind: "uninstall_extension", extension_id: id });
+        if (native) {
+          const ack = await native;
+          if (ack.type === "intent_rejected") throw new Error(ack.message);
+        } else {
+          const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            credentials: "include",
+          });
+          if (!res.ok) {
+            let detail = "";
+            try {
+              const payload = await res.json();
+              detail = typeof payload.detail === "string" ? payload.detail : "";
+            } catch {
+              detail = await res.text();
+            }
+            throw new Error(detail || t("settings.extensionsUninstallFailed"));
           }
-          throw new Error(detail || t("settings.extensionsUninstallFailed"));
         }
         setRows((prev) => prev.filter((row) => row.id !== id));
         void refresh();
@@ -785,19 +908,28 @@ export function ExtensionUiSettingsSection() {
       setUpdatingIds((prev) => new Set(prev).add(id));
       setError("");
       try {
-        const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}/update`, {
-          method: "POST",
-          credentials: "include",
-        });
-        if (!res.ok) {
-          let detail = "";
-          try {
-            const payload = await res.json();
-            detail = typeof payload.detail === "string" ? payload.detail : "";
-          } catch {
-            detail = await res.text();
+        // Native-when-open (ADR 0011 §4's `update_extension` -> the SAME
+        // `extension_store.apply_extension_update` the legacy POST route
+        // calls).
+        const native = submitSystemIntent({ kind: "update_extension", extension_id: id });
+        if (native) {
+          const ack = await native;
+          if (ack.type === "intent_rejected") throw new Error(ack.message);
+        } else {
+          const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}/update`, {
+            method: "POST",
+            credentials: "include",
+          });
+          if (!res.ok) {
+            let detail = "";
+            try {
+              const payload = await res.json();
+              detail = typeof payload.detail === "string" ? payload.detail : "";
+            } catch {
+              detail = await res.text();
+            }
+            throw new Error(detail || t("settings.extensionsUpdateFailed"));
           }
-          throw new Error(detail || t("settings.extensionsUpdateFailed"));
         }
         await Promise.all([refresh(), refreshUpdates()]);
       } catch (e) {
@@ -1429,16 +1561,32 @@ function ProvidersSettingsSection({
       setLoginPendingId(p.id);
       setLoginError(null);
       try {
-        const r = await fetch(`${API}/api/providers/${p.id}/${action}`, { method: "POST" });
-        if (!r.ok) {
-          let message = `${action} failed`;
-          try {
-            const body = await r.json();
-            if (body?.detail) message = String(body.detail);
-          } catch {
-            /* keep default */
+        // `logout` has no ADR 0007 intent (D4's documented gap —
+        // `POST /api/providers/{id}/logout` stays legacy-REST-only by
+        // design); only `login` (`begin_login`) routes through the v2
+        // socket when open.
+        const restFallback = async () => {
+          const r = await fetch(`${API}/api/providers/${p.id}/${action}`, { method: "POST" });
+          if (!r.ok) {
+            let message = `${action} failed`;
+            try {
+              const body = await r.json();
+              if (body?.detail) message = String(body.detail);
+            } catch {
+              /* keep default */
+            }
+            setLoginError({ id: p.id, message });
           }
-          setLoginError({ id: p.id, message });
+        };
+        try {
+          await submitProviderMutation(
+            action === "login"
+              ? { kind: "begin_login", provider_id: p.id, flow: "oauth_subscription" }
+              : null,
+            restFallback,
+          );
+        } catch (e) {
+          setLoginError({ id: p.id, message: e instanceof Error ? e.message : `${action} failed` });
         }
       } finally {
         setLoginPendingId(null);
@@ -1448,7 +1596,12 @@ function ProvidersSettingsSection({
   );
   const cancelLoginAction = useCallback(async (p: Provider) => {
     try {
-      await fetch(`${API}/api/providers/${p.id}/login/cancel`, { method: "POST" });
+      await submitProviderMutation(
+        { kind: "cancel_login", provider_id: p.id },
+        async () => {
+          await fetch(`${API}/api/providers/${p.id}/login/cancel`, { method: "POST" });
+        },
+      );
     } catch {
       /* best-effort cancel */
     }
@@ -1914,13 +2067,21 @@ function FirstRunWizard({
 // ---------------------------------------------------------------------------
 
 function WizardTemplates({
+  templates,
+  loading,
+  error,
+  onRetry,
   onClose,
   onBack,
   onPick,
 }: {
+  templates: Template[];
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
   onClose: () => void;
   onBack: () => void;
-  onPick: (id: TemplateId) => void;
+  onPick: (id: string) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -1936,7 +2097,7 @@ function WizardTemplates({
       </div>
       <div className="modal-body">
         <p className="setup-mode-desc">{t('setup.pickTemplate')}</p>
-        <TemplateGrid onPick={onPick} />
+        <TemplateGrid templates={templates} loading={loading} error={error} onRetry={onRetry} onPick={onPick} />
       </div>
     </>
   );
@@ -1948,6 +2109,10 @@ function WizardTemplates({
 
 function EditProvider({
   providers,
+  templates,
+  installableLoading,
+  installableError,
+  onRetryInstallable,
   providerId,
   activeId,
   busy,
@@ -1959,6 +2124,15 @@ function EditProvider({
   onDelete,
 }: {
   providers: Provider[];
+  templates: Template[];
+  /** A9: `formSchema` below is derived from `templates` — while the
+   * catalog is loading or failed with none yet fetched, an empty
+   * `templates` array is indistinguishable from "no template shares this
+   * provider's kind" (a legitimate post-load state). Gate on the hook's
+   * own loading/error signal instead of inferring it from array length. */
+  installableLoading: boolean;
+  installableError: string | null;
+  onRetryInstallable: () => void;
   providerId: string;
   activeId: string | null;
   busy: boolean;
@@ -1991,6 +2165,46 @@ function EditProvider({
     );
   }
 
+  // A9: hold the edit form off the screen until the installable catalog
+  // either resolves or fails — never render `ProviderForm` against an
+  // empty in-flight `formSchema` (it would silently drop the mode
+  // toggle/config-dir field and fall back to a generic, possibly
+  // wrong-kind api-key label).
+  const catalogHeader = (
+    <div className="modal-header">
+      <button className="modal-back" onClick={onBack} title={t('setup.backTitle')}>
+        &larr;
+      </button>
+      <h2>{t('setup.editProviderTitle')}</h2>
+      <button className="modal-close" onClick={onClose}>
+        &times;
+      </button>
+    </div>
+  );
+  if (installableLoading && templates.length === 0) {
+    return (
+      <>
+        {catalogHeader}
+        <div className="modal-body settings-hint">{t("common.loading", "Loading…")}</div>
+      </>
+    );
+  }
+  if (installableError && templates.length === 0) {
+    return (
+      <>
+        {catalogHeader}
+        <div className="modal-body">
+          <div className="provider-catalog-error" role="alert" data-testid="provider-catalog-error">
+            <span>{installableError}</span>
+            <button type="button" className="btn-secondary" onClick={onRetryInstallable}>
+              {t("common.retry", "Retry")}
+            </button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
   const isActive = provider.id === activeId;
 
   return (
@@ -2002,6 +2216,7 @@ function EditProvider({
           provider.credential_status !== "missing" && provider.credential_status !== "blocked"
         }
         credentialBlocked={provider.credential_status === "blocked"}
+        formSchema={formSchemaForProviderKind(templates, provider.kind)}
         onClose={onClose}
         onBack={onBack}
         onSubmit={onSubmit}

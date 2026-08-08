@@ -70,6 +70,43 @@ export function makeRuntimeProfilesSnapshot(
   };
 }
 
+/** Closure 3 (ADR 0007 RuntimeProfile v2 parity): `useRuntimeProfiles.ts`
+ * now cold-hydrates from `GET /api/v2/surface/runtime-profiles`, not the
+ * legacy `/api/runtime-profiles` route — any fetch mock seeding a
+ * `RuntimeProfilesSnapshot` fixture (e.g. via `makeRuntimeProfilesSnapshot`
+ * above) for the legacy route needs the SAME data available at the v2 one
+ * too, reshaped onto `RuntimeProfilesSnapshotWire`'s field names
+ * (`runtime_profile_id` not `id`, `deleted_providers[].provider_id` not
+ * `.id`), wrapped in the `{kind: "ok", ...}` envelope every v2 REST route
+ * uses. One canonical mapping, reused by every test fixture mock instead
+ * of each one re-deriving it. */
+export function toRuntimeProfilesSnapshotEnvelope(snapshot: RuntimeProfilesSnapshot) {
+  return {
+    kind: "ok" as const,
+    profiles: snapshot.runtime_profiles.map((p) => ({
+      runtime_profile_id: p.id,
+      provider_id: p.provider_id,
+      runner: p.runner,
+      default_model: p.default_model,
+      default_reasoning_effort: p.default_reasoning_effort || null,
+      name: p.name,
+      deleted_at: p.deleted_at ?? null,
+      created_at: p.created_at,
+      updated_at: p.updated_at,
+    })),
+    default_runtime_profile_id: snapshot.default_runtime_profile_id,
+    last_models: snapshot.last_models,
+    last_reasoning_efforts: snapshot.last_reasoning_efforts,
+    deleted_providers: snapshot.deleted_providers.map((d) => ({
+      provider_id: d.id,
+      name: d.name,
+      nickname: d.nickname ?? "",
+      kind: d.kind,
+      deleted_at: d.deleted_at ?? null,
+    })),
+  };
+}
+
 export function makeSession(overrides: Partial<Session> = {}): Session {
   const now = new Date().toISOString();
   return {

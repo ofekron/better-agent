@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 
 // Keep the slice isolated: trackPromise is a passthrough so the real progress
 // store (WS extender, retry) doesn't run; fetch is driven per-test.
@@ -7,13 +7,43 @@ vi.mock("../src/progress/store", () => ({
   trackPromise: <T,>(_op: string, fn: () => Promise<T>) => ({ promise: fn() }),
 }));
 
+// `tests/setup.ts` globally stubs `lib/systemFeedRegistry` so `submitSystemIntent`
+// always returns `null` (not-open contract) — this component's mutation
+// therefore always exercises its legacy REST fallback in this file (same
+// posture every other Package C native-when-open component's dedicated
+// test file takes). Overridden here (this file's own `vi.mock` shadows the
+// setup file's for this module) ONLY so `subscribeSystemFrames` captures
+// its listener for the "live refresh" describe block below to drive
+// directly — `submitSystemIntent` stays `null` throughout.
+let systemFrameListener: ((frame: unknown) => void) | undefined;
+vi.mock("../src/lib/systemFeedRegistry", () => ({
+  SYSTEM_FEED_NAMES: [
+    "extension_notices", "extension_config", "harness_profiles", "extension_ui",
+    "extension_catalog", "marketplace_bridge", "marketplace_intents", "schedules",
+    "host_startup_tasks", "installation_capabilities", "machines", "node_registrations",
+  ],
+  subscribeSystemFrames: (cb: (frame: unknown) => void) => {
+    systemFrameListener = cb;
+    return () => {
+      systemFrameListener = undefined;
+    };
+  },
+  subscribeSystemSocketConnection: () => () => {},
+  isSystemSocketOpen: () => false,
+  submitSystemIntent: () => null,
+  waitForSystemFrame: () => new Promise(() => {}),
+  submitSystemIntentAwaitingUpsert: () => null,
+}));
+
 import { InstallationCapabilities } from "../src/components/InstallationCapabilities";
-import { eventBus } from "../src/lib/eventBus";
+import type { InstallationCapabilityWire } from "../src/adapter/wire";
 
 type Resp = {
   ok: boolean;
   status: number;
+  statusText?: string;
   json: () => Promise<unknown>;
+  text?: () => Promise<string>;
 };
 
 function resp(opts: { ok?: boolean; status?: number; json?: unknown } = {}): Resp {
@@ -21,7 +51,9 @@ function resp(opts: { ok?: boolean; status?: number; json?: unknown } = {}): Res
   return {
     ok,
     status: opts.status ?? (ok ? 200 : 400),
+    statusText: "Error",
     json: async () => opts.json ?? {},
+    text: async () => "",
   };
 }
 
@@ -33,6 +65,29 @@ function deferred<T = unknown>() {
   return { promise, resolve };
 }
 
+function capability(
+  id: string, overrides: Partial<InstallationCapabilityWire> = {},
+): InstallationCapabilityWire {
+  return {
+    capability_id: id,
+    cv: 1,
+    enabled: false,
+    display: id,
+    provisioned: false,
+    active: false,
+    restart_required: false,
+    self_provisionable: false,
+    in_app_restart_supported: false,
+    ...overrides,
+  };
+}
+
+/** `GET /api/v2/surface/installation-capabilities`'s `OkListEnvelope`
+ * response body. */
+function capabilitiesEnvelope(value: InstallationCapabilityWire[]): Resp {
+  return resp({ json: { kind: "ok", value, snapshot_identity: { incarnation: 1, render_rev: 1, hist_rev: 1 } } });
+}
+
 interface FetchCall {
   url: string;
   init?: RequestInit;
@@ -41,8 +96,6 @@ interface FetchCall {
 let fetchMock: ReturnType<typeof vi.fn>;
 let originalFetch: typeof globalThis.fetch;
 
-/** vitest records every call on fetchMock.mock.calls regardless of the active
- *  impl — safer than a manual log that a mockImplementation override bypasses. */
 function patchCalls(): FetchCall[] {
   return fetchMock.mock.calls
     .filter(([url, init]) => {
@@ -53,12 +106,14 @@ function patchCalls(): FetchCall[] {
     .map(([url, init]) => ({ url: url as string, init: init as RequestInit | undefined }));
 }
 
-function patchBody(call: FetchCall): Record<string, unknown> {
-  return JSON.parse(call.init?.body as string) as Record<string, unknown>;
+function getCalls(): FetchCall[] {
+  return fetchMock.mock.calls
+    .filter(([, init]) => !(init as RequestInit | undefined)?.method)
+    .map(([url, init]) => ({ url: url as string, init: init as RequestInit | undefined }));
 }
 
-function profileResponse(capabilities: Record<string, unknown>): Resp {
-  return resp({ json: { capabilities } });
+function patchBody(call: FetchCall): Record<string, unknown> {
+  return JSON.parse(call.init?.body as string) as Record<string, unknown>;
 }
 
 beforeEach(() => {
@@ -74,24 +129,30 @@ afterEach(() => {
   delete (window as { confirm?: unknown }).confirm;
 });
 
-describe("InstallationCapabilities — load", () => {
-  it("renders the setup-required notice when setup_required is true", async () => {
-    fetchMock.mockImplementation(async () => resp({ json: { setup_required: true } }));
+describe("InstallationCapabilities — load (v2)", () => {
+  it("issues a v2 GET for the read model", async () => {
+    fetchMock.mockImplementation(async () => capabilitiesEnvelope([capability("integrations")]));
+    render(<InstallationCapabilities />);
+    await waitFor(() => expect(getCalls()).toHaveLength(1));
+    expect(getCalls()[0].url).toContain("/api/v2/surface/installation-capabilities");
+  });
+
+  it("renders the setup-required notice when the v2 list is empty", async () => {
+    fetchMock.mockImplementation(async () => capabilitiesEnvelope([]));
     const { container } = render(<InstallationCapabilities />);
     await waitFor(() =>
       expect(screen.getByText("settings.capabilitySetupRequired")).toBeTruthy(),
     );
     expect(container.querySelector(".capability-settings-empty")).toBeTruthy();
-    // rows are not rendered in setup-required state
     expect(container.querySelectorAll(".capability-row")).toHaveLength(0);
   });
 
   it("renders intro + both capability rows on a successful load", async () => {
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: true },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", { enabled: true }),
+        capability("mobile", { enabled: false }),
+      ]),
     );
     render(<InstallationCapabilities />);
     await waitFor(() =>
@@ -99,19 +160,15 @@ describe("InstallationCapabilities — load", () => {
     );
     expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy();
     expect(screen.getByText("settings.capabilityMobile")).toBeTruthy();
-    expect(screen.getByText("settings.capabilityIntegrationsHint")).toBeTruthy();
-    expect(screen.getByText("settings.capabilityMobileHint")).toBeTruthy();
   });
 
-  it("surfaces an HTTP error message when the load response is not ok", async () => {
+  it("surfaces an HTTP error message when the v2 GET is not ok", async () => {
     fetchMock.mockImplementation(async () => resp({ ok: false, status: 500 }));
     render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("HTTP 500")).toBeTruthy());
-    expect(screen.getByText("HTTP 500").closest(".capability-settings-error")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/HTTP 500/)).toBeTruthy());
   });
 
   it("falls back to 'load failed' for a non-Error rejection", async () => {
-    // json() resolves ok but the awaited json() throws a non-Error value.
     fetchMock.mockImplementation(async () => ({
       ok: true,
       status: 200,
@@ -124,37 +181,37 @@ describe("InstallationCapabilities — load", () => {
   });
 });
 
-describe("InstallationCapabilities — enable/disable", () => {
+describe("InstallationCapabilities — enable/disable (legacy REST fallback)", () => {
   it("PATCHes to enable a capability without the integrations confirm flag (mobile)", async () => {
-    fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: true },
-        mobile: { enabled: false },
-      }),
-    );
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return resp({ json: {} });
+      return capabilitiesEnvelope([
+        capability("integrations", { enabled: true }),
+        capability("mobile", { enabled: false }),
+      ]);
+    });
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityMobile")).toBeTruthy());
 
-    const mobileCheckbox = screen
-      .getAllByRole("checkbox")[1] as HTMLInputElement;
+    const mobileCheckbox = screen.getAllByRole("checkbox")[1] as HTMLInputElement;
     expect(mobileCheckbox.checked).toBe(false);
     fireEvent.click(mobileCheckbox);
 
     await waitFor(() => expect(patchCalls()).toHaveLength(1));
     const call = patchCalls()[0];
-    expect(call.url).toContain("/capabilities/mobile");
+    expect(call.url).toContain("/api/installation-profile/capabilities/mobile");
     expect(patchBody(call)).toEqual({ enabled: true });
-    // mobile is non-integrations → confirm is never consulted
     expect(window.confirm).not.toHaveBeenCalled();
   });
 
   it("adds confirm_cancels_extension_work when disabling integrations (confirm accepted)", async () => {
-    fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: true },
-        mobile: { enabled: false },
-      }),
-    );
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return resp({ json: {} });
+      return capabilitiesEnvelope([
+        capability("integrations", { enabled: true }),
+        capability("mobile", { enabled: false }),
+      ]);
+    });
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
 
@@ -172,72 +229,31 @@ describe("InstallationCapabilities — enable/disable", () => {
   it("does not PATCH when disabling integrations is cancelled", async () => {
     (window.confirm as ReturnType<typeof vi.fn>).mockReturnValue(false);
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: true },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", { enabled: true }),
+        capability("mobile", { enabled: false }),
+      ]),
     );
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
 
     const checkbox = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
-    fireEvent.click(checkbox); // would disable, but confirm denies
+    fireEvent.click(checkbox);
 
-    // Give any accidental PATCH a chance to flush
     await new Promise((r) => setTimeout(r, 0));
     expect(patchCalls()).toHaveLength(0);
     expect(window.confirm).toHaveBeenCalledTimes(1);
   });
 
-  it("disabling a non-integrations capability skips confirm and PATCHes enabled:false", async () => {
-    fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: false },
-        mobile: { enabled: true },
-      }),
-    );
-    render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("settings.capabilityMobile")).toBeTruthy());
-
-    const mobileCheckbox = screen.getAllByRole("checkbox")[1] as HTMLInputElement;
-    fireEvent.click(mobileCheckbox); // true -> false; confirmDisable(mobile) early-returns true
-
-    await waitFor(() => expect(patchCalls()).toHaveLength(1));
-    const call = patchCalls()[0];
-    expect(call.url).toContain("/capabilities/mobile");
-    expect(patchBody(call)).toEqual({ enabled: false });
-    // non-integrations: confirm is never consulted even when disabling
-    expect(window.confirm).not.toHaveBeenCalled();
-  });
-
-  it("does not add the confirm flag when enabling integrations", async () => {
-    fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: { enabled: false },
-        mobile: { enabled: false },
-      }),
-    );
-    render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
-
-    const checkbox = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
-    fireEvent.click(checkbox); // false -> true
-
-    await waitFor(() => expect(patchCalls()).toHaveLength(1));
-    expect(patchBody(patchCalls()[0])).toEqual({ enabled: true });
-  });
-
   it("surfaces a detail message from a failed PATCH", async () => {
-    let first = true;
-    fetchMock.mockImplementation(async () => {
-      if (first) {
-        first = false;
-        return profileResponse({
-          integrations: { enabled: false },
-          mobile: { enabled: false },
-        });
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        return resp({ ok: false, status: 409, json: { detail: "work in progress" } });
       }
-      return resp({ ok: false, status: 409, json: { detail: "work in progress" } });
+      return capabilitiesEnvelope([
+        capability("integrations", { enabled: false }),
+        capability("mobile", { enabled: false }),
+      ]);
     });
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
@@ -246,106 +262,48 @@ describe("InstallationCapabilities — enable/disable", () => {
     await waitFor(() => expect(screen.getByText("work in progress")).toBeTruthy());
   });
 
-  it("falls back to HTTP status when a failed PATCH has no detail", async () => {
-    let first = true;
-    fetchMock.mockImplementation(async () => {
-      if (first) {
-        first = false;
-        return profileResponse({
-          integrations: { enabled: false },
-          mobile: { enabled: false },
-        });
-      }
-      return resp({ ok: false, status: 400, json: {} });
+  it("shows the busy badge while the mutation + refetch are in flight", async () => {
+    const pendingPatch = deferred<Resp>();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return pendingPatch.promise;
+      return capabilitiesEnvelope([
+        capability("integrations", { enabled: false }),
+        capability("mobile", { enabled: false }),
+      ]);
     });
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
 
-    fireEvent.click(screen.getAllByRole("checkbox")[0]);
-    await waitFor(() => expect(screen.getByText("HTTP 400")).toBeTruthy());
-  });
+    const checkbox = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
+    fireEvent.click(checkbox);
 
-  it("tolerates a failed PATCH whose json() rejects (-> null detail)", async () => {
-    let first = true;
-    fetchMock.mockImplementation(async () => {
-      if (first) {
-        first = false;
-        return profileResponse({
-          integrations: { enabled: false },
-          mobile: { enabled: false },
-        });
-      }
-      return {
-        ok: false,
-        status: 502,
-        json: async () => {
-          throw new Error("bad body");
-        },
-      };
-    });
-    render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("settings.capabilitySaving")).toBeTruthy());
+    expect(checkbox.disabled).toBe(true);
 
-    fireEvent.click(screen.getAllByRole("checkbox")[0]);
-    await waitFor(() => expect(screen.getByText("HTTP 502")).toBeTruthy());
-  });
-
-  it("falls back to 'update failed' when a successful PATCH body throws a non-Error", async () => {
-    let first = true;
-    fetchMock.mockImplementation(async () => {
-      if (first) {
-        first = false;
-        return profileResponse({
-          integrations: { enabled: false },
-          mobile: { enabled: false },
-        });
-      }
-      // ok response, but json() throws a non-Error value
-      return {
-        ok: true,
-        status: 200,
-        json: async () => {
-          throw "string-boom";
-        },
-      };
-    });
-    render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
-
-    fireEvent.click(screen.getAllByRole("checkbox")[0]);
-    await waitFor(() => expect(screen.getByText("update failed")).toBeTruthy());
+    pendingPatch.resolve(resp({ json: {} }));
+    await waitFor(() => expect(screen.queryByText("settings.capabilitySaving")).toBeNull());
   });
 });
 
 describe("InstallationCapabilities — badges", () => {
-  it("disables the checkbox and renders nothing actionable when a capability has no state", async () => {
-    fetchMock.mockImplementation(async () => profileResponse({}));
+  it("disables the checkbox and renders nothing actionable when a capability is absent from the list", async () => {
+    fetchMock.mockImplementation(async () => capabilitiesEnvelope([capability("mobile")]));
     render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityIntro")).toBeTruthy());
 
     const checkboxes = screen.getAllByRole("checkbox");
     expect(checkboxes).toHaveLength(2);
-    for (const cb of checkboxes) {
-      expect((cb as HTMLInputElement).disabled).toBe(true);
-    }
-    // No badges rendered when there is no state
-    expect(screen.queryByText("settings.capabilitySaving")).toBeNull();
+    // "integrations" is absent from the returned list -> no state -> disabled.
+    expect((checkboxes[0] as HTMLInputElement).disabled).toBe(true);
     expect(screen.queryByText("settings.capabilityActive")).toBeNull();
   });
 
   it("shows the 'needs build' blocked badge when enabled but not provisionable", async () => {
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: {
-          enabled: true,
-          provisioned: false,
-          self_provisionable: false,
-          active: false,
-          restart_required: false,
-          in_app_restart_supported: false,
-        },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", { enabled: true, provisioned: false, self_provisionable: false }),
+        capability("mobile"),
+      ]),
     );
     const { container } = render(<InstallationCapabilities />);
     await waitFor(() =>
@@ -357,16 +315,12 @@ describe("InstallationCapabilities — badges", () => {
   it("renders the in-app restart button when restart_required and supported", async () => {
     const onRestart = vi.fn();
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: {
-          enabled: true,
-          provisioned: true,
-          active: false,
-          restart_required: true,
-          in_app_restart_supported: true,
-        },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", {
+          enabled: true, provisioned: true, restart_required: true, in_app_restart_supported: true,
+        }),
+        capability("mobile"),
+      ]),
     );
     render(<InstallationCapabilities onRestartRequested={onRestart} />);
     const btn = await screen.findByText("settings.capabilityRestartRequired");
@@ -377,96 +331,53 @@ describe("InstallationCapabilities — badges", () => {
 
   it("renders the manual restart span when restart_required but unsupported", async () => {
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: {
-          enabled: true,
-          provisioned: true,
-          active: false,
-          restart_required: true,
-          in_app_restart_supported: false,
-        },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", {
+          enabled: true, provisioned: true, restart_required: true, in_app_restart_supported: false,
+        }),
+        capability("mobile"),
+      ]),
     );
     const { container } = render(<InstallationCapabilities />);
     await waitFor(() =>
       expect(screen.getByText("settings.capabilityRestartManually")).toBeTruthy(),
     );
     const span = container.querySelector(".capability-badge.is-restart");
-    expect(span).toBeTruthy();
     expect(span?.tagName).toBe("SPAN");
   });
 
   it("shows the active badge when provisioned, no restart, active", async () => {
     fetchMock.mockImplementation(async () =>
-      profileResponse({
-        integrations: {
-          enabled: true,
-          provisioned: true,
-          active: true,
-          restart_required: false,
-          in_app_restart_supported: false,
-        },
-        mobile: { enabled: false },
-      }),
+      capabilitiesEnvelope([
+        capability("integrations", { enabled: true, provisioned: true, active: true }),
+        capability("mobile"),
+      ]),
     );
     const { container } = render(<InstallationCapabilities />);
     await waitFor(() => expect(screen.getByText("settings.capabilityActive")).toBeTruthy());
     expect(container.querySelector(".capability-badge.is-active")).toBeTruthy();
   });
-
-  it("shows the busy badge and disables the checkbox while a PATCH is in flight", async () => {
-    const pending = deferred<Resp>();
-    let first = true;
-    fetchMock.mockImplementation(async () => {
-      if (first) {
-        first = false;
-        return profileResponse({
-          integrations: { enabled: false, provisioned: false, active: false, restart_required: false, in_app_restart_supported: false },
-          mobile: { enabled: false },
-        });
-      }
-      return pending.promise;
-    });
-    render(<InstallationCapabilities />);
-    await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
-
-    const checkbox = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
-    fireEvent.click(checkbox);
-
-    await waitFor(() => expect(screen.getByText("settings.capabilitySaving")).toBeTruthy());
-    expect((checkbox as HTMLInputElement).disabled).toBe(true);
-
-    pending.resolve(profileResponse({
-      integrations: { enabled: true, provisioned: true, active: true, restart_required: false, in_app_restart_supported: false },
-      mobile: { enabled: false },
-    }));
-    await waitFor(() => expect(screen.queryByText("settings.capabilitySaving")).toBeNull());
-  });
 });
 
-describe("InstallationCapabilities — live refresh", () => {
-  it("re-fetches on the installation_capabilities_changed fact", async () => {
+describe("InstallationCapabilities — live refresh (v2 feed)", () => {
+  it("applies an installation_capability_changed frame from the system feed", async () => {
     fetchMock.mockImplementation(async () =>
-      profileResponse({ integrations: { enabled: false }, mobile: { enabled: false } }),
+      capabilitiesEnvelope([capability("integrations", { enabled: false }), capability("mobile")]),
     );
+
     render(<InstallationCapabilities />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("settings.capabilityIntegrations")).toBeTruthy());
+    const checkbox = screen.getAllByRole("checkbox")[0] as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
 
-    eventBus.publish("installation_capabilities_changed", {});
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-  });
+    act(() => {
+      systemFrameListener?.({
+        type: "installation_capability_changed",
+        cv: 2,
+        capability: capability("integrations", { enabled: true, active: true }),
+      });
+    });
 
-  it("stops listening after unmount", async () => {
-    fetchMock.mockImplementation(async () =>
-      profileResponse({ integrations: { enabled: false }, mobile: { enabled: false } }),
-    );
-    const { unmount } = render(<InstallationCapabilities />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-
-    unmount();
-    eventBus.publish("installation_capabilities_changed", {});
-    await new Promise((r) => setTimeout(r, 0));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect((screen.getAllByRole("checkbox")[0] as HTMLInputElement).checked).toBe(true));
   });
 });

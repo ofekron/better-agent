@@ -8,10 +8,55 @@
 // SAME interactive form + hit the SAME resolution endpoints, with zero
 // duplication of the fetch/validation logic. Every prop here is a plain
 // value — no legacy request-union coupling.
+//
+// Resolution (ADR 0006 §5): all three kinds here are the legacy user-input
+// mechanism (`user_input_store`), which maps onto the ONE remaining
+// UserInteractionKind slot — `input` (tool/worker approvals -> `approval`,
+// the delegation picker -> `choice`, both handled elsewhere). `resolve`
+// tries the native `resolve` intent first (when the shared
+// `lib/interactionResolveSocket.ts` connection is open); the legacy REST
+// `/api/user-input/{id}/resolve` endpoint is the fallback, same gating
+// pattern `surface/state.ts`'s `sendPrompt` uses for sends. `cancel` has no
+// v2 intent equivalent (ADR 0006 §5 defines only `resolve`) — it stays
+// REST-only, unconditionally.
 
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
+import {
+  submitResolveInteraction,
+  USER_INPUT_REF_PREFIX,
+  useInteractionResolveSocket,
+} from "../lib/interactionResolveSocket";
+
+/** Tries the native `resolve` intent first; falls back to legacy REST only
+ * when the shared connection isn't open (a genuine `intent_rejected` is a
+ * real failure, not a signal to retry over REST — both paths reach the
+ * SAME store, so a retry would just fail identically). `body` is exactly
+ * the JSON body the legacy REST endpoint already expects (minus
+ * `app_session_id`, added here). */
+async function resolveUserInput(
+  requestId: string,
+  appSessionId: string,
+  body: Record<string, unknown>,
+): Promise<boolean> {
+  const ack = appSessionId
+    ? await submitResolveInteraction(
+        appSessionId,
+        `${USER_INPUT_REF_PREFIX}${requestId}`,
+        "input",
+        { response: body },
+      )
+    : null;
+  if (ack) return ack.type === "intent_accepted";
+  const res = await fetch(`${API}/api/user-input/${encodeURIComponent(requestId)}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ app_session_id: appSessionId, ...body }),
+  });
+  return res.ok;
+}
 
 export interface UserInputCardCoreOption {
   label: string;
@@ -37,6 +82,7 @@ export function UserInputCardCore({
   onDone: (requestId: string) => void;
 }) {
   const { t } = useTranslation();
+  useInteractionResolveSocket();
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const q of questions) {
@@ -58,13 +104,8 @@ export function UserInputCardCore({
     if (!canSubmit || submitting) return;
     setSubmitting(true);
     try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(requestId)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ app_session_id: appSessionId, answers }),
-      });
-      if (res.ok) onDone(requestId);
+      const ok = await resolveUserInput(requestId, appSessionId, { answers });
+      if (ok) onDone(requestId);
     } finally {
       setSubmitting(false);
     }
@@ -153,6 +194,7 @@ export function UserApprovalCardCore({
   onDone: (requestId: string) => void;
 }) {
   const { t } = useTranslation();
+  useInteractionResolveSocket();
   const [alternative, setAlternative] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -163,17 +205,11 @@ export function UserApprovalCardCore({
     setSubmitting(true);
     setFailed(false);
     try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(requestId)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          app_session_id: appSessionId,
-          approved,
-          ...(approved ? {} : { alternative: text }),
-        }),
+      const ok = await resolveUserInput(requestId, appSessionId, {
+        approved,
+        ...(approved ? {} : { alternative: text }),
       });
-      if (res.ok) {
+      if (ok) {
         onDone(requestId);
         return;
       }
@@ -251,6 +287,7 @@ export function MemoryProposalCardCore({
   onDone: (requestId: string) => void;
 }) {
   const { t } = useTranslation();
+  useInteractionResolveSocket();
   const [fields, setFields] = useState<MemoryProposalCardCoreFields>(() => ({ ...memoryProposal }));
   const [expanded, setExpanded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -267,17 +304,11 @@ export function MemoryProposalCardCore({
     setSubmitting(true);
     setFailed(false);
     try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(requestId)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          app_session_id: appSessionId,
-          approved,
-          ...(approved ? { edited: fields } : {}),
-        }),
+      const ok = await resolveUserInput(requestId, appSessionId, {
+        approved,
+        ...(approved ? { edited: fields } : {}),
       });
-      if (res.ok) {
+      if (ok) {
         onDone(requestId);
         return;
       }

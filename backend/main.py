@@ -764,10 +764,23 @@ def _wire_surface_adapter() -> None:
 
     from backend.adapters import build_adapter
     import adapter_api
+    import session_commands
     import surface_commands
+    import system_commands
 
     command_port = surface_commands.build_chat_command_port(coordinator=coordinator)
-    surface_adapter = build_adapter(command_port=command_port)
+    # Same `_delete_session_tree` capability `session_listing_api.configure()`
+    # receives above (lines 454/700) — one cascade-deletion implementation,
+    # reused by delete_folder's `delete_sessions` mode.
+    session_command_port = session_commands.build_session_command_port(
+        delete_session_tree=lambda sid: _delete_session_tree(sid),
+    )
+    system_command_port = system_commands.build_system_command_port()
+    surface_adapter = build_adapter(
+        command_port=command_port,
+        session_command_port=session_command_port,
+        system_command_port=system_command_port,
+    )
     adapter_api.configure(surface_adapter)
     app.include_router(adapter_api.router)
 

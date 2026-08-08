@@ -55,7 +55,7 @@ import browser_trust  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
-from backend.surface_contract.identity import Rebuilding  # noqa: E402
+from backend.surface_contract.identity import Ok, Rebuilding  # noqa: E402
 from backend.ws_outbox import WebSocketOutbox  # noqa: E402
 
 from fastapi import FastAPI, WebSocketDisconnect  # noqa: E402
@@ -202,15 +202,25 @@ def test_snapshot_splits_image_content_block_into_attachment() -> None:
     assert payload["attachments"][0]["media_type"] == "image/png"
 
 
-def test_fetch_sidecar_maps_to_rebuilding_envelope() -> None:
-    """No REST endpoint exposes fetch_sidecar (out of scope this phase) —
-    exercise the real adapter method + the real envelope mapper directly,
-    covering the `Rebuilding` branch of `_result_body`."""
+def test_fetch_sidecar_unregistered_ref_is_honest_not_found() -> None:
+    """An unregistered sidecar ref is a permanent absence, not a race:
+    fetch_sidecar returns a terminal Ok(status="not_found") so callers stop
+    asking instead of retrying a Rebuilding forever."""
     root_id = f"root-{uuid.uuid4().hex}"
     adapter = ChatSurfaceAdapter()
     result = adapter.fetch_sidecar(root_id, "some-sidecar-ref")
-    assert isinstance(result, Rebuilding)
-    assert adapter_api._result_body(result) == {"kind": "rebuilding", "retry_after_ms": None}
+    assert isinstance(result, Ok)
+    assert result.value.status == "not_found"
+    assert result.value.sidecar_ref == "some-sidecar-ref"
+
+
+def test_result_body_maps_rebuilding_envelope() -> None:
+    """The `Rebuilding` branch of `_result_body` (no adapter method returns it
+    for sidecars anymore — exercise the mapper directly)."""
+    assert adapter_api._result_body(Rebuilding()) == {
+        "kind": "rebuilding",
+        "retry_after_ms": None,
+    }
 
 
 def test_children_stale_cursor_envelope() -> None:
@@ -484,7 +494,8 @@ _TESTS = [
     test_aliasing_survives_real_dotted_import_before_canonicalization,
     test_snapshot_ok_envelope,
     test_snapshot_splits_image_content_block_into_attachment,
-    test_fetch_sidecar_maps_to_rebuilding_envelope,
+    test_fetch_sidecar_unregistered_ref_is_honest_not_found,
+    test_result_body_maps_rebuilding_envelope,
     test_children_stale_cursor_envelope,
     test_older_cursor_round_trips_through_opaque_token,
     test_invalid_session_id_rejected_400,

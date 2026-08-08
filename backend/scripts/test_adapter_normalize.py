@@ -415,8 +415,107 @@ def test_compaction_lifecycle_notice():
         "data": {"type": "lifecycle_notice", "uuid": "c1", "data": {"kind": "compacted", "summary": "folded"}},
     }
     nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1  # no replacement_history -> no synthesized children
     assert nodes[0].kind == NodeKind.COMPACTION
     assert nodes[0].payload.summary == "folded"
+
+
+def test_compaction_lifecycle_notice_with_replacement_history_produces_children():
+    """`codex_native._normalize_compacted_event`'s own
+    `replacement_history` (`[{"role", "text"}, ...]`) is the ONLY place
+    pre-compaction content survives in the journal — see
+    `normalize._compaction_replay_children`'s docstring. Each entry
+    becomes a child node parented under the compaction node so
+    `derive.child_manifest`/the frontend's children-fetch can surface it."""
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "type": "lifecycle_notice", "uuid": "c2",
+            "data": {
+                "kind": "compacted", "summary": "folded",
+                "replacement_history": [
+                    {"role": "user", "text": "please look at foo.py"},
+                    {"role": "assistant", "text": "sure, looking now"},
+                ],
+            },
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 3
+    compaction = nodes[0]
+    assert compaction.kind == NodeKind.COMPACTION
+    assert compaction.node_id == "c2"
+
+    user_child = nodes[1]
+    assert user_child.kind == NodeKind.TYPED_PROMPT
+    assert user_child.payload.text == "please look at foo.py"
+    assert user_child.payload.origin == PromptOrigin.USER
+    assert user_child.parent_id == "c2"
+    assert user_child.node_id == "c2:replayed:0"
+
+    assistant_child = nodes[2]
+    assert assistant_child.kind == NodeKind.ASSISTANT_TEXT
+    assert assistant_child.payload.text == "sure, looking now"
+    assert assistant_child.parent_id == "c2"
+    assert assistant_child.node_id == "c2:replayed:1"
+
+
+def test_compaction_replacement_history_skips_malformed_entries():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "x",
+        "data": {
+            "type": "lifecycle_notice", "uuid": "c3",
+            "data": {
+                "kind": "compacted",
+                "replacement_history": [
+                    {"role": "user", "text": ""},
+                    {"role": "user"},
+                    "not-a-dict",
+                    {"role": "assistant", "text": "kept"},
+                ],
+            },
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 2  # compaction + the one well-formed entry
+    assert nodes[1].payload.text == "kept"
+    assert nodes[1].kind == NodeKind.ASSISTANT_TEXT
+
+
+def test_compaction_resolve_parents_does_not_clobber_explicit_child_parenting():
+    """Guards `resolve_parents`'s "explicit parent_id wins" rule: a
+    compaction row that ALSO carries a resolvable `parentUuid` (as
+    codex_native's own rows always do, pointing at the session root
+    sentinel) must not have that row-level link overwrite the
+    already-stamped child parent_id."""
+    compaction_row = {
+        "type": "agent_message", "seq": 1, "ts": "x",
+        "data": {
+            "type": "lifecycle_notice", "uuid": "c4", "parentUuid": "root-sentinel",
+            "data": {
+                "kind": "compacted",
+                "replacement_history": [{"role": "user", "text": "hi"}],
+            },
+        },
+    }
+    # `root-sentinel` never appears as any real node's own id in this batch
+    # (matches codex's synthetic root uuid never being a real node) —
+    # resolve_parents must leave the compaction node's own parent_id
+    # (None, pre-attach) and the child's (already "c4") both untouched.
+    other_row = {
+        "type": "agent_message", "seq": 2, "ts": "x",
+        "data": {"type": "assistant", "uuid": "a1", "message": {"content": [{"type": "text", "text": "ok"}]}},
+    }
+    produced_compaction = normalize_journal_row(compaction_row, surface_id=SURFACE, turn_id=TURN)
+    produced_other = normalize_journal_row(other_row, surface_id=SURFACE, turn_id=TURN)
+    links = {}
+    for n in produced_compaction:
+        links[n.node_id] = derive_link(compaction_row)
+    for n in produced_other:
+        links[n.node_id] = derive_link(other_row)
+    resolved = resolve_parents(produced_compaction + produced_other, links)
+    by_id = {n.node_id: n for n in resolved}
+    assert by_id["c4:replayed:0"].parent_id == "c4"
 
 
 def test_generic_lifecycle_notice():
@@ -746,6 +845,40 @@ def test_user_row_explicit_attachment_missing_size_defaults_to_none():
     assert nodes[0].payload.attachments[0].size is None
 
 
+def test_user_row_dispatch_shaped_with_intent_id_round_trips():
+    """Locks the wire round trip `turn_manager._publish_typed_prompt_
+    journal`'s fix relies on: a row shaped EXACTLY like that method's own
+    published `data` dict (with `intent_id` now stamped from the
+    dispatch-time client_id/intent_id correlator) must produce a
+    TYPED_PROMPT node whose `payload.intent_id` carries it through —
+    covers BOTH ingress paths (v2 intent / legacy client_id), since both
+    funnel into the SAME `user_msg["client_id"]` -> journal row field."""
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "type": "user", "uuid": "prompt-dispatch-1",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            "origin": "user",
+            "intent_id": "correlator-42",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].kind == NodeKind.TYPED_PROMPT
+    assert nodes[0].payload.intent_id == "correlator-42"
+
+
+def test_user_row_without_intent_id_is_none():
+    row = {
+        "type": "agent_message", "seq": 1, "ts": "x",
+        "data": {
+            "type": "user", "uuid": "prompt-dispatch-2",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.intent_id is None
+
+
 def test_enrich_typed_prompt_node_fills_origin_from_meta_when_row_silent():
     row, node = _typed_prompt_node()
     assert node.payload.origin == PromptOrigin.USER  # unenriched default
@@ -834,6 +967,178 @@ def test_is_canonical_prompt_row_false_for_non_user_rows():
 def test_is_canonical_prompt_row_false_when_origin_key_missing_even_if_empty_message():
     row = {"type": "agent_message", "data": {"type": "user", "uuid": "u1", "message": {}}}
     assert is_canonical_prompt_row(row) is False
+
+
+# --------------------------------------------------------------------------- #
+# `model_switched` — TOP-LEVEL row type (event_shape.RENDER_EVENT_TYPES
+# sibling of agent_message), backend.main._record_model_switched_event.
+# --------------------------------------------------------------------------- #
+def test_model_switched_row_maps_to_model_change_user_source():
+    row = {
+        "type": "model_switched",
+        "seq": 20,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "data": {
+            "uuid": "model-switch-abc",
+            "model": "gpt-5",
+            "provider_id": "openai",
+            "previous_model": "gpt-4",
+            "previous_provider_id": "openai",
+            "changed": ["model"],
+            "app_session_id": "sess-1",
+            "msg_id": "a1",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    assert nodes[0].kind == NodeKind.MODEL_CHANGE
+    assert nodes[0].node_id == "model-switch-abc"
+    assert nodes[0].payload.from_run_ref == "gpt-4"
+    assert nodes[0].payload.to_run_ref == "gpt-5"
+    from backend.surface_contract.nodes import ModelChangeSource
+    assert nodes[0].payload.source == ModelChangeSource.USER
+
+
+def test_model_switched_row_without_uuid_falls_back_to_seq_id():
+    row = {
+        "type": "model_switched", "seq": 21, "ts": "x",
+        "data": {"model": "sonnet", "previous_model": None},
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].node_id == "seq:21:model_switched"
+    assert nodes[0].payload.from_run_ref is None
+    assert nodes[0].payload.to_run_ref == "sonnet"
+
+
+# --------------------------------------------------------------------------- #
+# `steer_prompt` — TOP-LEVEL row type, orchestrator.Coordinator.
+# steer_active_turn's save_callback write. Maps to STEERING_MESSAGE
+# (native SteeringMessageView / legacy SteerPromptEvent's "Steer" label).
+# --------------------------------------------------------------------------- #
+def test_steer_prompt_row_maps_to_steering_message():
+    row = {
+        "type": "steer_prompt",
+        "seq": 22,
+        "ts": "2026-01-01T00:00:01+00:00",
+        "data": {
+            "uuid": "steer-1",
+            "prompt": "also check X",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+            "client_id": "c1",
+            "lifecycle_msg_id": "a1",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    assert nodes[0].kind == NodeKind.STEERING_MESSAGE
+    assert nodes[0].node_id == "steer-1"
+    assert nodes[0].payload.text == "also check X"
+    assert nodes[0].payload.target == "a1"
+    assert nodes[0].payload.attachments == ()
+
+
+def test_steer_prompt_row_without_uuid_falls_back_to_seq_id():
+    row = {
+        "type": "steer_prompt", "seq": 23, "ts": "x",
+        "data": {"prompt": "steer text", "lifecycle_msg_id": "a2"},
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].node_id == "seq:23:steer_prompt"
+
+
+def test_steer_prompt_row_with_images_produces_attachments():
+    """`orchestrator.steer_active_turn`'s `_save_message_images` return
+    value (`[{"filename", "media_type"}, ...]`) journaled inline on the
+    steer_prompt row — self-contained, `ref` filled directly from
+    `filename` (no separate join/placeholder needed, unlike TypedPrompt's
+    two-fact join)."""
+    row = {
+        "type": "steer_prompt", "seq": 24, "ts": "x",
+        "data": {
+            "uuid": "steer-2",
+            "prompt": "look at this",
+            "lifecycle_msg_id": "a3",
+            "images": [
+                {"filename": "steer-2_0.png", "media_type": "image/png"},
+                {"filename": "steer-2_1.jpg", "media_type": "image/jpeg"},
+            ],
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    attachments = nodes[0].payload.attachments
+    assert len(attachments) == 2
+    assert attachments[0].name == "steer-2_0.png"
+    assert attachments[0].media_type == "image/png"
+    assert attachments[0].ref == "steer-2_0.png"
+    assert attachments[0].size is None
+    assert attachments[1].name == "steer-2_1.jpg"
+    assert attachments[1].ref == "steer-2_1.jpg"
+
+
+def test_steer_prompt_row_images_malformed_entries_are_skipped():
+    row = {
+        "type": "steer_prompt", "seq": 25, "ts": "x",
+        "data": {
+            "uuid": "steer-3", "prompt": "x", "lifecycle_msg_id": "a4",
+            "images": [{"media_type": "image/png"}, "not-a-dict", None, {"filename": 5}],
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.attachments == ()
+
+
+def test_steer_prompt_row_files_do_not_produce_attachments():
+    """Files are intentionally NOT modeled as attachments — matches
+    `TypedPromptPayload`'s own current scope (image-only)."""
+    row = {
+        "type": "steer_prompt", "seq": 26, "ts": "x",
+        "data": {
+            "uuid": "steer-4", "prompt": "x", "lifecycle_msg_id": "a5",
+            "files": [{"name": "notes.txt", "media_type": "text/plain", "size": 12}],
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.attachments == ()
+
+
+# --------------------------------------------------------------------------- #
+# `pr-link` — nested agent_message data.type, Claude CLI-native row (no
+# uuid). Maps to FACT node kind="pr_link" for the native PrLinkChip.
+# --------------------------------------------------------------------------- #
+def test_pr_link_agent_message_maps_to_fact_node():
+    row = {
+        "type": "agent_message",
+        "seq": 24,
+        "ts": "2026-01-01T00:00:02+00:00",
+        "data": {
+            "type": "pr-link",
+            "prUrl": "https://github.com/octo/repo/pull/42",
+            "prNumber": 42,
+            "prRepository": "octo/repo",
+        },
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert len(nodes) == 1
+    assert nodes[0].kind == NodeKind.FACT
+    assert nodes[0].node_id == "seq:24:pr_link"
+    assert nodes[0].payload.kind == "pr_link"
+    assert nodes[0].payload.data == {
+        "prUrl": "https://github.com/octo/repo/pull/42",
+        "prNumber": 42,
+        "prRepository": "octo/repo",
+    }
+
+
+def test_pr_link_agent_message_missing_optional_fields_still_maps():
+    row = {
+        "type": "agent_message", "seq": 25, "ts": "x",
+        "data": {"type": "pr-link", "prUrl": "https://x/y/pull/7"},
+    }
+    nodes = normalize_journal_row(row, surface_id=SURFACE, turn_id=TURN)
+    assert nodes[0].payload.data == {
+        "prUrl": "https://x/y/pull/7", "prNumber": None, "prRepository": None,
+    }
 
 
 if __name__ == "__main__":

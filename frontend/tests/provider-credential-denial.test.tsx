@@ -44,7 +44,7 @@ describe("provider credential denial", () => {
       supports_native_subagents: false,
       supports_reasoning_effort: false,
     };
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.endsWith("/credential/retry")) {
         return retryResponse;
@@ -64,6 +64,20 @@ describe("provider credential denial", () => {
           authority_fingerprint: "",
           last_known_good: null,
           runtime_profiles: [],
+        });
+      }
+      if (url.includes("/api/v2/surface/providers/installable")) {
+        return response({
+          value: [{
+            kind: "openai",
+            display: { label: "OpenAI Compatible", icon_id: "openai", config_copy_key: "provider.config_copy.openai" },
+            form_schema: [
+              { name: "api_key", kind: "secret", label_key: "setup.apiKeyLabelOpenai", required: false, choices: [], default: null, pattern: null, max_length: null, placeholder_key: "setup.apiKeyPlaceholderEmptyOpenai", hint_key: null },
+              { name: "base_url", kind: "text", label_key: "setup.baseUrlLabelOpenai", required: false, choices: [], default: null, pattern: null, max_length: null, placeholder_key: null, hint_key: null },
+            ],
+            defaults: { name: "OpenAI Compatible", kind: "openai", mode: "api_key", base_url: "", config_dir: "", default_model: "", default_reasoning_effort: "" },
+            auth_flows: ["api_key"],
+          }],
         });
       }
       if (url.includes("/api/providers")) {
@@ -112,6 +126,17 @@ describe("provider credential denial", () => {
     fireEvent.click(screen.getByRole("button", { name: "Re-enter key" }));
 
     expect(await screen.findByText(/stored API key cannot be accessed/i)).toBeTruthy();
+    // Package D (ADR 0007) / closure 4: the api_key field's label comes
+    // from `InstallableDescriptor.form_schema`'s `label_key`, which IS
+    // per-kind now (`provider_adapter.py`'s `_form_schema_for` restores
+    // the deleted `apiEnvCopyForKind`'s OpenAI-flavored
+    // "setup.apiKeyLabelOpenai" for kind="openai"). The fixture mocks
+    // `GET /api/v2/surface/providers/installable` above (A9: `EditProvider`
+    // now gates rendering on that fetch's own loading/error state — it
+    // would show a loading/error placeholder instead of ever falling back
+    // to a wrong-kind label if this endpoint were left unmocked, per
+    // `settings-page-edit-provider-catalog-gate.test.tsx`), so this
+    // exercises the REAL openai-kind resolution path end to end.
     const keyInput = screen.getByLabelText("OPENAI_API_KEY");
     const saveButton = screen.getByRole("button", { name: "Save changes" });
     expect((saveButton as HTMLButtonElement).disabled).toBe(true);

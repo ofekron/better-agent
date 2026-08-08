@@ -43,9 +43,13 @@ moved, passed in as narrow callables instead):
     as a subscriber for `app_session_id` so `/api/internal/ask-fork` can
     fan worker events out to it. Inherently per-connection bookkeeping.
 
-`set_selectors`, `rewind`, and `approve` are intentionally NOT migrated in
-this pass — they return an `unsupported` result so callers treat "not yet
-supported" uniformly with any other rejection."""
+`set_selectors` and `rewind` are intentionally NOT migrated in this pass —
+they return an `unsupported` result so callers treat "not yet supported"
+uniformly with any other rejection. `resolve_interaction` (ADR 0006 §5) IS
+migrated: it routes to whichever legacy store owns the ref (by namespace
+prefix — see `backend/surface_contract/nodes.py`'s `*_REF_PREFIX`
+constants), calling the SAME functions the legacy REST decide/approve/
+deny/resolve routes call — one mutation path, both transports."""
 
 from __future__ import annotations
 
@@ -62,14 +66,36 @@ from fastapi import HTTPException
 
 import config_store
 import extension_store
+import session_bridge
 import session_readiness
 import session_search
+import tool_approval
 import user_prefs
 import virtual_session_prompt_handlers
 from backend.adapters.command_port import ChatCommandPort, CommandResult, NotifyFn, _default_notify
-from backend.surface_contract.intents import SendTarget, SendTargetKind
-from backend.surface_contract.nodes import Attachment, SendMode
+from backend.event_bus import BusEvent, bus
+from backend.surface_contract.intents import (
+    ApprovalResponse,
+    ChoiceResponse,
+    InputResponse,
+    InteractionResponse,
+    SendTarget,
+    SendTargetKind,
+)
+from backend.surface_contract.nodes import (
+    ApprovalDecision,
+    Attachment,
+    DELEGATE_CHOICE_REF_PREFIX,
+    SendMode,
+    TOOL_APPROVAL_REF_PREFIX,
+    USER_INPUT_REF_PREFIX,
+    UserInteractionKind,
+    UserInteractionState,
+    WORKER_APPROVAL_REF_PREFIX,
+    interaction_fact_payload,
+)
 from capability_contexts import normalize_capability_contexts
+from stores import pending_approvals
 from env_compat import dual_env
 from file_attachment_prompt import MAX_FILE_SIZE_BYTES, validate_file_attachment
 from i18n import t
@@ -84,6 +110,8 @@ from session_detail_api import (
     _rewind_latest_user_for_alter,
 )
 from session_manager import manager as session_manager
+import user_input_api
+import user_input_store
 from user_msg_lifecycle import (
     emit_failed,
     emit_queued,
@@ -100,6 +128,30 @@ _UNSUPPORTED = "not yet migrated off backend/ws_chat.py"
 
 def _ws_queued_prompt_is_user_visible(kind: str) -> bool:
     return kind != "send"
+
+
+def _publish_resolved_interaction_fact(
+    session_id: str, interaction_ref: str, kind: UserInteractionKind, request: dict,
+    *, response: dict, state: UserInteractionState = UserInteractionState.RESOLVED,
+) -> None:
+    """Same `interaction.fire.resolved` fact `backend/tool_approvals_api.py`'s
+    `decide_tool_approval` / `backend/pending_approvals_api.py`'s
+    approve/deny routes / `backend/user_input_api.py`'s resolve route
+    publish — this v2 resolve path bypasses those REST handlers (calls the
+    underlying store mutation directly), so it must publish the SAME fact
+    itself rather than silently going live-dark. One generic helper for
+    every kind (approval/choice/input) — `kind`/`response`/`state` vary per
+    caller, the publish mechanics never do."""
+    try:
+        bus.publish_threadsafe(BusEvent(
+            type="interaction.fire.resolved", root_id=session_id, sid=session_id,
+            payload=interaction_fact_payload(
+                interaction_ref, kind, request, state=state, response=response,
+            ),
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("surface_commands: interaction.fire.resolved publish failed")
 
 
 @dataclass
@@ -833,8 +885,168 @@ class _ChatCommandPortImpl:
     async def rewind(self, session_id, node_id) -> CommandResult:
         return CommandResult(accepted=False, code="unsupported", message=_UNSUPPORTED)
 
-    async def approve(self, session_id, approval_ref, decision, scope) -> CommandResult:
-        return CommandResult(accepted=False, code="unsupported", message=_UNSUPPORTED)
+    async def resolve_interaction(
+        self, session_id: str, interaction_ref: str, response: InteractionResponse,
+    ) -> CommandResult:
+        """Dispatches by `interaction_ref`'s namespace prefix — the 4
+        legacy mechanisms share no id space of their own, so the prefix
+        (stamped by the SAME producers, see `backend/adapters/store_access.
+        py`'s `list_pending_interactions` and `backend/adapters/chat_adapter.
+        py`'s `_on_ask_result_set`) is the single routing key."""
+        if interaction_ref.startswith(TOOL_APPROVAL_REF_PREFIX):
+            approval_id = interaction_ref[len(TOOL_APPROVAL_REF_PREFIX):]
+            return await self._resolve_tool_approval(session_id, approval_id, response)
+        if interaction_ref.startswith(WORKER_APPROVAL_REF_PREFIX):
+            delegation_id = interaction_ref[len(WORKER_APPROVAL_REF_PREFIX):]
+            return await self._resolve_worker_approval(session_id, delegation_id, response)
+        if interaction_ref.startswith(DELEGATE_CHOICE_REF_PREFIX):
+            delegation_id = interaction_ref[len(DELEGATE_CHOICE_REF_PREFIX):]
+            return await self._resolve_delegate_choice(session_id, delegation_id, response)
+        if interaction_ref.startswith(USER_INPUT_REF_PREFIX):
+            request_id = interaction_ref[len(USER_INPUT_REF_PREFIX):]
+            return await self._resolve_user_input(session_id, request_id, response)
+        return CommandResult(
+            accepted=False, code="unknown_interaction",
+            message=f"no owning store for interaction_ref {interaction_ref!r}",
+        )
+
+    async def _resolve_tool_approval(
+        self, session_id: str, approval_id: str, response: InteractionResponse,
+    ) -> CommandResult:
+        """Same mutation `POST /api/sessions/{id}/tool-approvals/{id}/decide`
+        performs (`backend/tool_approvals_api.py`'s `decide_tool_approval`) —
+        object-level authz identical too (approval must belong to
+        `session_id`)."""
+        if not isinstance(response, ApprovalResponse):
+            return CommandResult(
+                accepted=False, code="invalid_response",
+                message="a tool approval requires an approval response",
+            )
+        rec = tool_approval.registry.get(approval_id)
+        if rec is None or rec.app_session_id != session_id:
+            return CommandResult(accepted=False, code="not_found")
+        approved = response.decision == ApprovalDecision.APPROVE
+        ok = tool_approval.registry.decide(approval_id, approved)
+        if not ok:
+            return CommandResult(accepted=False, code="already_resolved")
+        _publish_resolved_interaction_fact(
+            session_id, f"{TOOL_APPROVAL_REF_PREFIX}{approval_id}", UserInteractionKind.APPROVAL,
+            {
+                "subject": "tool", "tool_name": rec.tool_name,
+                "summary": dict(rec.summary or {}), "risk_scope": rec.provider_kind,
+            },
+            response={"decision": response.decision.value},
+        )
+        return CommandResult(accepted=True)
+
+    async def _resolve_worker_approval(
+        self, session_id: str, delegation_id: str, response: InteractionResponse,
+    ) -> CommandResult:
+        """Same mutation `POST /api/internal/pending-approvals/{approve,deny}`
+        performs (`backend/pending_approvals_api.py`): the store transition
+        AND the coordinator's own worker-spawn callback
+        (`orchestrator.Coordinator._resolve_approval`, the exact function
+        object that route's `resolve_approval` capability is bound to —
+        see `backend/app_composition.py`'s `pending_approvals_api.configure`
+        call) — never a second, parallel spawn path."""
+        if not isinstance(response, ApprovalResponse):
+            return CommandResult(
+                accepted=False, code="invalid_response",
+                message="a worker-creation approval requires an approval response",
+            )
+        existing = pending_approvals.get(delegation_id)
+        if existing is None:
+            return CommandResult(accepted=False, code="not_found")
+        if existing.get("app_session_id") != session_id:
+            return CommandResult(accepted=False, code="forbidden")
+        if response.decision == ApprovalDecision.APPROVE:
+            rec, reason = pending_approvals.approve(delegation_id)
+        else:
+            rec, reason = pending_approvals.deny(delegation_id)
+        if reason == "missing":
+            return CommandResult(accepted=False, code="not_found")
+        if reason == "expired":
+            return CommandResult(accepted=False, code="expired")
+        if reason == "already_resolved":
+            return CommandResult(accepted=True, code="already_resolved")
+        _publish_resolved_interaction_fact(
+            session_id, f"{WORKER_APPROVAL_REF_PREFIX}{delegation_id}", UserInteractionKind.APPROVAL,
+            {
+                "subject": "delegation",
+                "cwd": rec.get("cwd", ""),
+                "justification": rec.get("justification", ""),
+                "proposed_description": rec.get("proposed_description", ""),
+                "risk_scope": rec.get("proposed_orchestration_mode", ""),
+            },
+            response={"decision": response.decision.value},
+        )
+        self.coordinator._resolve_approval(delegation_id, rec)
+        return CommandResult(accepted=True)
+
+    async def _resolve_delegate_choice(
+        self, session_id: str, delegation_id: str, response: InteractionResponse,
+    ) -> CommandResult:
+        """Same mutation `POST /api/internal/session-bridge/delegate/resolve`
+        performs (`session_bridge.resolve_delegation`) — that function
+        itself re-fires `session.fire.msg_ask_result_set` on resolution
+        (`session_bridge._mark_picker_resolved` -> `session_manager.
+        set_msg_ask_result`), which is what `chat_adapter._on_ask_result_set`
+        broadcasts as the resolved `UserInteractionUpsert`; no separate fact
+        emission needed here."""
+        if not isinstance(response, ChoiceResponse):
+            return CommandResult(
+                accepted=False, code="invalid_response",
+                message="a delegation choice requires a choice response",
+            )
+        pending = session_bridge.get_pending(delegation_id)
+        if pending is None:
+            return CommandResult(accepted=False, code="not_found")
+        if pending.get("caller_sid") != session_id:
+            return CommandResult(accepted=False, code="forbidden")
+        ok = session_bridge.resolve_delegation(delegation_id, response.picked_ref)
+        if not ok:
+            return CommandResult(accepted=False, code="already_resolved")
+        return CommandResult(accepted=True)
+
+    async def _resolve_user_input(
+        self, session_id: str, request_id: str, response: InteractionResponse,
+    ) -> CommandResult:
+        """Same mutation `POST /api/user-input/{id}/resolve` performs
+        (`backend/user_input_api.py`'s `resolve_user_input`) — same
+        kind-specific response validation (`user_input_api.
+        build_resolve_response`, shared not re-derived), same store
+        mutation (`user_input_store.resolve_request`). No cancel
+        counterpart: the `resolve` intent (ADR 0006 §5) has no distinct
+        cancel variant for any kind — cancel stays legacy-REST-only,
+        still fact-producing (see `user_input_api.cancel_user_input`) so
+        a live v2 subscriber sees it, just not v2-intent-triggerable."""
+        if not isinstance(response, InputResponse):
+            return CommandResult(
+                accepted=False, code="invalid_response",
+                message="a user-input interaction requires an input response",
+            )
+        req = await asyncio.to_thread(user_input_store.get_request, request_id)
+        if req is None:
+            return CommandResult(accepted=False, code="not_found")
+        if req.get("app_session_id") != session_id:
+            return CommandResult(accepted=False, code="forbidden")
+        if req.get("status") != "pending":
+            return CommandResult(accepted=False, code="already_resolved")
+        try:
+            resolved_response = user_input_api.build_resolve_response(req, response.response)
+        except HTTPException as exc:
+            return CommandResult(accepted=False, code="invalid_response", message=str(exc.detail))
+        resolved = await asyncio.to_thread(
+            user_input_store.resolve_request, request_id, resolved_response,
+        )
+        if resolved is None:
+            return CommandResult(accepted=False, code="not_found")
+        _publish_resolved_interaction_fact(
+            session_id, f"{USER_INPUT_REF_PREFIX}{request_id}", UserInteractionKind.INPUT,
+            user_input_store.interaction_request_dict(req),
+            response=resolved_response,
+        )
+        return CommandResult(accepted=True)
 
 
 def build_chat_command_port(*, coordinator: Any) -> ChatCommandPort:

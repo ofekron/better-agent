@@ -25,14 +25,22 @@ const stalledRun: RunInfo = {
 
 describe("turn startup stalled state", () => {
   it("shows truthful controls without invoking either action automatically", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // `RunBadge` also eagerly cold-hydrates the v2 `runs` feed on mount
+    // (`useRunSummary` — see runSummaryRegistry.ts) as an ADDITIONAL
+    // stalled-honesty signal layered on top of this legacy-stalled render;
+    // that GET is unrelated to "does clicking nothing invoke an action",
+    // which is what this test actually guards — only the STOP-triggering
+    // call must stay silent without a user click.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200 }),
+    );
     render(<RunBadge run={stalledRun} sessionId="session-1" />);
 
     expect(screen.getByRole("status").textContent).toContain("Codex has not started the task");
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/Retry becomes available/)).not.toBeNull();
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/stop"))).toBe(false);
   });
 
   it("cancels only after the user clicks Cancel", async () => {
@@ -42,8 +50,9 @@ describe("turn startup stalled state", () => {
     render(<RunBadge run={stalledRun} sessionId="session-1" />);
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
-    expect(fetchSpy.mock.calls[0]?.[0]).toContain("/api/sessions/session-1/stop");
+    await waitFor(() =>
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/api/sessions/session-1/stop"))).toBe(true),
+    );
     expect((screen.getByRole("button", { name: "Cancelling…" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

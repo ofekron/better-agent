@@ -40,21 +40,39 @@ atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
 import perf  # noqa: E402  (bare — matches every other perf-instrumented backend module)
 import runs_dir  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
-from stores import worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
+import session_bridge  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
+import tool_approval  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
+import user_input_store  # noqa: E402  (bare — store_access._resolve aliases onto this instance)
+from stores import pending_approvals, worker_store  # noqa: E402  (bare — matches main.py's `from stores import task_store`)
 
 import backend.adapters.chat_adapter as chat_adapter_mod  # noqa: E402
 import backend.adapters.chat_index as chat_index_mod  # noqa: E402
+import backend.adapters.derive as derive_mod  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
 from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
-from backend.surface_contract.frames import NodeUpsert, ResyncRequired, TextDelta  # noqa: E402
-from backend.surface_contract.identity import Focus, Ok, Rebuilding, StaleCursor, SurfaceCursor  # noqa: E402
+from backend.surface_contract.frames import (  # noqa: E402
+    NodeUpsert,
+    ResyncRequired,
+    TextDelta,
+    TurnLifecycle,
+    UserInteractionUpsert,
+)
+from backend.surface_contract.identity import Focus, Ok, StaleCursor, SurfaceCursor  # noqa: E402
 from backend.surface_contract.intents import SendPrompt, SendMode, SendTarget, SendTargetKind  # noqa: E402
 from backend.surface_contract.nodes import (  # noqa: E402
+    ChildManifest,
+    DELEGATE_CHOICE_REF_PREFIX,
     FailureResolution,
     FailureSeverity,
     NodeKind,
+    TOOL_APPROVAL_REF_PREFIX,
+    USER_INPUT_REF_PREFIX,
+    UserInteractionKind,
+    UserInteractionState,
+    WORKER_APPROVAL_REF_PREFIX,
+    interaction_fact_payload,
 )
 
 
@@ -115,6 +133,14 @@ def _ingest_assistant_text_uuid(root_id: str, text: str, uuid_str: str) -> int:
         {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}, "uuid": uuid_str},
         source="test",
     )
+
+
+def _ingest_worker_fact(root_id: str, fact_type: str, delegation_id: str, **fields) -> int:
+    """A `worker_start`/`worker_event`/`worker_complete` journal row — the
+    SAME top-level `type` shape `orchestrator.py`'s team-message flow
+    journals (`turn_save({"type": fact_type, "data": {...}})`)."""
+    data = {"delegation_id": delegation_id, **fields}
+    return event_ingester.ingest(root_id, root_id, fact_type, data, source="test")
 
 
 def _publish_written(root_id: str, seq: int) -> None:
@@ -217,10 +243,20 @@ def test_submit_rejects_all_intents() -> None:
     assert ack.message
 
 
-def test_fetch_sidecar_is_rebuilding_for_unknown_ref() -> None:
+def test_fetch_sidecar_is_not_found_for_unknown_ref() -> None:
+    # A `sidecar_ref` with no matching `WorkerRecord` is a PERMANENT
+    # absence for delegation-flow-originated refs (ask/delegate_task/
+    # Task-tool targets are never registered via `workers_api.upsert_
+    # worker` — see derive.build_subagent_panel_container's docstring),
+    # not a transient race — `Rebuilding` would retry forever. An honest
+    # terminal `Ok(Sidecar(status="not_found"))` instead.
     adapter = ChatSurfaceAdapter()
     result = adapter.fetch_sidecar("some-session", "some-sidecar-ref")
-    assert isinstance(result, Rebuilding)
+    assert isinstance(result, Ok), result
+    sidecar = result.value
+    assert sidecar.sidecar_ref == "some-sidecar-ref"
+    assert sidecar.status == "not_found"
+    assert sidecar.payload == {}
 
 
 def test_fetch_sidecar_maps_worker_record() -> None:
@@ -291,6 +327,287 @@ def test_children_stale_cursor_on_render_rev_mismatch() -> None:
     assert isinstance(ok, Ok)
     assert len(ok.value) == 1
     assert ok.value[0].kind == NodeKind.TURN
+
+
+# ---- UserInteraction plane (ADR 0006 §5): fact -> UserInteractionUpsert --
+
+
+def _publish_interaction_fact(fact_type: str, root_id: str, payload: dict) -> None:
+    asyncio.run(bus.publish(BusEvent(
+        type=fact_type, root_id=root_id, sid=root_id, payload=payload,
+    )))
+
+
+def _publish_ask_result_set(root_id: str, ask_result: dict) -> None:
+    asyncio.run(bus.publish(BusEvent(
+        type="session.fire.msg_ask_result_set", root_id=root_id, sid=root_id,
+        payload={"kind": "msg_ask_result_set", "msg_id": "msg-1", "ask_result": ask_result},
+    )))
+
+
+def test_interaction_requested_fact_broadcasts_pending_user_interaction_upsert() -> None:
+    """tool-approval and worker-approval mechanisms share the SAME generic
+    `interaction.fire.requested`/`resolved` handler (`_on_interaction_fact`)
+    — proven here with a tool-approval-shaped payload; the worker-approval
+    shape is proven at the store_access/hydration level below since it has
+    no live 'requested' producer this pass (see `pending_approvals_api.py`'s
+    module comment)."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        ref = f"{TOOL_APPROVAL_REF_PREFIX}approval-1"
+        _publish_interaction_fact(
+            "interaction.fire.requested", root_id,
+            interaction_fact_payload(
+                ref, UserInteractionKind.APPROVAL,
+                {"subject": "tool", "tool_name": "Bash", "summary": {}, "risk_scope": "claude"},
+            ),
+        )
+        upserts = [f for f in received if isinstance(f, UserInteractionUpsert)]
+        assert upserts, received
+        ui = upserts[-1].user_interaction
+        assert ui.interaction_ref == ref
+        assert ui.kind == UserInteractionKind.APPROVAL
+        assert ui.state == UserInteractionState.PENDING
+        assert ui.response is None
+        assert ui.request["tool_name"] == "Bash"
+    finally:
+        sub.close()
+
+
+def test_interaction_resolved_fact_broadcasts_resolved_user_interaction_upsert() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        ref = f"{WORKER_APPROVAL_REF_PREFIX}deleg-1"
+        _publish_interaction_fact(
+            "interaction.fire.resolved", root_id,
+            interaction_fact_payload(
+                ref, UserInteractionKind.APPROVAL, {"subject": "delegation"},
+                state=UserInteractionState.RESOLVED, response={"decision": "approve"},
+            ),
+        )
+        upserts = [f for f in received if isinstance(f, UserInteractionUpsert)]
+        assert upserts, received
+        ui = upserts[-1].user_interaction
+        assert ui.interaction_ref == ref
+        assert ui.state == UserInteractionState.RESOLVED
+        assert ui.response == {"decision": "approve"}
+    finally:
+        sub.close()
+
+
+def test_interaction_fact_with_malformed_payload_is_dropped_not_crashed() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+
+    received: list[object] = []
+    identity = opened.snapshot
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        _publish_interaction_fact("interaction.fire.requested", root_id, {"kind": "not_a_real_kind"})
+        assert not [f for f in received if isinstance(f, UserInteractionUpsert)]
+    finally:
+        sub.close()
+
+
+def test_ask_result_set_broadcasts_pending_then_resolved_choice_interaction() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        delegation_id = "sbd-1"
+        ref = f"{DELEGATE_CHOICE_REF_PREFIX}{delegation_id}"
+        _publish_ask_result_set(root_id, {
+            "purpose": "delegate_approval", "session_ids": ["target-sess"],
+            "reasoning": "", "delegation_id": delegation_id, "run_mode": "fork",
+            "prompt_preview": "do it", "create_new": False,
+        })
+        upserts = [f for f in received if isinstance(f, UserInteractionUpsert)]
+        assert upserts, received
+        pending_ui = upserts[-1].user_interaction
+        assert pending_ui.interaction_ref == ref
+        assert pending_ui.kind == UserInteractionKind.CHOICE
+        assert pending_ui.state == UserInteractionState.PENDING
+        assert pending_ui.request["candidates"] == ["target-sess"]
+
+        _publish_ask_result_set(root_id, {
+            "purpose": "delegate_approval", "session_ids": ["target-sess"],
+            "reasoning": "", "delegation_id": delegation_id, "run_mode": "fork",
+            "resolved": True, "chosen_session_id": "target-sess", "create_new": False,
+        })
+        resolved_upserts = [f for f in received if isinstance(f, UserInteractionUpsert)]
+        resolved_ui = resolved_upserts[-1].user_interaction
+        assert resolved_ui.state == UserInteractionState.RESOLVED
+        assert resolved_ui.response == {"picked_ref": "target-sess"}
+    finally:
+        sub.close()
+
+
+def test_ask_result_set_without_delegate_purpose_is_ignored() -> None:
+    """The Ask-singleton's OWN `propose_sessions` picker reuses the same
+    `msg_ask_result_set` fact shape but never sets `purpose` — must NOT be
+    mistaken for the session-bridge delegation-picker mechanism (that flow
+    isn't one of the 3 mechanisms this contract recast unifies)."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+
+    received: list[object] = []
+    identity = opened.snapshot
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        _publish_ask_result_set(root_id, {"session_ids": ["s1"], "reasoning": ""})
+        assert not [f for f in received if isinstance(f, UserInteractionUpsert)]
+    finally:
+        sub.close()
+
+
+def test_open_session_snapshot_carries_pending_tool_approval_interaction() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+
+    async def _create() -> "tool_approval.ToolApproval":
+        return tool_approval.registry.create(
+            app_session_id=root_id, run_id="run-1", provider_kind="claude",
+            tool_name="Bash", summary={"command": "ls"},
+        )
+
+    rec = asyncio.run(_create())
+    try:
+        adapter = ChatSurfaceAdapter()
+        opened = adapter.open_session(root_id)
+        assert isinstance(opened, Ok)
+        refs = {ui.interaction_ref: ui for ui in opened.value.interactions}
+        ref = f"{TOOL_APPROVAL_REF_PREFIX}{rec.approval_id}"
+        assert ref in refs, refs
+        assert refs[ref].kind == UserInteractionKind.APPROVAL
+        assert refs[ref].state == UserInteractionState.PENDING
+        assert refs[ref].request["tool_name"] == "Bash"
+    finally:
+        tool_approval.registry._pending.pop(rec.approval_id, None)
+
+
+def test_open_session_snapshot_carries_pending_worker_and_choice_interactions() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    worker_rec = pending_approvals.create(
+        delegation_id=f"deleg-{uuid.uuid4().hex}", app_session_id=root_id, cwd="/tmp",
+        justification="need it", proposed_description="a worker",
+        proposed_orchestration_mode="native", instructions_preview="", model="claude",
+    )
+    delegation_id = f"sbd-{uuid.uuid4().hex}"
+    session_bridge._pending[delegation_id] = {
+        "caller_sid": root_id, "caller_msg_id": "msg-1", "target_sid": "target-sess",
+        "prompt": "do it", "run_mode": "fork", "proposed_ids": ["target-sess"],
+    }
+    try:
+        adapter = ChatSurfaceAdapter()
+        opened = adapter.open_session(root_id)
+        assert isinstance(opened, Ok)
+        refs = {ui.interaction_ref: ui for ui in opened.value.interactions}
+
+        worker_ref = f"{WORKER_APPROVAL_REF_PREFIX}{worker_rec['delegation_id']}"
+        assert worker_ref in refs, refs
+        assert refs[worker_ref].kind == UserInteractionKind.APPROVAL
+        assert refs[worker_ref].request["subject"] == "delegation"
+
+        choice_ref = f"{DELEGATE_CHOICE_REF_PREFIX}{delegation_id}"
+        assert choice_ref in refs, refs
+        assert refs[choice_ref].kind == UserInteractionKind.CHOICE
+        assert refs[choice_ref].request["candidates"] == ["target-sess"]
+    finally:
+        pending_approvals.delete(worker_rec["delegation_id"])
+        session_bridge._pending.pop(delegation_id, None)
+
+
+def test_open_session_snapshot_carries_pending_user_input_interaction() -> None:
+    """The 4th legacy mechanism (`user_input_store`, ADR 0006 §5's
+    remaining `input` kind slot) — cold hydration via `store_access.
+    list_pending_interactions`, mirroring the other 3 mechanisms' coverage
+    above."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    req = user_input_store.create_request(
+        app_session_id=root_id,
+        questions=[{"id": "q1", "header": "H", "question": "Proceed?", "options": []}],
+        timeout_seconds=60,
+    )
+    try:
+        adapter = ChatSurfaceAdapter()
+        opened = adapter.open_session(root_id)
+        assert isinstance(opened, Ok)
+        refs = {ui.interaction_ref: ui for ui in opened.value.interactions}
+        ref = f"{USER_INPUT_REF_PREFIX}{req['request_id']}"
+        assert ref in refs, refs
+        assert refs[ref].kind == UserInteractionKind.INPUT
+        assert refs[ref].state == UserInteractionState.PENDING
+        assert refs[ref].request["schema"]["kind"] == "questions"
+        assert refs[ref].request["schema"]["questions"][0]["id"] == "q1"
+    finally:
+        user_input_store.cancel_request(req["request_id"])
+
+
+def test_interaction_fact_broadcasts_pending_user_input_interaction() -> None:
+    """Same generic `_on_interaction_fact` handler proven for tool/worker
+    approval above — proven here with an `input`-kind payload, matching
+    the shape `backend/user_input_api.py`'s `internal_request_user_input`
+    publishes."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        ref = f"{USER_INPUT_REF_PREFIX}req-1"
+        _publish_interaction_fact(
+            "interaction.fire.requested", root_id,
+            interaction_fact_payload(
+                ref, UserInteractionKind.INPUT,
+                {"schema": {"kind": "approval"}, "prompt": "Deploy?"},
+            ),
+        )
+        upserts = [f for f in received if isinstance(f, UserInteractionUpsert)]
+        assert upserts, received
+        ui = upserts[-1].user_interaction
+        assert ui.interaction_ref == ref
+        assert ui.kind == UserInteractionKind.INPUT
+        assert ui.state == UserInteractionState.PENDING
+        assert ui.request["prompt"] == "Deploy?"
+    finally:
+        sub.close()
 
 
 def _publish_user_message_failed(root_id: str, lifecycle_msg_id: str, reason: str, error: str | None = None) -> None:
@@ -1057,12 +1374,333 @@ def test_live_path_recovers_content_journaled_before_its_own_anchor() -> None:
     assert NodeKind.ASSISTANT_TEXT in live_kinds, reopened.value.live_turn_nodes
 
 
+def test_usage_from_payload_builds_usage_with_cache_fields():
+    """Item 4: `ChatSurfaceAdapter._usage_from_payload` — the
+    `trace_collector._normalize_token_usage`-shaped dict
+    `_publish_terminal_lifecycle`'s bus event carries — must produce a
+    `Usage` with cache-token counts, and `total_tokens` derived as
+    input+output (cache tokens are context occupancy, not newly
+    generated)."""
+    usage = ChatSurfaceAdapter._usage_from_payload({
+        "input_tokens": 100, "output_tokens": 40,
+        "cache_creation_input_tokens": 5, "cache_read_input_tokens": 12,
+    })
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 40
+    assert usage.total_tokens == 140
+    assert usage.cache_creation_input_tokens == 5
+    assert usage.cache_read_input_tokens == 12
+
+
+def test_usage_from_payload_none_when_absent_or_wrong_type():
+    assert ChatSurfaceAdapter._usage_from_payload(None) is None
+    assert ChatSurfaceAdapter._usage_from_payload("not-a-dict") is None
+    assert ChatSurfaceAdapter._usage_from_payload([1, 2, 3]) is None
+
+
+def test_usage_from_payload_partial_dict_omits_total_and_cache():
+    usage = ChatSurfaceAdapter._usage_from_payload({"input_tokens": 10})
+    assert usage.input_tokens == 10
+    assert usage.output_tokens is None
+    assert usage.total_tokens is None  # can't sum with a missing operand
+    assert usage.cache_creation_input_tokens is None
+    assert usage.cache_read_input_tokens is None
+
+
+def test_on_lifecycle_attaches_usage_to_terminal_turn_lifecycle_frame():
+    """End-to-end through the live bus: a `lifecycle.turn_complete`
+    BusEvent carrying `payload["usage"]` (as `_publish_terminal_lifecycle`
+    now stamps) must broadcast a `TurnLifecycle` frame whose `usage` field
+    is populated — not the always-null placeholder this wire field used
+    to be."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok), opened
+    identity = opened.snapshot
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        asyncio.run(bus.publish(BusEvent(
+            type="lifecycle.turn_complete",
+            root_id=root_id,
+            sid=root_id,
+            payload={
+                "user_turn_id": "user-turn", "execution_turn_id": "exec-turn",
+                "lifecycle_message_id": "lifecycle-msg", "assistant_message_id": "asst-msg",
+                "reason": "success",
+                "usage": {
+                    "input_tokens": 7, "output_tokens": 3,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2,
+                },
+            },
+            persist=False,
+        )))
+        lifecycle_frames = [f for f in received if isinstance(f, TurnLifecycle)]
+        assert lifecycle_frames, received
+        frame = lifecycle_frames[-1]
+        assert frame.usage is not None
+        assert frame.usage.input_tokens == 7
+        assert frame.usage.output_tokens == 3
+        assert frame.usage.total_tokens == 10
+        assert frame.usage.cache_read_input_tokens == 2
+    finally:
+        sub.close()
+
+
+def test_on_lifecycle_running_phase_never_carries_usage():
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok), opened
+    identity = opened.snapshot
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        asyncio.run(bus.publish(BusEvent(
+            type="lifecycle.turn_start",
+            root_id=root_id,
+            sid=root_id,
+            payload={
+                "user_turn_id": "user-turn", "execution_turn_id": "exec-turn",
+                "lifecycle_message_id": "lifecycle-msg", "assistant_message_id": "asst-msg",
+                # A RUNNING-phase event would never carry usage in
+                # practice, but if one somehow did, it must still not
+                # leak onto the frame — usage is a terminal-only concept.
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            persist=False,
+        )))
+        lifecycle_frames = [f for f in received if isinstance(f, TurnLifecycle)]
+        assert lifecycle_frames, received
+        assert lifecycle_frames[-1].usage is None
+    finally:
+        sub.close()
+
+
+def test_open_session_groups_worker_facts_into_worker_turn() -> None:
+    """SubAgentTurn family, batch/cold path (`_build_turn_view`, exercised
+    via `open_session`): every WORKER_INTERACTION fact for one delegation
+    groups into ONE WORKER_TURN container. Two delegations in the same
+    turn — only the CHRONOLOGICALLY LAST one's own facts are eagerly
+    included in `live_turn_nodes` (same "trailing container only" bound
+    NATIVE_SUBAGENT_TURN already has, now generalized to the whole
+    SubAgentTurn family — see `test_live_path_only_expands_trailing_
+    subagent_not_earlier_ones`); the earlier one's facts stay lazy,
+    reachable one level down via `children()`."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-early", panel_kind="worker",
+        worker_description="early delegation", worker_session_id="sess-e",
+    )
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="worker",
+        worker_description="fix the bug", worker_session_id="sess-w",
+    )
+    _ingest_worker_fact(root_id, "worker_event", "deleg-1")
+    _ingest_worker_fact(
+        root_id, "worker_complete", "deleg-1",
+        token_usage={"input_tokens": 12, "output_tokens": 8},
+    )
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    snapshot = result.value
+    assert len(snapshot.turns) == 1
+
+    containers = [n for n in snapshot.live_turn_nodes if n.kind == NodeKind.WORKER_TURN]
+    assert len(containers) == 2, snapshot.live_turn_nodes
+    container = next(c for c in containers if c.node_id == derive_mod.worker_turn_container_id("deleg-1"))
+    assert container.payload.label == "fix the bug"
+    assert container.target_ref.session_id == "sess-w"
+    assert container.target_ref.turn_id is None
+    assert container.usage.input_tokens == 12
+    assert container.usage.total_tokens == 20
+    assert container.child_manifest == ChildManifest(renderable_child_count=3, has_children=True)
+
+    # The trailing delegation's own facts ARE eagerly included...
+    trailing_facts = [
+        n for n in snapshot.live_turn_nodes
+        if n.kind == NodeKind.WORKER_INTERACTION and n.parent_id == container.node_id
+    ]
+    assert len(trailing_facts) == 3
+    # ...the earlier delegation's are NOT — reachable one level down only.
+    early_id = derive_mod.worker_turn_container_id("deleg-early")
+    assert not any(
+        n.kind == NodeKind.WORKER_INTERACTION and n.parent_id == early_id
+        for n in snapshot.live_turn_nodes
+    )
+    level1 = adapter.children(root_id, early_id, at_render_rev=result.snapshot.render_rev)
+    assert isinstance(level1, Ok)
+    assert len(level1.value) == 1
+
+
+def test_open_session_panel_kind_maps_to_sub_session_turn() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="sub_session",
+        worker_description="delegated task", worker_session_id="sess-s",
+    )
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    containers = [n for n in result.value.live_turn_nodes if n.kind == NodeKind.SUB_SESSION_TURN]
+    assert len(containers) == 1
+
+
+def test_open_session_worker_turn_created_true_for_created_panel() -> None:
+    # `emit_session_created_panel`'s "*_created" panels never emit a
+    # `worker_complete` (nothing runs) — a single `worker_start` fact with
+    # `is_new: True` is the ENTIRE group.
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="sub_session_created",
+        worker_description="sess created", worker_session_id="sess-new", is_new=True,
+    )
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    container = next(
+        n for n in result.value.live_turn_nodes if n.kind == NodeKind.SUB_SESSION_TURN
+    )
+    assert container.payload.created is True
+
+
+def test_open_session_worker_turn_target_turn_id_and_sidecar_ref_from_worker_complete() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="sub_session",
+        worker_description="delegated", worker_session_id="sess-corr",
+    )
+    _ingest_worker_fact(
+        root_id, "worker_complete", "deleg-1",
+        worker_session_id="sess-corr", target_turn_id="prompt-corr",
+    )
+
+    adapter = ChatSurfaceAdapter()
+    result = adapter.open_session(root_id)
+    assert isinstance(result, Ok), result
+    container = next(
+        n for n in result.value.live_turn_nodes if n.kind == NodeKind.SUB_SESSION_TURN
+    )
+    assert container.target_ref.session_id == "sess-corr"
+    assert container.target_ref.turn_id == "prompt-corr"
+    assert container.sidecar_ref == "sess-corr"
+
+
+def test_live_path_incrementally_builds_worker_turn_container() -> None:
+    """SubAgentTurn family, live path (`_process_row`/`bind`): the
+    container is constructed on the delegation's first fact and rebuilt
+    (SAME node_id) in place as later facts for it arrive."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    adapter.bind()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=identity.render_rev)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        seq1 = _ingest_worker_fact(
+            root_id, "worker_start", "deleg-1", panel_kind="sub_session",
+            worker_description="delegated", worker_session_id="sess-a",
+        )
+        _publish_written(root_id, seq1)
+
+        upserts = [f for f in received if isinstance(f, NodeUpsert)]
+        containers = [f.node for f in upserts if f.node.kind == NodeKind.SUB_SESSION_TURN]
+        assert containers, received
+        first_container = containers[-1]
+        assert first_container.child_manifest.renderable_child_count == 1
+        assert first_container.usage is None
+
+        facts = [f.node for f in upserts if f.node.kind == NodeKind.WORKER_INTERACTION]
+        assert facts and facts[-1].parent_id == first_container.node_id
+
+        received.clear()
+        seq2 = _ingest_worker_fact(
+            root_id, "worker_complete", "deleg-1", worker_session_id="sess-a",
+            token_usage={"input_tokens": 7, "output_tokens": 2},
+        )
+        _publish_written(root_id, seq2)
+
+        upserts2 = [f for f in received if isinstance(f, NodeUpsert)]
+        containers2 = [f.node for f in upserts2 if f.node.kind == NodeKind.SUB_SESSION_TURN]
+        assert containers2, received
+        updated_container = containers2[-1]
+        assert updated_container.node_id == first_container.node_id
+        assert updated_container.child_manifest.renderable_child_count == 2
+        assert updated_container.usage.input_tokens == 7
+        assert updated_container.usage.total_tokens == 9
+    finally:
+        sub.close()
+
+
+def test_replay_groups_worker_facts_into_worker_turn() -> None:
+    """SubAgentTurn family, resync-replay path (`_replay`, exercised via
+    a resubscribing cursor behind the surface's current render_seq_
+    history): the container is rebuilt and broadcast; its own
+    WORKER_INTERACTION facts are NOT re-broadcast flat, same bound as
+    sidechain descendants in `_replay`."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    _ingest_prompt(root_id, "hello")
+
+    adapter = ChatSurfaceAdapter()
+    opened = adapter.open_session(root_id)
+    assert isinstance(opened, Ok)
+    identity = opened.snapshot
+
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="worker",
+        worker_description="fix it", worker_session_id="sess-z",
+    )
+    _ingest_worker_fact(
+        root_id, "worker_complete", "deleg-1", worker_session_id="sess-z",
+        token_usage={"input_tokens": 3, "output_tokens": 4},
+    )
+
+    received: list[object] = []
+    cursor = SurfaceCursor(surface_id=root_id, incarnation=identity.incarnation, render_rev=0)
+    sub = adapter.subscribe((cursor,), Focus.OPENED, received.append)
+    try:
+        upserts = [f for f in received if isinstance(f, NodeUpsert)]
+        containers = [f.node for f in upserts if f.node.kind == NodeKind.WORKER_TURN]
+        assert containers, received
+        container = containers[-1]
+        assert container.payload.label == "fix it"
+        assert container.usage.input_tokens == 3
+        assert not any(f.node.kind == NodeKind.WORKER_INTERACTION for f in upserts)
+    finally:
+        sub.close()
+
+
 _TESTS = [
     test_open_session_single_turn,
+    test_open_session_groups_worker_facts_into_worker_turn,
+    test_open_session_panel_kind_maps_to_sub_session_turn,
+    test_open_session_worker_turn_created_true_for_created_panel,
+    test_open_session_worker_turn_target_turn_id_and_sidecar_ref_from_worker_complete,
+    test_live_path_incrementally_builds_worker_turn_container,
+    test_replay_groups_worker_facts_into_worker_turn,
     test_subscribe_emits_node_upsert_with_bumped_render_rev,
     test_subscribe_wrong_incarnation_emits_resync_required,
     test_submit_rejects_all_intents,
-    test_fetch_sidecar_is_rebuilding_for_unknown_ref,
+    test_fetch_sidecar_is_not_found_for_unknown_ref,
     test_fetch_sidecar_maps_worker_record,
     test_fetch_sidecar_worker_status_reflects_latest_run_outcome,
     test_children_stale_cursor_on_render_rev_mismatch,
@@ -1086,6 +1724,20 @@ _TESTS = [
     test_open_session_perf_smoke_monster_sidechain_turn_bounded_response,
     test_flush_drop_reasons_recorded_for_known_cases,
     test_live_path_recovers_content_journaled_before_its_own_anchor,
+    test_usage_from_payload_builds_usage_with_cache_fields,
+    test_usage_from_payload_none_when_absent_or_wrong_type,
+    test_usage_from_payload_partial_dict_omits_total_and_cache,
+    test_on_lifecycle_attaches_usage_to_terminal_turn_lifecycle_frame,
+    test_on_lifecycle_running_phase_never_carries_usage,
+    test_interaction_requested_fact_broadcasts_pending_user_interaction_upsert,
+    test_interaction_resolved_fact_broadcasts_resolved_user_interaction_upsert,
+    test_interaction_fact_with_malformed_payload_is_dropped_not_crashed,
+    test_ask_result_set_broadcasts_pending_then_resolved_choice_interaction,
+    test_ask_result_set_without_delegate_purpose_is_ignored,
+    test_open_session_snapshot_carries_pending_tool_approval_interaction,
+    test_open_session_snapshot_carries_pending_worker_and_choice_interactions,
+    test_open_session_snapshot_carries_pending_user_input_interaction,
+    test_interaction_fact_broadcasts_pending_user_input_interaction,
 ]
 
 

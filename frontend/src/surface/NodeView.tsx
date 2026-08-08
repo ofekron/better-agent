@@ -59,7 +59,7 @@ export function NodeView({ node, containerMode, store, runsById }: NodeViewProps
     case "result":
       return <ResultView node={node} />;
     case "compaction":
-      return <CompactionView node={node} />;
+      return <CompactionView node={node} store={store} />;
     case "continuation_session":
       return <ContinuationSessionView node={node} />;
     case "failure":

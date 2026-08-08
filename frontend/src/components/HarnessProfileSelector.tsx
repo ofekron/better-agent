@@ -4,6 +4,7 @@ import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
 import { DEFAULT_HARNESS_PROFILE_ID } from "../lib/harnessProfile";
 import { trackedFetch } from "../progress/store";
+import { subscribeSystemFrames } from "../lib/systemFeedRegistry";
 import type { HarnessProfile } from "../types";
 
 interface Props {
@@ -55,10 +56,22 @@ export function HarnessProfileSelector({
     const unsubscribe = eventBus.subscribe("harness_profiles_changed", () => {
       void load();
     });
+    // ADR 0011 §2 `harness_profiles` feed — additional live-refresh
+    // trigger alongside the legacy eventBus ping above (dual: the actual
+    // READ MODEL rendered here stays the legacy `GET /api/harness-profiles`
+    // response, which carries fields — `description`, `revision`,
+    // `read_only`, `fields` — the v2 `HarnessProfileDescriptor` doesn't
+    // model at all; only the refresh SIGNAL is doubled, not the data).
+    const unsubscribeV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "harness_profile_upsert" || frame.type === "harness_default_changed") {
+        void load();
+      }
+    });
     return () => {
       cancelled = true;
       generation += 1;
       unsubscribe();
+      unsubscribeV2();
     };
   }, [onReadyChange]);
 

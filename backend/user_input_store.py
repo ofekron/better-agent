@@ -312,6 +312,23 @@ def pending_counts_version_loaded() -> int:
         return _PENDING_COUNTS_VERSION
 
 
+def interaction_request_dict(req: dict[str, Any]) -> dict[str, Any]:
+    """The v2 UserInteraction `request` shape (ADR 0006 §5: `{schema,
+    prompt?}`) for one legacy user-input record, regardless of its own
+    `kind` (approval/input/memory sub-kind) — pure, framework-agnostic, so
+    both the fact producers (`user_input_api.py`, which also runs it
+    against records still carrying full internal fields) and cold
+    hydration (`backend/adapters/store_access.py`, which only ever sees
+    already-`_public`-shaped rows) can share one source instead of each
+    re-deriving the shape."""
+    kind = req.get("kind")
+    if kind == "approval":
+        return {"schema": {"kind": "approval"}, "prompt": req.get("prompt", "")}
+    if kind == "memory":
+        return {"schema": {"kind": "memory", "memory_proposal": req.get("memory_proposal")}, "prompt": ""}
+    return {"schema": {"kind": "questions", "questions": req.get("questions") or []}, "prompt": ""}
+
+
 def get_request(request_id: str) -> dict[str, Any] | None:
     with _LOCK:
         req = _read_locked()["requests"].get(request_id)

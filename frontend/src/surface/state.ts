@@ -27,19 +27,25 @@ import {
   upsertTurnNode,
   type TurnNodeTable,
 } from "../adapter/turnNodeTable";
-import type {
-  AssistantTextPayloadWire,
-  ChatFrame,
-  ChildManifestWire,
-  NodeId,
-  NodeWire,
-  ThinkingPayloadWire,
-  RunWire,
-  SnapshotIdentity,
-  TerminalReasonWire,
-  TurnId,
-  TurnPhaseWire,
-  UsageWire,
+import { uuidv4 } from "../lib/uuid";
+import {
+  CONTRACT_VERSION,
+  type AssistantTextPayloadWire,
+  type AttachmentInputWire,
+  type ChatFrame,
+  type ChildManifestWire,
+  type NodeId,
+  type NodeWire,
+  type SendModeWire,
+  type ThinkingPayloadWire,
+  type RunWire,
+  type SnapshotIdentity,
+  type TerminalReasonWire,
+  type TransportAckFrame,
+  type TurnId,
+  type TurnPhaseWire,
+  type TypedPromptPayloadWire,
+  type UsageWire,
 } from "../adapter/wire";
 
 /** Turn phases chat-panel.md's `isLive(turn)` treats as "running" —
@@ -49,7 +55,7 @@ const LIVE_PHASES: ReadonlySet<TurnPhaseWire> = new Set([
   "queued",
   "starting",
   "running",
-  "awaiting_approval",
+  "awaiting_interaction",
   "reconnecting",
   "stopping",
 ]);
@@ -57,6 +63,84 @@ const LIVE_PHASES: ReadonlySet<TurnPhaseWire> = new Set([
 export function isLivePhase(phase: TurnPhaseWire | null): boolean {
   return phase !== null && LIVE_PHASES.has(phase);
 }
+
+/** Client-only send-in-flight state for a turn scaffolded by
+ * `SurfaceStore.sendPrompt` before the backend's own confirmed
+ * `typed_prompt` node exists — never part of the wire contract (NodeWire
+ * stays a pure mirror of the backend, per wire.ts's own docstring). Kept
+ * on TurnEntry (a store-internal type) rather than smuggled into a
+ * NodeWire field, so components can render "sending"/"failed, retry"
+ * chrome without any client-synthesized value pretending to be a real
+ * ContentStatusWire. */
+export interface ProvisionalSend {
+  intentId: string;
+  status: "sending" | "error";
+  errorMessage: string | null;
+}
+
+/** Everything `sendPrompt`/`retrySend` needs to re-scaffold a provisional
+ * turn from scratch — the durable record `ProvisionalSendRegistry` keeps,
+ * independent of any one `SurfaceStore` instance's lifetime. */
+interface ProvisionalSendRecord {
+  intentId: string;
+  text: string;
+  attachments: readonly AttachmentInputWire[];
+  sendMode: SendModeWire;
+  status: "sending" | "error";
+  errorMessage: string | null;
+  /** Wall-clock seconds at the ORIGINAL send attempt (not touched by
+   * `retrySend`'s fresh-intent-id replacement) — keeps a reseeded
+   * provisional turn's tail position stable relative to other provisional
+   * entries across a session switch, instead of jumping to "now". */
+  createdAtSeconds: number;
+}
+
+/** A `SurfaceStore` is disposed and recreated on every session switch
+ * (`useSurfaceStore.ts`'s effect) — a provisional send living only on that
+ * instance's own `turnsById`/`pendingByIntentId` would vanish the moment the
+ * user switches away, even though the backend may still be processing (or
+ * may have already rejected) it. This registry is the SOLE durable source of
+ * truth for "a send this client issued but has not yet seen reconciled or
+ * abandoned" — module-level, keyed by session_id, outliving any one store
+ * instance. Every `SurfaceStore` method that mutates a provisional send's
+ * state (`sendPrompt`/`failProvisionalSend`/`reconcileProvisionalSend`/
+ * `retrySend`) writes through to it; `hydrate()` reads it back via
+ * `reseedProvisionalSends` so a session re-selected later shows exactly the
+ * entries it left with (pending or "error", Retry-able) minus whatever the
+ * fresh snapshot itself already proves resolved (see that method). A
+ * store's own `turnsById`/`pendingByIntentId` are just this session's
+ * current PROJECTION of the registry, same relationship `childrenTables`
+ * has to the backend's own node graph. */
+class ProvisionalSendRegistry {
+  private bySession = new Map<string, Map<string, ProvisionalSendRecord>>();
+
+  list(sessionId: string): ProvisionalSendRecord[] {
+    const m = this.bySession.get(sessionId);
+    return m ? [...m.values()].sort((a, b) => a.createdAtSeconds - b.createdAtSeconds) : [];
+  }
+
+  get(sessionId: string, intentId: string): ProvisionalSendRecord | undefined {
+    return this.bySession.get(sessionId)?.get(intentId);
+  }
+
+  set(sessionId: string, record: ProvisionalSendRecord): void {
+    let m = this.bySession.get(sessionId);
+    if (!m) {
+      m = new Map();
+      this.bySession.set(sessionId, m);
+    }
+    m.set(record.intentId, record);
+  }
+
+  delete(sessionId: string, intentId: string): void {
+    const m = this.bySession.get(sessionId);
+    if (!m) return;
+    m.delete(intentId);
+    if (m.size === 0) this.bySession.delete(sessionId);
+  }
+}
+
+const provisionalSendRegistry = new ProvisionalSendRegistry();
 
 export interface TurnEntry {
   turnId: TurnId;
@@ -75,6 +159,11 @@ export interface TurnEntry {
   phase: TurnPhaseWire | null;
   reason: TerminalReasonWire | null;
   usage: UsageWire | null;
+  /** Set only for a turn `sendPrompt` scaffolded client-side, cleared the
+   * moment the backend's own confirmed `typed_prompt` node reconciles it
+   * (see `reconcileProvisionalSend`). Null for every real, backend-born
+   * turn. */
+  provisionalSend: ProvisionalSend | null;
 }
 
 /** `children(turn_id)` mixes Result nodes in with real BodyItems (backend
@@ -99,9 +188,22 @@ export interface SurfaceStoreSnapshot {
   runsById: ReadonlyMap<string, RunWire>;
   olderCursor: string | null;
   loadingOlder: boolean;
+  /** Set when the most recent `loadOlder()` attempt threw (network error,
+   * non-2xx REST response); cleared the moment a retry is attempted. Never
+   * clears `olderCursor` on failure, so the same retry affordance keeps
+   * working and a later retry can still succeed. */
+  olderError: string | null;
   /** True once the first snapshot/resync completes; false while a fresh
    * session is still hydrating (initial REST fetch in flight). */
   hydrated: boolean;
+  /** Mirrors the `/ws/v2/surface` socket's own OPEN state (updated via
+   * `SurfaceSocketHandlers.onOpen`/`onClose`, event-driven — never
+   * polled). `sendPrompt` itself doesn't consult this (submitting while
+   * closed still surfaces a real error via the provisional entry, same as
+   * legacy) — it exists so a caller with a durable fallback transport
+   * (e.g. the legacy offline queue) can decide NOT to attempt the native
+   * path at all while offline, instead of racing a doomed submit. */
+  socketOpen: boolean;
 }
 
 function byTsSeq(a: { ts: number; seq: number }, b: { ts: number; seq: number }): number {
@@ -137,7 +239,9 @@ export class SurfaceStore {
   private runsById = new Map<string, RunWire>();
   private olderCursor: string | null = null;
   private loadingOlder = false;
+  private olderError: string | null = null;
   private hydrated = false;
+  private socketConnected = false;
 
   /** containerNodeId -> its direct children, one level (chat-panel.md's
    * `children(item)`). Populated lazily via `ensureChildren`, or eagerly
@@ -161,6 +265,13 @@ export class SurfaceStore {
     TurnId,
     { phase: TurnPhaseWire; reason: TerminalReasonWire | null; usage: UsageWire | null }
   >();
+  /** intent_id -> the provisional turn_id `sendPrompt` scaffolded for it,
+   * for O(1) lookup when the backend's own confirmed `typed_prompt` node
+   * (or a rejection) arrives. Cleared by `reconcileProvisionalSend` on
+   * success; deliberately left in place on failure (see
+   * `failProvisionalSend`) so a late-arriving real node can still
+   * self-heal a false-negative error, and so `retrySend` can find it. */
+  private pendingByIntentId = new Map<string, TurnId>();
 
   private readonly subscribers = new Set<() => void>();
   private cachedSnapshot: SurfaceStoreSnapshot | null = null;
@@ -171,6 +282,14 @@ export class SurfaceStore {
     this.socket = this.client.openSocket({
       onFrame: (frame) => this.handleFrame(frame),
       onResyncRequired: () => void this.hydrate(),
+      onOpen: () => {
+        this.socketConnected = true;
+        this.notify();
+      },
+      onClose: () => {
+        this.socketConnected = false;
+        this.notify();
+      },
     });
     void this.hydrate();
   }
@@ -190,7 +309,9 @@ export class SurfaceStore {
       runsById: this.runsById,
       olderCursor: this.olderCursor,
       loadingOlder: this.loadingOlder,
+      olderError: this.olderError,
       hydrated: this.hydrated,
+      socketOpen: this.socketConnected,
     };
     return this.cachedSnapshot;
   };
@@ -240,10 +361,26 @@ export class SurfaceStore {
     return promise;
   }
 
+  /** A children fetch (`ensureChildren`) may resolve AFTER live frames have
+   * already populated (or extended) this same container's table — e.g. a
+   * cold-born turn's on-demand fetch racing its own first live
+   * `node_upsert` (the fetch is issued the instant the turn mounts, before
+   * the node it's fetching for necessarily exists server-side yet). Merge
+   * into whatever's already cached by node identity instead of replacing
+   * the map entry wholesale: a node the fetch response doesn't mention at
+   * all (because it hadn't been created yet when the fetch was issued) is
+   * left untouched, and a node present in both is only overwritten when
+   * the fetched copy is not older (by `cv`) than what a live upsert has
+   * already applied — so a late-resolving fetch can only add/refresh
+   * content, never discard a newer live node (`hydrate()` always resets
+   * `childrenTables` to empty first, so this is a no-op merge-into-nothing
+   * there — behavior unchanged for cold hydrate/resync). */
   private setChildrenTable(nodeId: NodeId, nodes: readonly NodeWire[]): void {
-    const table = createTurnNodeTable();
+    const table = this.childrenTables.get(nodeId) ?? createTurnNodeTable();
     const sorted = [...nodes].sort(byTsSeq);
     for (const n of sorted) {
+      const current = getTurnNode(table, n.node_id);
+      if (current && current.cv > n.cv) continue;
       upsertTurnNode(table, n);
       this.nodeLocation.set(n.node_id, { table });
     }
@@ -275,6 +412,7 @@ export class SurfaceStore {
   async loadOlder(): Promise<void> {
     if (this.loadingOlder || !this.olderCursor) return;
     this.loadingOlder = true;
+    this.olderError = null;
     this.notify();
     try {
       const envelope = await this.client.fetchOlder(this.sessionId, this.olderCursor);
@@ -294,10 +432,267 @@ export class SurfaceStore {
       this.turnOrder = [...olderIds, ...this.turnOrder];
       for (const run of envelope.runs) this.runsById.set(run.run_ref, run);
       this.olderCursor = envelope.older_cursor;
+    } catch (err) {
+      if (this.cancelled) return;
+      // Leaves `olderCursor` untouched so the retry affordance below keeps
+      // targeting the same page — a rejected fetch (network error, non-2xx
+      // REST response) must not silently drop the ability to page further.
+      this.olderError = err instanceof Error ? err.message : String(err);
     } finally {
       this.loadingOlder = false;
       this.notify();
     }
+  }
+
+  // ---- command plane: sending a prompt ---------------------------------
+
+  /** Submits a `SendPrompt` intent over the live `/ws/v2/surface`
+   * connection (backend/adapter_api.py `_parse_send_prompt`) and inserts a
+   * provisional turn — one client-synthesized `turn`+`typed_prompt` node
+   * pair, keyed by a fresh `intent_id` — at the tail of `turnOrder` so the
+   * composer's submit renders instantly (visual parity with legacy's
+   * optimistic bubble), before any backend round trip completes. Returns
+   * the `intent_id`, which is both the provisional turn's `turnId` lookup
+   * key (via `pendingByIntentId`) and `retrySend`'s argument.
+   *
+   * Reconciled in one of two ways once the backend responds:
+   *   - success: a real `typed_prompt` node_upsert carrying this same
+   *     `intent_id` in its payload arrives over the live plane and
+   *     `reconcileProvisionalSend` (called from `handleFrame`) swaps the
+   *     provisional turn for the real one, in place.
+   *   - failure: the submit's own ack resolves `intent_rejected` (backend
+   *     rejection, e.g. `unsupported_attachments`) OR the socket isn't
+   *     OPEN at all (`SurfaceSocket.submit` returns `null` synchronously,
+   *     same not-open contract as legacy's `sendMessage`) — either way
+   *     `failProvisionalSend` flips the entry to an inline-retry error
+   *     state. No client-side queue-until-open: matches legacy's
+   *     behavior of surfacing failure immediately rather than buffering
+   *     in this layer (a caller with a durable transport, e.g. the legacy
+   *     offline queue, decides whether to even attempt this call while
+   *     `snapshot.socketOpen` is false — see Chat.tsx's integration). */
+  sendPrompt(
+    text: string,
+    attachments: readonly AttachmentInputWire[] = [],
+    sendMode: SendModeWire = "queue",
+  ): string {
+    const intentId = uuidv4();
+    const record: ProvisionalSendRecord = {
+      intentId,
+      text,
+      attachments,
+      sendMode,
+      status: "sending",
+      errorMessage: null,
+      createdAtSeconds: Date.now() / 1000,
+    };
+    provisionalSendRegistry.set(this.sessionId, record);
+    this.insertProvisionalEntry(record);
+    this.notify();
+
+    const intent = {
+      kind: "send_prompt" as const,
+      cv: CONTRACT_VERSION,
+      intent_id: intentId,
+      session_id: this.sessionId,
+      text,
+      attachments: [...attachments],
+      send_mode: sendMode,
+      target: { kind: "current" as const, fork_node_id: null },
+    };
+    const ack = this.socket?.submit(intent);
+    if (!ack) {
+      this.failProvisionalSend(intentId, "not connected");
+    } else {
+      ack.then((frame: TransportAckFrame) => {
+        if (frame.type === "intent_rejected") this.failProvisionalSend(intentId, frame.message);
+      });
+    }
+    return intentId;
+  }
+
+  /** Builds the provisional `turn`+`typed_prompt` node pair for a
+   * `ProvisionalSendRecord` — the one place that shape is constructed,
+   * shared by a fresh `sendPrompt` call and `reseedProvisionalSends`
+   * reconstructing one from the durable registry after a session switch. */
+  private buildProvisionalEntry(record: ProvisionalSendRecord): { turnId: TurnId; entry: TurnEntry } {
+    const provisionalTurnId: TurnId = `pending:${record.intentId}`;
+    const promptPayload: TypedPromptPayloadWire = {
+      text: record.text,
+      attachments: record.attachments.map((a) => ({ ...a, size: null })),
+      send_mode: record.sendMode,
+      origin: "user",
+      source_session_ref: null,
+      sent_text: null,
+      intent_id: record.intentId,
+    };
+    const promptNode: NodeWire = {
+      cv: 0,
+      node_id: `pending-prompt:${record.intentId}`,
+      parent_id: null,
+      turn_id: provisionalTurnId,
+      surface_id: this.sessionId,
+      kind: "typed_prompt",
+      ts: record.createdAtSeconds,
+      seq: 0,
+      status: null,
+      payload: promptPayload,
+      run_ref: null,
+      sidecar_ref: null,
+      target_ref: null,
+      child_manifest: null,
+    };
+    const entry: TurnEntry = {
+      ...this.newTurnEntry(scaffoldTurn(promptNode), promptNode, [], null, null),
+      provisionalSend: { intentId: record.intentId, status: record.status, errorMessage: record.errorMessage },
+    };
+    return { turnId: provisionalTurnId, entry };
+  }
+
+  /** Inserts a provisional turn at the tail of `turnOrder`, registering it
+   * for `pendingByIntentId` lookup — the store-local PROJECTION half of a
+   * registry record (the registry write itself is the caller's job, since
+   * `reseedProvisionalSends` writes nothing new to the registry, only
+   * projects what's already there). */
+  private insertProvisionalEntry(record: ProvisionalSendRecord): void {
+    const { turnId, entry } = this.buildProvisionalEntry(record);
+    this.turnsById.set(turnId, entry);
+    this.turnOrder = [...this.turnOrder, turnId];
+    this.pendingByIntentId.set(record.intentId, turnId);
+  }
+
+  /** Re-submits a failed provisional send under a FRESH `intent_id` —
+   * parity with legacy's own retry semantics (client-id.test.ts: a retry
+   * replaces the old failed optimistic entry with one new pending entry,
+   * it never reuses the failed send's id). No-op (returns null) unless
+   * `intentId` currently names a provisional entry in the "error" state. */
+  retrySend(intentId: string): string | null {
+    const turnId = this.pendingByIntentId.get(intentId);
+    if (!turnId) return null;
+    const entry = this.turnsById.get(turnId);
+    if (!entry || !entry.provisionalSend || entry.provisionalSend.status !== "error" || !entry.prompt) {
+      return null;
+    }
+    const payload = entry.prompt.payload as TypedPromptPayloadWire;
+    this.turnsById.delete(turnId);
+    this.turnOrder = this.turnOrder.filter((id) => id !== turnId);
+    this.pendingByIntentId.delete(intentId);
+    provisionalSendRegistry.delete(this.sessionId, intentId);
+    this.notify();
+    return this.sendPrompt(payload.text, payload.attachments, payload.send_mode);
+  }
+
+  private failProvisionalSend(intentId: string, message: string): void {
+    const turnId = this.pendingByIntentId.get(intentId);
+    if (!turnId) return; // already reconciled by a real node_upsert racing the rejection
+    const entry = this.turnsById.get(turnId);
+    if (!entry || !entry.provisionalSend) return;
+    this.turnsById.set(turnId, {
+      ...entry,
+      provisionalSend: { ...entry.provisionalSend, status: "error", errorMessage: message },
+    });
+    const record = provisionalSendRegistry.get(this.sessionId, intentId);
+    if (record) {
+      provisionalSendRegistry.set(this.sessionId, { ...record, status: "error", errorMessage: message });
+    }
+    this.notify();
+  }
+
+  // ---- command plane: queued-prompt edit/delete --------------------------
+  //
+  // The native surface has no live projection of a queued (not-yet-running)
+  // prompt in its own turn tree today (see wire.ts's `EditQueuedIntentWire`
+  // docstring — `adapters/normalize.py` drops that row entirely) — the
+  // queued-banner UI (InputArea.tsx, driven by Chat.tsx/App.tsx's legacy
+  // `queuedPrompt`/`queuedBySession` projection) stays legacy-owned
+  // regardless of `ba.surface_native`. These two methods only replace the
+  // WIRE TRANSPORT an edit/delete action goes over when eligible — no
+  // provisional/optimistic state of this store's own to manage, so unlike
+  // `sendPrompt` there is nothing to reconcile later; the ack is returned
+  // purely so a caller/test can observe accept/reject, fire-and-forget
+  // otherwise (same as legacy's own `sendUpdateQueued`/`sendCancelQueued`).
+
+  editQueued(queuedId: string, text: string): Promise<TransportAckFrame> | null {
+    return (
+      this.socket?.submit({
+        kind: "edit_queued",
+        cv: CONTRACT_VERSION,
+        intent_id: uuidv4(),
+        session_id: this.sessionId,
+        node_id: queuedId,
+        text,
+      }) ?? null
+    );
+  }
+
+  deleteQueued(queuedId: string): Promise<TransportAckFrame> | null {
+    return (
+      this.socket?.submit({
+        kind: "delete_queued",
+        cv: CONTRACT_VERSION,
+        intent_id: uuidv4(),
+        session_id: this.sessionId,
+        node_id: queuedId,
+      }) ?? null
+    );
+  }
+
+  /** Replaces a provisional send's scaffolded turn with the backend's own
+   * confirmed `typed_prompt` node, in place (same `turnOrder` slot) —
+   * called from `handleFrame`'s `node_upsert` branch BEFORE the normal
+   * `birthTurn`/typed_prompt-upsert path runs, so the real turn never
+   * additionally gets birthed at the tail. Returns false (does nothing)
+   * when `node` isn't a match for any currently-pending provisional send,
+   * so the caller can fall through to normal handling unconditionally. */
+  private reconcileProvisionalSend(node: NodeWire): boolean {
+    if (node.kind !== "typed_prompt") return false;
+    const intentId = (node.payload as TypedPromptPayloadWire | null)?.intent_id;
+    if (!intentId) return false;
+    const provisionalTurnId = this.pendingByIntentId.get(intentId);
+    if (!provisionalTurnId) return false;
+    this.pendingByIntentId.delete(intentId);
+    provisionalSendRegistry.delete(this.sessionId, intentId);
+    const idx = this.turnOrder.indexOf(provisionalTurnId);
+    this.turnsById.delete(provisionalTurnId);
+
+    // The real turn_id may already have a live entry (a non-prompt frame
+    // for it arrived out of order, ahead of this typed_prompt — see
+    // `birthTurn`'s own docstring) — merge onto it rather than clobbering
+    // whatever it already accumulated (its `phase` in particular — already
+    // "running"/live via `birthTurn`'s own default), and drop the now-
+    // redundant provisional slot instead of duplicating turnOrder.
+    const already = this.turnsById.get(node.turn_id);
+    const turn = already && already.prompt !== null ? already.turn : scaffoldTurn(node);
+    let entry: TurnEntry;
+    if (already) {
+      entry = { ...already, turn, prompt: node };
+    } else {
+      // A turn reconciled from a just-submitted send is, by construction,
+      // currently in flight — same "live by construction, no lifecycle
+      // frame to wait for" reasoning as `birthTurn`'s own default, and the
+      // SAME pendingLifecycle buffer applies (a `turn_lifecycle` frame for
+      // this real turn_id may have already arrived and be waiting, tagged
+      // to a turn_id this store hadn't birthed yet).
+      const pending = this.pendingLifecycle.get(node.turn_id);
+      this.pendingLifecycle.delete(node.turn_id);
+      entry = {
+        ...this.newTurnEntry(turn, node, [], null, null),
+        phase: pending?.phase ?? "running",
+        reason: pending?.reason ?? null,
+        usage: pending?.usage ?? null,
+      };
+    }
+    this.turnsById.set(node.turn_id, entry);
+
+    if (already) {
+      if (idx >= 0) this.turnOrder = this.turnOrder.filter((_, i) => i !== idx);
+    } else if (idx >= 0) {
+      const next = [...this.turnOrder];
+      next[idx] = node.turn_id;
+      this.turnOrder = next;
+    } else {
+      this.turnOrder = [...this.turnOrder, node.turn_id];
+    }
+    return true;
   }
 
   private newTurnEntry(
@@ -317,6 +712,7 @@ export class SurfaceStore {
       phase: null,
       reason: null,
       usage: null,
+      provisionalSend: null,
     };
   }
 
@@ -338,6 +734,11 @@ export class SurfaceStore {
     this.childrenTables = new Map();
     this.nodeLocation = new Map();
     this.pendingLifecycle = new Map();
+    // Rebuilt below by `reseedProvisionalSends` — a stale entry pointing at
+    // a provisional turn id from BEFORE this (re)hydrate would otherwise
+    // survive pointing at a turn that no longer exists in the fresh
+    // `turnsById` above.
+    this.pendingByIntentId = new Map();
     for (const run of envelope.runs) this.runsById.set(run.run_ref, run);
 
     for (const compact of envelope.turns) {
@@ -360,9 +761,52 @@ export class SurfaceStore {
     // "last window turn always arrives pre-expanded" design.
     this.seedLiveTurnNodes(envelope.live_turn_nodes);
 
+    // Restore whatever provisional sends this session still has outstanding
+    // in `ProvisionalSendRegistry` — the durable counterpart to a
+    // `SurfaceStore` instance being disposed/recreated on every session
+    // switch (see that class's docstring). Runs AFTER the real turns above
+    // are in place so a send that resolved while this session was inactive
+    // is recognized as already-present instead of re-scaffolded.
+    this.reseedProvisionalSends();
+
     this.hydrated = true;
     this.notify();
     this.syncSocketCursor(true);
+  }
+
+  /** Counterpart to every `ProvisionalSendRegistry` write above — reads it
+   * back for `this.sessionId` after a (re)hydrate and, for each record
+   * still outstanding, either drops it (the fresh snapshot already proves
+   * it resolved — some turn's `prompt.payload.intent_id` matches) or
+   * re-scaffolds its provisional turn at the tail, exactly as `sendPrompt`
+   * originally inserted it (same helper, `insertProvisionalEntry`) — this
+   * is what makes a pending/"error, Retry" entry survive a session switch:
+   * the OLD store instance (this session's previous mount) is long disposed,
+   * but the registry it wrote through to is still there for the NEW
+   * instance being built right now to read. */
+  private reseedProvisionalSends(): void {
+    for (const record of provisionalSendRegistry.list(this.sessionId)) {
+      if (this.findTurnByIntentId(record.intentId)) {
+        provisionalSendRegistry.delete(this.sessionId, record.intentId);
+        continue;
+      }
+      this.insertProvisionalEntry(record);
+    }
+  }
+
+  /** Scans the CURRENT (already-hydrated) `turnsById` for a turn whose real,
+   * backend-confirmed prompt carries `intentId` — the snapshot-side mirror
+   * of `reconcileProvisionalSend`'s live-frame match, used when the
+   * confirming `typed_prompt` arrived while this session's socket was
+   * closed (switched away) instead of over a live frame this store could
+   * observe directly. */
+  private findTurnByIntentId(intentId: string): TurnId | null {
+    for (const entry of this.turnsById.values()) {
+      if (entry.prompt === null) continue;
+      const payload = entry.prompt.payload as TypedPromptPayloadWire | null;
+      if (payload?.intent_id === intentId) return entry.turnId;
+    }
+    return null;
   }
 
   /** Buckets a flat NodeWire[] by `parent_id` into per-container tables —
@@ -452,6 +896,16 @@ export class SurfaceStore {
 
         if (node.kind === "instruction_widget") {
           this.instructionWidget = node;
+          this.notify();
+          return;
+        }
+
+        // A confirmed typed_prompt carrying a pending send's intent_id
+        // reconciles that provisional turn in place — checked BEFORE the
+        // normal birthTurn lookup below, since `node.turn_id` here is the
+        // backend's own real (not-yet-seen) turn id and would otherwise
+        // just birth a second, duplicate turn at the tail.
+        if (node.kind === "typed_prompt" && this.reconcileProvisionalSend(node)) {
           this.notify();
           return;
         }
@@ -585,10 +1039,13 @@ export class SurfaceStore {
         this.notify();
         return;
       }
-      // approval_upsert / sidecar_upsert / session_state / notice: not
-      // part of the chat content plane's render tree (SubAgentPanel
+      // user_interaction_upsert / sidecar_upsert / session_state / notice:
+      // not part of the chat content plane's render tree (SubAgentPanel
       // sidecar is fetched separately by the panel UI on demand, never a
-      // grammar field per ADR 0006 §7).
+      // grammar field per ADR 0006 §7; user_interaction_upsert is the
+      // UserInteraction RESOURCE plane, consumed separately — see
+      // hooks/usePendingUserInteractions.ts and
+      // lib/interactionResolveSocket.ts).
       default:
         return;
     }

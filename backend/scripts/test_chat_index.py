@@ -41,7 +41,14 @@ from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
 from backend.event_journal import EVENT_JOURNAL_WRITTEN  # noqa: E402
 from backend.surface_contract.identity import Ok  # noqa: E402
-from backend.surface_contract.nodes import NodeKind  # noqa: E402
+from backend.adapters.serialize import to_wire  # noqa: E402
+from backend.surface_contract.nodes import (  # noqa: E402
+    Attachment,
+    NodeKind,
+    SteeringMessagePayload,
+    SubAgentTurnPayload,
+    TargetRef,
+)
 
 
 def _ingest_prompt(root_id: str, text: str) -> int:
@@ -83,6 +90,11 @@ def _ingest_sidechain_text(
     if parent_uuid is not None:
         data["parentUuid"] = parent_uuid
     return event_ingester.ingest(root_id, root_id, "agent_message", data, source="test")
+
+
+def _ingest_worker_fact(root_id: str, fact_type: str, delegation_id: str, **fields) -> int:
+    data = {"delegation_id": delegation_id, **fields}
+    return event_ingester.ingest(root_id, root_id, fact_type, data, source="test")
 
 
 def _publish_written(root_id: str, seq: int) -> None:
@@ -211,6 +223,104 @@ def test_fold_on_lifecycle_complete_settles_the_last_turn() -> None:
     )
     settled = chat_index_mod.read_recent_settled_turns(root_id, 5)
     assert settled is not None and len(settled) == 1
+
+
+def test_fold_persists_worker_turn_with_usage_and_target_ref_round_trip() -> None:
+    """The SubAgentTurn family's panel-level `usage`/`target_ref`/
+    `payload` (a `SubAgentTurnPayload`, new node kinds this round added)
+    round-trip through the index's SQLite header row exactly like every
+    other typed payload — real dataclasses back out, not raw dicts (see
+    module docstring's "payload_json/target_ref_json" section)."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = _adapter_with_bound_bus()
+    _ingest_prompt(root_id, "please delegate this")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="worker",
+        worker_description="fix it", worker_session_id="sess-idx",
+    )
+    seq1 = _ingest_worker_fact(
+        root_id, "worker_complete", "deleg-1", worker_session_id="sess-idx",
+        token_usage={"input_tokens": 11, "output_tokens": 4},
+    )
+    _publish_written(root_id, seq1)
+
+    seq2 = _ingest_prompt(root_id, "second turn")
+    _publish_written(root_id, seq2)
+
+    settled = chat_index_mod.read_recent_settled_turns(root_id, 5)
+    assert settled is not None and len(settled) == 1
+    turn = settled[0]
+
+    kids = chat_index_mod.read_children(root_id, turn.turn_node_id)
+    assert kids is not None
+    containers = [n for n in kids if n.kind == NodeKind.WORKER_TURN]
+    assert len(containers) == 1
+    container = containers[0]
+    assert container.payload == SubAgentTurnPayload(label="fix it")
+    assert container.target_ref == TargetRef(session_id="sess-idx")
+    assert container.sidecar_ref == "sess-idx"
+    assert container.usage.input_tokens == 11
+    assert container.usage.output_tokens == 4
+    assert container.usage.total_tokens == 15
+
+    grandkids = chat_index_mod.read_children(root_id, container.node_id)
+    assert grandkids is not None
+    assert len(grandkids) == 2
+    assert all(n.kind == NodeKind.WORKER_INTERACTION for n in grandkids)
+    assert all(n.parent_id == container.node_id for n in grandkids)
+
+
+def test_fold_persists_worker_turn_created_and_target_turn_id_round_trip() -> None:
+    """`SubAgentTurnPayload.created` and `TargetRef.turn_id` — both new
+    this round — round-trip through the index's SQLite header row exactly
+    like `label`/`session_id` already do (payload_json/target_ref_json,
+    same generic to_wire/_reconstruct_payload machinery)."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = _adapter_with_bound_bus()
+    _ingest_prompt(root_id, "please delegate this")
+    _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="sub_session_created",
+        worker_description="sess created", worker_session_id="sess-corr", is_new=True,
+    )
+    seq1 = _ingest_worker_fact(
+        root_id, "worker_complete", "deleg-1",
+        worker_session_id="sess-corr", target_turn_id="prompt-corr",
+    )
+    _publish_written(root_id, seq1)
+    seq2 = _ingest_prompt(root_id, "second turn")
+    _publish_written(root_id, seq2)
+
+    settled = chat_index_mod.read_recent_settled_turns(root_id, 5)
+    assert settled is not None and len(settled) == 1
+    kids = chat_index_mod.read_children(root_id, settled[0].turn_node_id)
+    assert kids is not None
+    containers = [n for n in kids if n.kind == NodeKind.SUB_SESSION_TURN]
+    assert len(containers) == 1
+    container = containers[0]
+    assert container.payload == SubAgentTurnPayload(label="sess created", created=True)
+    assert container.target_ref == TargetRef(session_id="sess-corr", turn_id="prompt-corr")
+    assert container.sidecar_ref == "sess-corr"
+
+
+def test_fold_persists_worker_turn_without_usage_when_no_worker_complete() -> None:
+    root_id = f"root-{uuid.uuid4().hex}"
+    adapter = _adapter_with_bound_bus()
+    _ingest_prompt(root_id, "please delegate this")
+    seq1 = _ingest_worker_fact(
+        root_id, "worker_start", "deleg-1", panel_kind="sub_session",
+        worker_description="delegated", worker_session_id="sess-idx",
+    )
+    _publish_written(root_id, seq1)
+    seq2 = _ingest_prompt(root_id, "second turn")
+    _publish_written(root_id, seq2)
+
+    settled = chat_index_mod.read_recent_settled_turns(root_id, 5)
+    assert settled is not None and len(settled) == 1
+    kids = chat_index_mod.read_children(root_id, settled[0].turn_node_id)
+    assert kids is not None
+    containers = [n for n in kids if n.kind == NodeKind.SUB_SESSION_TURN]
+    assert len(containers) == 1
+    assert containers[0].usage is None
 
 
 # ---------------------------------------------------------------------
@@ -483,9 +593,40 @@ def _rows_in_range(root_id: str, after_seq: int, before_seq: int | None) -> int:
     return len(rows)
 
 
+def test_steering_message_payload_attachments_survive_sqlite_round_trip() -> None:
+    """Item 2: `SteeringMessagePayload.attachments` (new field) must
+    round-trip through `chat_index._reconstruct_payload` exactly like
+    `TypedPromptPayload.attachments` already does — `to_wire` serializes
+    it generically (reflective over dataclass fields), but the manual
+    per-kind `_reconstruct_payload` dispatch needed its own STEERING_
+    MESSAGE branch updated to read it back, or it would silently drop on
+    every cold reload / settled-turn fold even though the live path
+    carried it correctly."""
+    payload = SteeringMessagePayload(
+        text="steer text", target="turn-1",
+        attachments=(Attachment(name="img.png", media_type="image/png", ref="img.png", size=None),),
+    )
+    wire_dict = to_wire(payload)
+    reconstructed = chat_index_mod._reconstruct_payload(NodeKind.STEERING_MESSAGE, wire_dict)
+    assert reconstructed == payload
+    assert reconstructed.attachments[0].name == "img.png"
+    assert reconstructed.attachments[0].ref == "img.png"
+
+
+def test_steering_message_payload_no_attachments_round_trips_empty() -> None:
+    payload = SteeringMessagePayload(text="x", target="t1")
+    reconstructed = chat_index_mod._reconstruct_payload(NodeKind.STEERING_MESSAGE, to_wire(payload))
+    assert reconstructed.attachments == ()
+
+
 _TESTS = [
+    test_steering_message_payload_attachments_survive_sqlite_round_trip,
+    test_steering_message_payload_no_attachments_round_trips_empty,
     test_fold_on_turn_transition_persists_settled_turn_with_subagent,
     test_fold_on_lifecycle_complete_settles_the_last_turn,
+    test_fold_persists_worker_turn_with_usage_and_target_ref_round_trip,
+    test_fold_persists_worker_turn_created_and_target_turn_id_round_trip,
+    test_fold_persists_worker_turn_without_usage_when_no_worker_complete,
     test_visibility_collapsed_turn_never_fetches_body,
     test_visibility_extended_turn_returns_structural_headers_only,
     test_visibility_expanded_explanation_returns_full_leaf_payload,

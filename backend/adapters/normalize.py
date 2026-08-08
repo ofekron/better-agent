@@ -27,6 +27,7 @@ from backend.surface_contract.nodes import (
     ContentStatus,
     DiagnosticCode,
     DiagnosticPayload,
+    FactPayload,
     FailurePayload,
     FailureResolution,
     FailureSeverity,
@@ -40,6 +41,7 @@ from backend.surface_contract.nodes import (
     ResultKind,
     ResultPayload,
     SendMode,
+    SteeringMessagePayload,
     ThinkingPayload,
     ToolInteractionPayload,
     TypedPromptPayload,
@@ -516,6 +518,10 @@ def normalize_journal_row(
         return _handle_user_message_failed(row, data, node)
     if row_type == "turn_error_meta":
         return _handle_turn_error_meta(row, data, node)
+    if row_type == "model_switched":
+        return [_handle_model_switched(row, data, node)]
+    if row_type == "steer_prompt":
+        return [_handle_steer_prompt(row, data, node)]
     if row_type in _WORKER_FACT_TYPES:
         uuid = _uuid_of(row) or _fallback_id(row, row_type)
         return [
@@ -625,19 +631,141 @@ def _handle_turn_error_meta(row: dict, data: dict, node: partial) -> list[Node]:
     ]
 
 
+def _handle_model_switched(row: dict, data: dict, node: partial) -> Node:
+    """Journaled `model_switched` BusEvent row (`backend.main.
+    _record_model_switched_event`, fired on a USER-initiated provider/
+    model selector change — `session_detail_api.py`'s PATCH-session
+    handlers are the other two call sites, same shape). Row shape:
+    `{"type": "model_switched", "data": {uuid, model, provider_id,
+    previous_model, previous_provider_id, changed, app_session_id,
+    msg_id, ...}}` — a TOP-LEVEL journal row type, sibling to
+    `agent_message` (`event_shape.RENDER_EVENT_TYPES`), not a
+    `data.type` case nested inside it.
+
+    Distinct producer from the `fallback` assistant-content-block case in
+    `_assistant_block_node` below (also NodeKind.MODEL_CHANGE): that one
+    is a PROVIDER-side automatic fallback embedded in the provider's own
+    transcript, this one is a USER-side selector change published as its
+    own journal fact. Different row shapes, different journal row types,
+    never fire for the same underlying event — reconciled onto the same
+    MODEL_CHANGE node kind (single render contract) via `source`
+    (USER here, PROVIDER there), not a duplicate node path."""
+    uuid = _uuid_of(row) or _fallback_id(row, "model_switched")
+    model = data.get("model")
+    previous_model = data.get("previous_model")
+    return node(
+        node_id=uuid, kind=NodeKind.MODEL_CHANGE, status=ContentStatus.COMPLETE,
+        payload=ModelChangePayload(
+            from_run_ref=previous_model if isinstance(previous_model, str) else None,
+            to_run_ref=model if isinstance(model, str) else "",
+            source=ModelChangeSource.USER,
+        ),
+    )
+
+
+def _handle_steer_prompt(row: dict, data: dict, node: partial) -> Node:
+    """Journaled `steer_prompt` BusEvent row (`backend.orchestrator.
+    Coordinator.steer_active_turn`, published via the active turn's
+    `save_callback` once the provider accepts the steer). Row shape:
+    `{"type": "steer_prompt", "data": {uuid, prompt, timestamp,
+    client_id, lifecycle_msg_id, images?, files?}}` — a TOP-LEVEL
+    journal row type, sibling to `agent_message`
+    (`event_shape.RENDER_EVENT_TYPES`), not a `data.type` case nested
+    inside it.
+
+    Maps to NodeKind.STEERING_MESSAGE (chat-panel.md grammar; legacy
+    rendered this as `SteerPromptEvent` — `frontend/src/components/
+    MessageBubble.tsx`'s "Steer" label — the native
+    `SteeringMessageView`/`PrLinkChip`-sibling component,
+    `frontend/src/surface/nodes/ContentLeaves.tsx`, is the same "Steer"
+    label over the same verbatim text). `target` is the steered turn's
+    owning assistant message id (`lifecycle_msg_id` — the same id
+    `steer_active_turn` stamps as the run's `message_id`), matching
+    `SteeringMessagePayload.target`'s only current reader (turn
+    attribution, not rendered text).
+
+    `data["images"]` — when present — is `orchestrator._save_message_
+    images`'s OWN return value (`[{"filename", "media_type"}, ...]`,
+    same shape `TurnManager._image_filename_records` reads for a normal
+    send's placeholder attachments). Unlike `TypedPromptPayload`'s
+    two-fact join (placeholder row + async `prompt_meta` fact filling
+    `ref` later — see `_handle_user`/`enrich_typed_prompt_node`), this
+    row is self-contained and already-complete by the time it's
+    journaled, so `ref` is filled directly from `filename` here — no
+    join needed, no placeholder. `files` is intentionally NOT modeled
+    as attachments, matching `TypedPromptPayload`'s own current scope
+    (image-only attachments; file-typed attachments are not yet
+    represented as `Attachment`s anywhere in the contract)."""
+    uuid = _uuid_of(row) or _fallback_id(row, "steer_prompt")
+    prompt = data.get("prompt")
+    lifecycle_msg_id = data.get("lifecycle_msg_id")
+    images = data.get("images")
+    attachments = tuple(
+        Attachment(
+            name=img["filename"], media_type=img.get("media_type") or "",
+            ref=img["filename"], size=None,
+        )
+        for img in (images if isinstance(images, list) else [])
+        if isinstance(img, dict) and isinstance(img.get("filename"), str)
+    )
+    return node(
+        node_id=uuid, kind=NodeKind.STEERING_MESSAGE, status=ContentStatus.COMPLETE,
+        payload=SteeringMessagePayload(
+            text=prompt if isinstance(prompt, str) else "",
+            target=lifecycle_msg_id if isinstance(lifecycle_msg_id, str) else "",
+            attachments=attachments,
+        ),
+    )
+
+
+def _handle_pr_link(row: dict, data: dict, node: partial) -> Node:
+    """Claude CLI-native `agent_message` row, `data.type == "pr-link"`
+    (the CLI's own jsonl line for a live PR creation — see commit
+    9653bf490 "Surface the Claude CLI pr-link agent_message"; legacy
+    read side: `frontend/src/lib/webSocketProjectors/sessionProjector.ts`
+    :99's `data.type === "pr-link"` check). Row shape: `{"type":
+    "agent_message", "data": {"type": "pr-link", "prUrl": str,
+    "prNumber"?: int, "prRepository"?: str}}`. The CLI never stamps a
+    `uuid` on this line (legacy comment, `frontend/src/App.tsx`: "pr-link
+    has no uuid so it never lands on the render tree") — node identity
+    falls back to the row's journal `seq`, same as every other
+    no-uuid provider row.
+
+    Maps to NodeKind.FACT, `kind="pr_link"` — the exact kind nodes.py's
+    own `FactPayload` docstring names as its motivating example. `data`
+    keys are passed through VERBATIM (`prUrl`/`prNumber`/`prRepository`,
+    not renamed) to match the native `PrLinkChip` component's field
+    reads (`frontend/src/surface/leaf/Chips.tsx`), which is a
+    near-1:1 port of legacy's `PrLinkEvent`."""
+    uuid = _uuid_of(row) or _fallback_id(row, "pr_link")
+    return node(
+        node_id=uuid, kind=NodeKind.FACT, status=ContentStatus.COMPLETE,
+        payload=FactPayload(
+            kind="pr_link",
+            data={
+                "prUrl": data.get("prUrl"),
+                "prNumber": data.get("prNumber"),
+                "prRepository": data.get("prRepository"),
+            },
+        ),
+    )
+
+
 def _handle_agent_message(row: dict, data: dict, node: partial) -> list[Node]:
     mtype = data.get("type")
 
     if mtype in _DROPPED_METADATA_TYPES or mtype in _DROPPED_ENVELOPE_TYPES:
         return []
     if mtype == "lifecycle_notice":
-        return [_handle_lifecycle_notice(row, data, node)]
+        return _handle_lifecycle_notice(row, data, node)
     if mtype == "user":
         return _handle_user(row, data, node)
     if mtype == "assistant":
         return _handle_assistant(row, data, node)
     if mtype == "result":
         return [_handle_result(row, data, node)]
+    if mtype == "pr-link":
+        return [_handle_pr_link(row, data, node)]
 
     uuid = _uuid_of(row) or _fallback_id(row, "diagnostic")
     return [
@@ -651,7 +779,62 @@ def _handle_agent_message(row: dict, data: dict, node: partial) -> list[Node]:
     ]
 
 
-def _handle_lifecycle_notice(row: dict, data: dict, node: partial) -> Node:
+def _compaction_replay_children(compaction_node_id: str, notice: dict, node: partial) -> list[Node]:
+    """Synthesize child nodes from a compaction notice's own
+    `replacement_history` (`codex_native._normalize_compacted_event`'s
+    `[{"role": "user"|"assistant", "text": str}, ...]` — the ONLY place
+    pre-compaction content actually survives in the journal: Codex's
+    compaction event replaces prior turns entirely, and nothing else
+    journals their content separately for us to reference by node id, so
+    `CompactionPayload.replaced_node_ids` — a list of PRE-EXISTING node
+    ids — has no real ids to point at and stays permanently empty. This
+    re-surfaces the verbatim originator text itself instead, parented
+    directly under the compaction node so `derive.child_manifest`'s
+    `renderable_child_count` (and the frontend's `useChildren`/
+    `/nodes/:id/children` expand) picks it up with no further plumbing —
+    the SAME generic container mechanism every other expandable node
+    already uses.
+
+    `parent_id` is stamped HERE, not left to the row-level `resolve_parents`
+    pass: these children are born from the SAME row as the compaction node
+    itself, so the row's own single `parentUuid` link (which resolves to
+    whatever the compaction notice replied to, not to the compaction node)
+    cannot express a parent-child relationship between two nodes produced
+    by the one row. `resolve_parents` respects an already-set `parent_id`
+    (see its own docstring) rather than overwriting it.
+
+    Node ids are deterministic (`f"{compaction_node_id}:replayed:{idx}"`),
+    so cold reload and live delivery always agree. `role == "user"` maps to
+    TYPED_PROMPT (the same rendering as a normal prompt bubble — this is
+    genuinely the originator's own verbatim text, not backend-synthesized
+    copy); every other role (assistant, or anything a future provider
+    sends) maps to ASSISTANT_TEXT."""
+    history = notice.get("replacement_history")
+    if not isinstance(history, list):
+        return []
+    children: list[Node] = []
+    for idx, item in enumerate(history):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        child_id = f"{compaction_node_id}:replayed:{idx}"
+        if item.get("role") == "user":
+            child = node(
+                node_id=child_id, kind=NodeKind.TYPED_PROMPT, status=ContentStatus.COMPLETE,
+                payload=TypedPromptPayload(text=text, origin=PromptOrigin.USER),
+            )
+        else:
+            child = node(
+                node_id=child_id, kind=NodeKind.ASSISTANT_TEXT, status=ContentStatus.COMPLETE,
+                payload=AssistantTextPayload(text=text),
+            )
+        children.append(replace(child, parent_id=compaction_node_id))
+    return children
+
+
+def _handle_lifecycle_notice(row: dict, data: dict, node: partial) -> list[Node]:
     notice = data.get("data")
     notice = notice if isinstance(notice, dict) else {}
     uuid = _uuid_of(row) or _fallback_id(row, "lifecycle_notice")
@@ -664,21 +847,22 @@ def _handle_lifecycle_notice(row: dict, data: dict, node: partial) -> Node:
             if origin_str in {o.value for o in CompactionOrigin}
             else CompactionOrigin.NATIVE
         )
-        return node(
+        compaction_node = node(
             node_id=uuid, kind=NodeKind.COMPACTION, status=ContentStatus.COMPLETE,
             payload=CompactionPayload(origin=origin, summary=notice.get("summary") or ""),
         )
+        return [compaction_node, *_compaction_replay_children(uuid, notice, node)]
 
     if kind_str in _LIFECYCLE_KIND_VALUES:
-        return node(
+        return [node(
             node_id=uuid, kind=NodeKind.LIFECYCLE_NOTICE, status=ContentStatus.COMPLETE,
             payload=LifecycleNoticePayload(kind=LifecycleNoticeKind(kind_str), data=notice),
-        )
+        )]
 
-    return node(
+    return [node(
         node_id=uuid, kind=NodeKind.UNKNOWN, status=ContentStatus.COMPLETE,
         payload=UnknownPayload(label=f"lifecycle_notice.{kind_str or '(none)'}", payload=notice),
-    )
+    )]
 
 
 def _handle_result(row: dict, data: dict, node: partial) -> Node:
@@ -887,10 +1071,22 @@ def resolve_parents(nodes: list[Node], links: dict[NodeId, ParentLink]) -> list[
     parent_tool_use_id resolves to the tool_interaction node that spawned
     it; otherwise a parent_uuid resolves to the row-level node it replied
     to. Unresolvable links (target not present in this batch) leave
-    parent_id unset rather than guessing."""
+    parent_id unset rather than guessing.
+
+    A node whose `parent_id` was already stamped by its own row handler
+    (e.g. `_handle_lifecycle_notice`'s compaction-replay children, parented
+    under their owning COMPACTION node at construction time — several
+    nodes born from ONE row, so the row-level link below can't express
+    that relationship) is left untouched: explicit same-row parenting
+    always wins over row-derived link inference. No existing handler sets
+    `parent_id` before this pass runs except that one, so this is a no-op
+    everywhere else."""
     node_ids = {n.node_id for n in nodes}
     out: list[Node] = []
     for n in nodes:
+        if n.parent_id is not None:
+            out.append(n)
+            continue
         link = links.get(n.node_id)
         parent_id: NodeId | None = n.parent_id
         if link is not None:

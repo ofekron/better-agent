@@ -9,6 +9,7 @@ import {
   type MarketplaceIntent,
   type MarketplaceIntentStatus,
 } from "../marketplaceBridgeSnapshot";
+import { subscribeSystemFrames, submitSystemIntent } from "../lib/systemFeedRegistry";
 import { MarketplaceConfirmationModal } from "./MarketplaceConfirmationModal";
 
 const TERMINAL = new Set<MarketplaceIntentStatus>([
@@ -73,9 +74,27 @@ export function MarketplaceBridgeCenter() {
     const onDeepLink = () => refresh();
     window.addEventListener("better-agent:deep-link", onDeepLink);
     const off = eventBus.subscribe("marketplace_bridge_changed", refresh);
+    // ADR 0011 §5 `marketplace_bridge`/`marketplace_intents` feeds —
+    // additional live-refresh trigger alongside the legacy
+    // `marketplace_bridge_changed` ping above (dual SIGNAL; the rendered
+    // `MarketplaceBridgeSnapshot` — with its `revision`/id-pattern/
+    // `public_key` validation — stays legacy REST-sourced: v2's
+    // `PairedDevice` has no `public_key` field at all by design (ADR 0011
+    // §5: device secrets never leave `device_ref`), so a full read
+    // cutover would need a reshape this pass doesn't attempt for a
+    // component this deeply coupled to the legacy validator's exact
+    // shape). Mutations (`decide`/`revoke` below) DO route over the v2
+    // transport when open — this trigger is what converges the legacy
+    // snapshot after a native mutation's async acceptance.
+    const offV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "marketplace_bridge_state_changed" || frame.type === "marketplace_intent_upsert") {
+        refresh();
+      }
+    });
     return () => {
       window.removeEventListener("better-agent:deep-link", onDeepLink);
       off();
+      offV2();
     };
   }, [load]);
 
@@ -119,6 +138,32 @@ export function MarketplaceBridgeCenter() {
     setBusyIntentId(intent.intent_id);
     setFresh(false);
     setDecideError("");
+    // Native-when-open (ADR 0011 §5's `decide_marketplace_intent`, same
+    // backend mutation `marketplace_bridge.bridge.approve/reject` the REST
+    // route calls) — the ack carries no snapshot (fire-and-forget), so a
+    // successful accept re-pulls the legacy REST snapshot rather than
+    // guessing the new state, same as the REST branch below already does
+    // on error.
+    const native = submitSystemIntent({
+      kind: "decide_marketplace_intent",
+      intent_id_ref: intent.intent_id,
+      decision: decision === "approve" ? "approve" : "reject",
+    });
+    if (native) {
+      try {
+        const ack = await native;
+        if (version !== requestVersion.current) return;
+        if (ack.type === "intent_rejected") {
+          setDecideError(ack.message);
+          await load();
+          return;
+        }
+        await load();
+      } finally {
+        setBusyIntentId(null);
+      }
+      return;
+    }
     try {
       const response = await fetch(
         `${API}/api/marketplace-bridge/intents/${encodeURIComponent(intent.intent_id)}/${decision}`,
@@ -145,6 +190,32 @@ export function MarketplaceBridgeCenter() {
     setBusyDeviceId(device.device_id);
     setFresh(false);
     setRevokeError("");
+    // Native-when-open (ADR 0011 §5's `revoke_marketplace_device` ->
+    // `marketplace_bridge.bridge.revoke`, same function the REST route
+    // calls). `device_ref` is the v2 opaque id `PairedDeviceWire` uses in
+    // place of the legacy `device_id` — the SAME device, different id
+    // spelling on this transport (both name the same paired-device
+    // record; the mutation function itself is transport-agnostic).
+    const native = submitSystemIntent({
+      kind: "revoke_marketplace_device",
+      device_ref: device.device_id,
+    });
+    if (native) {
+      try {
+        const ack = await native;
+        if (version !== requestVersion.current) return;
+        if (ack.type === "intent_rejected") {
+          setRevokeError(ack.message);
+          await load();
+          return;
+        }
+        setSelectedDeviceId(null);
+        await load();
+      } finally {
+        setBusyDeviceId((current) => current === device.device_id ? null : current);
+      }
+      return;
+    }
     try {
       const response = await fetch(
         `${API}/api/marketplace-bridge/devices/${encodeURIComponent(device.device_id)}`,

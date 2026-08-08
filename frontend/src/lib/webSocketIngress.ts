@@ -491,8 +491,6 @@ export const knownCoreEventValidators: Readonly<
   queue_consumed: (data) =>
     hasString(data, "app_session_id")
     && (data.queued_id === null || hasString(data, "queued_id")),
-  session_running_changed: (data) =>
-    hasString(data, "session_id") && typeof data.value === "boolean",
   session_unread_changed: (data) =>
     hasString(data, "session_id") && hasNonNegativeInteger(data, "unread_count"),
   session_error_changed: (data) =>
@@ -511,7 +509,6 @@ export const knownCoreEventValidators: Readonly<
   projects_changed: noFieldPayload,
   workers_changed: noFieldPayload,
   session_organization_changed: noFieldPayload,
-  project_mappings_changed: noFieldPayload,
   user_prefs_changed: noFieldPayload,
   ui_selection_changed: uiSelectionChangedPayload,
   credential_consent_changed: noFieldPayload,

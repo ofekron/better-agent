@@ -1173,6 +1173,18 @@ def _agy_worker_events(
             delegation_id=info["delegation_id"],
             parent_uuid=parent_uuid,
         ))
+        # honest gap, investigated (not fabricated): no `token_usage` key
+        # here — AGY's own conversation DB (`_read_agy_steps`'s `steps`
+        # table: idx/step_type/status/has_subtrajectory/metadata/
+        # step_payload/render_info) has no numeric usage/token column, and
+        # the `metadata`/`step_payload`/`render_info` blob-string
+        # extraction pipeline (`_strings_from_blob`/`_json_object_from_
+        # strings`) never parses a usage shape out of them either — unlike
+        # Codex's rollout jsonl (`provider_codex._record_child_terminal`),
+        # AGY exposes no per-subagent (or even per-run) token accounting
+        # anywhere in this runner. `fact.get("token_usage")` reads absent
+        # here, same as this runner's own top-level `complete.json` (never
+        # sets a real value either — see `_run`'s `complete.json` write).
         events.append({"type": "worker_complete", "data": {
             "delegation_id": info["delegation_id"],
             "worker_session_id": sender,

@@ -1,10 +1,52 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 
+import type { AttentionMarkerDetailWire, SessionSummaryWire } from "../src/adapter/wire";
 import { eventBus } from "../src/lib/eventBus";
 import { sessionRegistry } from "../src/lib/sessionRegistry";
 import { SessionStatusBadge } from "../src/components/SessionStatusBadge";
 import { ProjectStatusBadge } from "../src/components/ProjectStatusBadge";
+
+// `has_error`/marker indicators are sourced off the v2 `session_summary_
+// upsert` feed now (`sessionRegistry.ts`'s `onSummaryV2`), not `/ws/chat`'s
+// `session_error_changed`/`session_marker_changed` — this file's own
+// `vi.mock` (the documented escape hatch in `tests/setup.ts`'s global stub
+// comment) captures `subscribeAllSummaries`'s callback so `pushSummaryV2`
+// below can simulate a real backend push, replacing the old
+// `eventBus.publish("session_error_changed"/"session_marker_changed", …)`
+// calls this file used before the migration.
+let summaryListeners: Array<(summary: SessionSummaryWire) => void> = [];
+vi.mock("../src/lib/sessionSurfaceRegistry", () => ({
+  sessionSurfaceRegistry: {
+    subscribeAllSummaries: (cb: (summary: SessionSummaryWire) => void) => {
+      summaryListeners.push(cb);
+      return () => {
+        summaryListeners = summaryListeners.filter((l) => l !== cb);
+      };
+    },
+    submitIntent: () => null,
+    submitIntentAwaitingRef: () => null,
+    isSocketOpen: () => false,
+  },
+  useSessionSummaryV2: () => undefined,
+  useProjectsV2: () => [],
+  useFoldersV2: () => [],
+  useTagsV2: () => [],
+  useSessionSocketOpenV2: () => false,
+}));
+
+/** Simulates one real `session_summary_upsert` push — always the FULL
+ * current `has_error`/`attention_marker_details` state for the session
+ * (never a partial patch, matching the real backend's own upsert
+ * semantics), so tests below combine both fields in one call exactly like
+ * an actual `SessionSummaryUpsert` would. */
+function pushSummaryV2(
+  sessionId: string,
+  fields: { has_error: boolean; attention_marker_details: AttentionMarkerDetailWire[] },
+) {
+  const summary = { session_id: sessionId, ...fields } as unknown as SessionSummaryWire;
+  for (const cb of summaryListeners) cb(summary);
+}
 
 /**
  * Rendering tests for the two status-indicator surfaces.
@@ -121,14 +163,15 @@ async function seedCombo(sid: string, c: Combo) {
       node_id: "primary",
     });
   }
-  if (c.errored) {
-    eventBus.publish("session_error_changed", { session_id: sid, has_error: true });
-  }
-  if (c.done) {
-    eventBus.publish("session_marker_changed", {
-      session_id: sid,
-      extension_id: "user-attention",
-      marker: { color: "#08f", tooltip: "done", tag: ALL_TASKS_DONE },
+  if (c.errored || c.done) {
+    pushSummaryV2(sid, {
+      has_error: c.errored,
+      attention_marker_details: c.done
+        ? [{
+            extension_id: "user-attention", tag: ALL_TASKS_DONE,
+            color: "#08f", tooltip: "done", sound: false, sound_setting: null,
+          }]
+        : [],
     });
   }
 }
@@ -206,7 +249,7 @@ describe("SessionStatusBadge — every status dimension reaches the screen", () 
     expect(indicators(container)).toEqual([]);
 
     await act(async () => {
-      eventBus.publish("session_error_changed", { session_id: "push", has_error: true });
+      pushSummaryV2("push", { has_error: true, attention_marker_details: [] });
     });
     await settle();
     expect(indicators(container)).toContain("session-error-dot");
@@ -219,7 +262,7 @@ describe("SessionStatusBadge — every status dimension reaches the screen", () 
     expect(indicators(container)).toContain("session-error-dot");
 
     await act(async () => {
-      eventBus.publish("session_error_changed", { session_id: "push", has_error: false });
+      pushSummaryV2("push", { has_error: false, attention_marker_details: [] });
       eventBus.publish("session_monitoring_changed", {
         session_id: "push",
         monitoring_state: "active",

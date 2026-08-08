@@ -9,6 +9,7 @@ import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
 import { useBusEffect } from "src/hooks/useBusEffect";
+import { subscribeSystemFrames } from "src/lib/systemFeedRegistry";
 import Icon, { ICON_NAMES, type IconName } from "./Icon";
 import { ExtensionModuleSlot } from "./ExtensionSlots";
 
@@ -181,6 +182,21 @@ export function useExtensionUiHooks(): UiHooks {
   }, []);
 
   useBusEffect(UI_HOOK_TOPICS, () => void refresh(), { onMount: true });
+
+  // ADR 0011 §3 `extension_ui` feed — additional live-refresh trigger
+  // alongside the legacy `extension.ui` eventBus topic above (dual
+  // SIGNAL only; the rendered `UiHooks` shape stays legacy REST: v2's
+  // `ExtensionUiModule` has no `extension_name` field, `badge_count` is a
+  // documented always-`None` gap — pages still poll their own badge
+  // endpoint via `useExtensionPageBadges` below — and `HookAction.type`
+  // is named `kind` on the wire, so a real cutover needs a reshape this
+  // pass doesn't attempt for a read-only, no-intents catalog with no
+  // pressing migration need).
+  useEffect(() => {
+    return subscribeSystemFrames((frame) => {
+      if (frame.type === "extension_ui_changed") void refresh();
+    });
+  }, [refresh]);
 
   return hooks;
 }

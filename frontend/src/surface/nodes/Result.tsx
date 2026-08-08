@@ -7,6 +7,7 @@
 
 import type { NodeWire, ResultPayloadWire } from "../../adapter/wire";
 import { Markdown } from "../leaf/Markdown";
+import { Timestamp } from "../leaf/Timestamp";
 
 export function ResultView({ node }: { node: NodeWire }) {
   const payload = node.payload as ResultPayloadWire | null;
@@ -19,6 +20,7 @@ export function ResultView({ node }: { node: NodeWire }) {
       data-result-kind={payload.result_kind}
     >
       <Markdown text={payload.text} />
+      <Timestamp ts={node.ts} />
     </div>
   );
 }

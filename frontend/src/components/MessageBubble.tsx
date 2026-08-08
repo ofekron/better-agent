@@ -36,6 +36,8 @@ import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
+import { formatAttachmentSize } from "../utils/attachmentSize";
+import { fmtTime } from "../utils/timestamp";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId, providerKindForId } from "../utils/providerCache";
 import { providerDisplayName } from "../utils/providerDisplayName";
@@ -2260,28 +2262,6 @@ export function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, 
   return contentFallback ? "Response" : "No output";
 }
 
-/** Format a timestamp string. Shows HH:MM:SS for today, MM/DD HH:MM:SS
- *  for older dates. Returns null on falsy input. */
-export function fmtTime(ts: string | undefined): string | null {
-  if (!ts) return null;
-  try {
-    const d = new Date(ts);
-    const now = new Date();
-    const isToday =
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate();
-    if (isToday) {
-      return d.toLocaleTimeString(undefined, { hour12: false });
-    }
-    const time = d.toLocaleTimeString(undefined, { hour12: false });
-    const date = `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
-    return `${date} ${time}`;
-  } catch {
-    return null;
-  }
-}
-
 /** Label for a turn's primary agent — used by the collapse-toggle header
  * and (manager mode only) the manager-scope chip. Only manager mode has a
  * delegating "Manager"; every other mode — native, and the undefined→native
@@ -3337,12 +3317,6 @@ function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; ses
       )}
     </ImageLightboxGallery>
   );
-}
-
-function formatAttachmentSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function UserFiles({ files }: { files?: ChatMessage["files"] }) {

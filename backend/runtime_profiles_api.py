@@ -15,6 +15,11 @@ from pydantic import BaseModel
 
 import config_store
 import user_prefs
+from providers_api import (
+    FACT_MODEL_CATALOG_CHANGED,
+    FACT_RUNTIME_PROFILES_CHANGED,
+    _publish_fact,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -60,10 +65,29 @@ def _snapshot() -> dict:
     }
 
 
-async def _broadcast_changed() -> None:
+async def _broadcast_changed(*, provider_id: Optional[str] = None) -> None:
+    """`provider_id`, when supplied, is the runtime profile's owning
+    provider — a runtime-profile mutation is the only thing besides an
+    actual model-catalog refresh that changes what `ProviderConfigSurface.
+    model_catalog()` returns (it's the sole source `_map_descriptor`'s
+    per-model `runner` tag reads — see `backend/adapters/provider_adapter.
+    py`'s `model_catalog()`), so D1 decomposes this legacy broadcast onto
+    the SAME `model_catalog_changed` fact a real catalog refresh uses —
+    still fired ONLY when `provider_id` is given, unchanged.
+
+    Closure 3: additionally fires `FACT_RUNTIME_PROFILES_CHANGED`
+    UNCONDITIONALLY (matching this function's own unconditional legacy WS
+    broadcast below exactly — including the two call sites,
+    `record_last_model`/`record_last_reasoning_effort`, that carry no
+    `provider_id` and so never reach the `model_catalog_changed` fact
+    above), carrying the SAME `payload` this legacy broadcast already
+    computed — no second read."""
     broadcast_global = _require_configured()
     payload = await asyncio.to_thread(_snapshot)
     await broadcast_global("runtime_profiles_changed", payload)
+    if provider_id:
+        await _publish_fact(FACT_MODEL_CATALOG_CHANGED, {"provider_id": provider_id})
+    await _publish_fact(FACT_RUNTIME_PROFILES_CHANGED, payload)
 
 
 def runtime_profile_id_for_session(session: dict) -> Optional[str]:
@@ -175,39 +199,53 @@ async def list_runtime_profiles():
     return await asyncio.to_thread(_snapshot)
 
 
-@router.post("/api/runtime-profiles")
-async def create_runtime_profile(body: RuntimeProfileCreate):
+async def _create_runtime_profile(payload: dict) -> dict:
+    """Core create logic, reused by `POST /api/runtime-profiles` and ADR
+    0007's `SaveRuntimeProfile` intent (see `backend/adapter_api.py`'s
+    `ProviderCommandPort`) when the profile dict carries no
+    `runtime_profile_id` — single source of truth for creation, per
+    CLAUDE.md's DRY rule."""
     _require_configured()
     try:
-        profile = await asyncio.to_thread(
-            config_store.add_runtime_profile, body.model_dump(exclude_unset=True)
-        )
+        profile = await asyncio.to_thread(config_store.add_runtime_profile, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    await _broadcast_changed()
+    await _broadcast_changed(provider_id=profile.get("provider_id"))
     return profile
 
 
-@router.patch("/api/runtime-profiles/{profile_id}")
-async def patch_runtime_profile(profile_id: str, body: RuntimeProfilePatch):
+@router.post("/api/runtime-profiles")
+async def create_runtime_profile(body: RuntimeProfileCreate):
+    return await _create_runtime_profile(body.model_dump(exclude_unset=True))
+
+
+async def _patch_runtime_profile(profile_id: str, payload: dict) -> dict:
+    """Core patch logic, reused by `PATCH /api/runtime-profiles/{id}` and
+    ADR 0007's `SaveRuntimeProfile` intent when the profile dict carries a
+    `runtime_profile_id`."""
     _require_configured()
     try:
         profile = await asyncio.to_thread(
-            config_store.update_runtime_profile,
-            profile_id,
-            body.model_dump(exclude_unset=True),
+            config_store.update_runtime_profile, profile_id, payload,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if profile is None:
         raise HTTPException(status_code=404, detail="runtime profile not found")
-    await _broadcast_changed()
+    await _broadcast_changed(provider_id=profile.get("provider_id"))
     return profile
 
 
-@router.delete("/api/runtime-profiles/{profile_id}")
-async def delete_runtime_profile(profile_id: str):
+@router.patch("/api/runtime-profiles/{profile_id}")
+async def patch_runtime_profile(profile_id: str, body: RuntimeProfilePatch):
+    return await _patch_runtime_profile(profile_id, body.model_dump(exclude_unset=True))
+
+
+async def _delete_runtime_profile(profile_id: str) -> None:
+    """Core delete logic, reused by `DELETE /api/runtime-profiles/{id}` and
+    ADR 0007's `DeleteRuntimeProfile` intent."""
     _require_configured()
+    existing = await asyncio.to_thread(config_store.get_runtime_profile, profile_id)
     deleted, reason = await asyncio.to_thread(
         config_store.delete_runtime_profile, profile_id
     )
@@ -215,12 +253,20 @@ async def delete_runtime_profile(profile_id: str):
         if reason == "missing":
             raise HTTPException(status_code=404, detail="runtime profile not found")
         raise HTTPException(status_code=409, detail=reason)
-    await _broadcast_changed()
+    await _broadcast_changed(provider_id=(existing or {}).get("provider_id"))
+
+
+@router.delete("/api/runtime-profiles/{profile_id}")
+async def delete_runtime_profile(profile_id: str):
+    await _delete_runtime_profile(profile_id)
     return {"deleted": True}
 
 
 @router.post("/api/runtime-profiles/{profile_id}/activate")
 async def activate_runtime_profile(profile_id: str):
+    # gap: ADR 0007's ProviderIntent union has no activate-runtime-profile
+    # variant (SaveRuntimeProfile/DeleteRuntimeProfile only) — this route
+    # stays legacy-only; see the caller's report.
     _require_configured()
     try:
         profile = await asyncio.to_thread(

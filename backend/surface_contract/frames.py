@@ -17,11 +17,12 @@ from backend.surface_contract.identity import (
     TurnId,
 )
 from backend.surface_contract.nodes import (
-    Approval,
     ContentStatus,
     Node,
     Run,
     Sidecar,
+    Usage,
+    UserInteraction,
 )
 
 
@@ -29,7 +30,9 @@ class TurnPhase(StrEnum):
     QUEUED = "queued"
     STARTING = "starting"
     RUNNING = "running"
-    AWAITING_APPROVAL = "awaiting_approval"
+    # A turn paused on ANY UserInteraction kind (approval, choice, or
+    # input) — one phase, not one per kind (ADR 0006 §4).
+    AWAITING_INTERACTION = "awaiting_interaction"
     RECONNECTING = "reconnecting"
     STOPPING = "stopping"
     COMPLETED = "completed"
@@ -42,13 +45,6 @@ class TerminalReason(StrEnum):
     USER_STOPPED = "user_stopped"
     PROVIDER_ERROR = "provider_error"
     UNKNOWN_AFTER_RECOVERY = "unknown_after_recovery"
-
-
-@dataclass(frozen=True, slots=True)
-class Usage:
-    input_tokens: int | None
-    output_tokens: int | None
-    total_tokens: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +85,8 @@ class RunUpsert(FrameBase):
 
 
 @dataclass(frozen=True, slots=True)
-class ApprovalUpsert(FrameBase):
-    approval: Approval
+class UserInteractionUpsert(FrameBase):
+    user_interaction: UserInteraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +129,7 @@ ChatFrame = (
     | NodeStatus
     | TurnLifecycle
     | RunUpsert
-    | ApprovalUpsert
+    | UserInteractionUpsert
     | SidecarUpsert
     | SessionState
     | Notice

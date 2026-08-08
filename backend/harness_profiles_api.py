@@ -19,6 +19,7 @@ import harness_field_writer
 import harness_fields
 import harness_profile_resolver
 import harness_profile_store
+from event_bus import BusEvent, bus
 from i18n import t
 from provider_validation import api_disabled_builtin_extensions
 from session_manager import manager as session_manager
@@ -80,6 +81,19 @@ async def _broadcast_harness_profiles_changed(payload: dict[str, Any] | None = N
         node_config_sync.notify_changed("harness")
     except Exception:
         logger.exception("node harness sync notify failed")
+    # ADR 0011 §2 fact for backend/adapters/system_adapter.py's
+    # `HarnessProfileDescriptor` live push — a fact (something changed),
+    # not the new state itself; the adapter re-derives via store_access.
+    try:
+        profile_id = (payload or {}).get("profile_id") or harness_profile_store.DEFAULT_PROFILE_ID
+        await bus.publish(BusEvent(
+            type="harness.fire.profile_changed",
+            root_id="system", sid="system",
+            payload={"profile_id": profile_id},
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("harness.fire.profile_changed publish failed")
 
 
 _PROFILE_INSTANCE_FIELD_KEYS = (

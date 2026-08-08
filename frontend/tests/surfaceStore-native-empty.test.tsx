@@ -23,6 +23,13 @@ interface CapturedSocket {
   updateCursors: ReturnType<typeof vi.fn>;
   trackCursor: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  // `lib/runSummaryRegistry.ts` (via `TurnView.tsx`'s `useRunSummaryByTurn`,
+  // B1/B3 restoration) opens its own socket through this SAME mocked
+  // client — its `createFeedSocketRegistry` calls `.open()`/`.setFeeds()`
+  // unconditionally on ensure-open, so the fake must implement the full
+  // `SurfaceSocket` public shape, not just what `SurfaceStore` itself uses.
+  setFeeds: ReturnType<typeof vi.fn>;
+  submit: ReturnType<typeof vi.fn>;
 }
 
 let capturedSockets: CapturedSocket[] = [];
@@ -43,6 +50,12 @@ vi.mock("../src/adapter/client", () => {
     fetchTurnBody() {
       return Promise.resolve([]);
     }
+    // `runSummaryRegistry.ts`'s cold-hydrate path (`useRunSummaryByTurn`,
+    // B1/B3 restoration) — an empty run list is a normal, honest "no known
+    // run yet" outcome for a fresh session, not an error.
+    fetchRuns() {
+      return Promise.resolve({ kind: "ok" as const, runs: [], next_cursor: null, snapshot_identity: IDENTITY });
+    }
     openSocket(handlers: CapturedSocket["handlers"]) {
       const socket: CapturedSocket = {
         handlers,
@@ -50,6 +63,8 @@ vi.mock("../src/adapter/client", () => {
         updateCursors: vi.fn(),
         trackCursor: vi.fn(),
         close: vi.fn(),
+        setFeeds: vi.fn(),
+        submit: vi.fn(),
       };
       capturedSockets.push(socket);
       return socket;

@@ -47,6 +47,7 @@ import repository_alignment
 import node_registry_store
 import node_store
 import shadow_jsonl
+from event_bus import BusEvent, bus
 from node_path_authority import NodePathError, validate_cwd_roots
 from node_protocol import PROTOCOL_VERSION
 from stores import pending_node_registrations
@@ -128,12 +129,23 @@ def set_registration_listener(cb: Callable[[str, dict], Awaitable[None]]) -> Non
 
 
 async def _emit_registration(event_type: str, payload: dict) -> None:
-    if _registration_listener is None:
-        return
+    if _registration_listener is not None:
+        try:
+            await _registration_listener(event_type, payload)
+        except Exception:
+            logger.exception("node_link: registration listener raised (%s)", event_type)
+    # ADR 0011 §9 fact for backend/adapters/system_adapter.py's
+    # `NodeRegistrationRequest` live push — a single event with a typed
+    # payload per the ADR's own text, matching this function's existing
+    # one-event-type-per-outcome shape (`node_registration_requested`/
+    # `node_registration_resolved`) rather than inventing a third name.
     try:
-        await _registration_listener(event_type, payload)
+        await bus.publish(BusEvent(
+            type=f"machines.fire.registration_{'requested' if event_type == 'node_registration_requested' else 'resolved'}",
+            root_id="system", sid="system", payload=payload, persist=False,
+        ))
     except Exception:
-        logger.exception("node_link: registration listener raised (%s)", event_type)
+        logger.exception("machines.fire.registration_* publish failed (%s)", event_type)
 
 
 def _public_rec(rec: dict) -> dict:

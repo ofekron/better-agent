@@ -7,23 +7,36 @@ from __future__ import annotations
 
 from backend.adapters.derive import (
     DerivedBody,
+    attach_compaction_manifests,
+    build_subagent_panel_container,
     build_subagent_turns,
+    build_subagent_turns_for_panels,
     child_manifest,
+    compaction_child_manifest,
+    delegation_id_of,
     derive_body,
     derive_turn,
+    extract_compaction_children,
     resolve_result,
+    worker_turn_container_id,
 )
 from backend.surface_contract.nodes import (
     AssistantTextPayload,
     ChildManifest,
+    CompactionOrigin,
+    CompactionPayload,
     ContentStatus,
     DiagnosticCode,
     DiagnosticPayload,
     Node,
     NodeKind,
+    PromptOrigin,
     ResultKind,
     ResultPayload,
+    SubAgentTurnPayload,
     ToolInteractionPayload,
+    TypedPromptPayload,
+    WorkerInteractionPayload,
 )
 
 SURFACE = "surf-1"
@@ -51,6 +64,31 @@ def _subagent(node_id, ts, seq, renderable_child_count=1):
         cv=1, node_id=node_id, parent_id=None, turn_id=TURN, surface_id=SURFACE,
         kind=NodeKind.NATIVE_SUBAGENT_TURN, ts=ts, seq=seq, status=None, payload=None,
         child_manifest=ChildManifest(renderable_child_count=renderable_child_count, has_children=True),
+    )
+
+
+def _worker_fact(node_id, ts, seq, fact_kind, delegation_id, **extra_fact):
+    fact = {"delegation_id": delegation_id, **extra_fact}
+    return Node(
+        cv=1, node_id=node_id, parent_id=None, turn_id=TURN, surface_id=SURFACE,
+        kind=NodeKind.WORKER_INTERACTION, ts=ts, seq=seq, status=ContentStatus.COMPLETE,
+        payload=WorkerInteractionPayload(fact_kind=fact_kind, fact=fact),
+    )
+
+
+def _compaction(node_id, ts, seq):
+    return Node(
+        cv=1, node_id=node_id, parent_id=None, turn_id=TURN, surface_id=SURFACE,
+        kind=NodeKind.COMPACTION, ts=ts, seq=seq, status=ContentStatus.COMPLETE,
+        payload=CompactionPayload(origin=CompactionOrigin.NATIVE, summary=""),
+    )
+
+
+def _replay_prompt(node_id, ts, seq, parent_id, text="replayed prompt"):
+    return Node(
+        cv=1, node_id=node_id, parent_id=parent_id, turn_id=TURN, surface_id=SURFACE,
+        kind=NodeKind.TYPED_PROMPT, ts=ts, seq=seq, status=ContentStatus.COMPLETE,
+        payload=TypedPromptPayload(text=text, origin=PromptOrigin.USER),
     )
 
 
@@ -377,6 +415,290 @@ def test_derive_turn_counts_one_renderable_item_per_subagent_turn():
     # body.items therefore holds exactly the subagent turn, nothing else.
     assert turn["body"].items == tuple(subagent_items)
     assert turn["turn"].child_manifest.renderable_child_count == 2  # task1 (result) + subagent turn
+
+
+# ---- compaction-children segregation (Item 3) ----
+
+def test_extract_compaction_children_no_compaction_is_a_noop():
+    items = [_text("txt1", 1.0, 1, "hi"), _tool("t1", 2.0, 2)]
+    kept, by_id = extract_compaction_children(items)
+    assert kept == items
+    assert by_id == {}
+
+
+def test_extract_compaction_children_pulls_children_out_leaves_compaction_node():
+    compaction = _compaction("c1", 1.0, 1)
+    child1 = _replay_prompt("c1:replayed:0", 0.5, 0, parent_id="c1", text="original ask")
+    child2 = _text("c1:replayed:1", 0.6, 1, "reply", parent_id="c1")
+    other = _text("txt2", 2.0, 2, "after compaction")
+    kept, by_id = extract_compaction_children([compaction, child1, child2, other])
+    assert [n.node_id for n in kept] == ["c1", "txt2"]
+    assert set(by_id.keys()) == {"c1"}
+    assert [n.node_id for n in by_id["c1"]] == ["c1:replayed:0", "c1:replayed:1"]  # ts order
+
+
+def test_extract_compaction_children_multiple_compactions_each_own_bucket():
+    c1 = _compaction("c1", 1.0, 1)
+    c2 = _compaction("c2", 3.0, 3)
+    kept, by_id = extract_compaction_children([
+        c1, _text("c1:replayed:0", 0.5, 0, "a", parent_id="c1"),
+        c2, _text("c2:replayed:0", 2.5, 2, "b", parent_id="c2"),
+    ])
+    assert [n.node_id for n in kept] == ["c1", "c2"]
+    assert set(by_id.keys()) == {"c1", "c2"}
+
+
+def test_compaction_child_manifest_counts_every_child_including_typed_prompt():
+    # Unlike `child_manifest()`, TYPED_PROMPT is NOT excluded here — every
+    # compaction-replay child is real transcript content, not a turn's own
+    # anchoring prompt.
+    manifest = compaction_child_manifest((
+        _replay_prompt("c1:replayed:0", 0.5, 0, parent_id="c1"),
+        _text("c1:replayed:1", 0.6, 1, "reply", parent_id="c1"),
+    ))
+    assert manifest.renderable_child_count == 2
+    assert manifest.has_children is True
+
+
+def test_compaction_child_manifest_empty():
+    manifest = compaction_child_manifest(())
+    assert manifest.renderable_child_count == 0
+    assert manifest.has_children is False
+
+
+def test_attach_compaction_manifests_fills_in_manifest_for_flat_delivery():
+    compaction = _compaction("c1", 1.0, 1)
+    child = _replay_prompt("c1:replayed:0", 0.5, 0, parent_id="c1")
+    other = _text("txt2", 2.0, 2, "unrelated")
+    out = attach_compaction_manifests([compaction, child, other])
+    by_id = {n.node_id: n for n in out}
+    assert by_id["c1"].child_manifest.renderable_child_count == 1
+    assert by_id["c1"].child_manifest.has_children is True
+    # Children/unrelated nodes pass through unchanged, still present (flat
+    # delivery — no extraction on this path).
+    assert by_id["c1:replayed:0"] is child
+    assert by_id["txt2"] is other
+
+
+def test_attach_compaction_manifests_no_children_present_leaves_manifest_none():
+    # No replacement_history on this row at all (the common real-world
+    # case today) — matches every other non-container node's default
+    # `child_manifest=None`, never a forced `ChildManifest(0, False)`.
+    compaction = _compaction("c1", 1.0, 1)
+    out = attach_compaction_manifests([compaction])
+    assert out[0].child_manifest is None
+
+
+def test_attach_compaction_manifests_no_compaction_nodes_is_a_noop():
+    items = [_text("txt1", 1.0, 1, "hi")]
+    out = attach_compaction_manifests(items)
+    assert out == items
+
+
+# ---- build_subagent_turns_for_panels / build_subagent_panel_container ----
+# (SubAgentTurn family: worker/sub_session/session panel grouping)
+
+def test_build_subagent_turns_for_panels_no_worker_facts_is_a_noop():
+    items = [_text("txt1", 1.0, 1, "hi"), _tool("t1", 2.0, 2)]
+    kept, extra = build_subagent_turns_for_panels(items, surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert kept == items
+    assert extra == {}
+
+
+def test_build_subagent_turns_for_panels_groups_one_delegation():
+    start = _worker_fact(
+        "worker:1", 1.0, 1, "worker_start", "deleg-1",
+        panel_kind="worker", worker_description="fix the bug", worker_session_id="sess-x",
+    )
+    event = _worker_fact("worker:2", 2.0, 2, "worker_event", "deleg-1")
+    complete = _worker_fact(
+        "worker:3", 3.0, 3, "worker_complete", "deleg-1",
+        token_usage={"input_tokens": 10, "output_tokens": 5},
+    )
+    trailing = _text("txt_final", 4.0, 4, "done")
+    nodes = [start, event, complete, trailing]
+
+    kept, extra = build_subagent_turns_for_panels(nodes, surface_id=SURFACE, turn_id=TURN, cv=1)
+
+    kept_ids = {n.node_id for n in kept}
+    container_id = worker_turn_container_id("deleg-1")
+    assert kept_ids == {container_id, "txt_final"}
+    container = next(n for n in kept if n.node_id == container_id)
+    assert container.kind == NodeKind.WORKER_TURN
+    assert container.parent_id is None  # caller stamps it (same convention as build_subagent_turns)
+    assert container.ts == 1.0  # earliest fact's ts
+    assert container.payload == SubAgentTurnPayload(label="fix the bug")
+    assert container.target_ref.session_id == "sess-x"
+    # This fixture's `worker_complete` carries no `target_turn_id` — honest
+    # None (see test_build_subagent_panel_container_target_turn_id_from_
+    # worker_complete for the positive case).
+    assert container.target_ref.turn_id is None
+    assert container.sidecar_ref == "sess-x"
+    assert container.child_manifest == ChildManifest(renderable_child_count=3, has_children=True)
+    assert container.usage.input_tokens == 10
+    assert container.usage.output_tokens == 5
+    assert container.usage.total_tokens == 15
+
+    # Every grouped fact is reachable one level down via extra_index, never
+    # re-flattened into `kept` — same contract as build_subagent_turns.
+    assert extra["worker:1"].parent_id == container_id
+    assert extra["worker:2"].parent_id == container_id
+    assert extra["worker:3"].parent_id == container_id
+
+
+def test_build_subagent_turns_for_panels_panel_kind_maps_to_node_kind():
+    cases = [
+        ("worker", NodeKind.WORKER_TURN),
+        ("sub_session", NodeKind.SUB_SESSION_TURN),
+        ("sub_session_created", NodeKind.SUB_SESSION_TURN),
+        ("session", NodeKind.SESSION_TURN),
+        ("session_created", NodeKind.SESSION_TURN),
+    ]
+    for panel_kind, expected_kind in cases:
+        start = _worker_fact("w:1", 1.0, 1, "worker_start", "d1", panel_kind=panel_kind)
+        kept, _extra = build_subagent_turns_for_panels([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+        container = kept[0]
+        assert container.kind == expected_kind, f"panel_kind={panel_kind}"
+
+
+def test_build_subagent_turns_for_panels_multiple_delegations_each_get_their_own_turn():
+    d1 = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    d2 = _worker_fact("w:2", 2.0, 2, "worker_start", "deleg-2", panel_kind="sub_session")
+
+    kept, extra = build_subagent_turns_for_panels([d1, d2], surface_id=SURFACE, turn_id=TURN, cv=1)
+
+    container_ids = {n.node_id for n in kept}
+    assert container_ids == {worker_turn_container_id("deleg-1"), worker_turn_container_id("deleg-2")}
+    assert extra["w:1"].parent_id == worker_turn_container_id("deleg-1")
+    assert extra["w:2"].parent_id == worker_turn_container_id("deleg-2")
+
+
+def test_build_subagent_turns_for_panels_without_worker_complete_has_no_usage():
+    start = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    kept, _extra = build_subagent_turns_for_panels([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert kept[0].usage is None
+
+
+def test_build_subagent_turns_for_panels_without_worker_session_id_has_no_target_ref():
+    start = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    kept, _extra = build_subagent_turns_for_panels([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert kept[0].target_ref is None
+
+
+def test_build_subagent_panel_container_resolves_fields_from_any_fact_in_the_group():
+    # A group missing its own worker_start (live path, mid-stream) still
+    # resolves panel_kind/worker_session_id/label from whichever fact
+    # carries them — every producer re-sends these on every fact.
+    event = _worker_fact(
+        "w:2", 2.0, 2, "worker_event", "deleg-1",
+        panel_kind="sub_session", worker_description="delegated task", worker_session_id="sess-y",
+    )
+    container = build_subagent_panel_container([event], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.kind == NodeKind.SUB_SESSION_TURN
+    assert container.payload.label == "delegated task"
+    assert container.target_ref.session_id == "sess-y"
+
+
+def test_build_subagent_panel_container_defaults_to_worker_turn_when_panel_kind_unknown():
+    # No fact in the group carries panel_kind (a pathological/ordering
+    # edge case — every real producer always sends it) — falls back to
+    # WORKER_TURN rather than crashing or leaving kind unset.
+    event = _worker_fact("w:2", 2.0, 2, "worker_event", "deleg-1")
+    container = build_subagent_panel_container([event], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.kind == NodeKind.WORKER_TURN
+
+
+def test_build_subagent_panel_container_created_true_from_worker_start_is_new():
+    # `emit_session_created_panel`'s "*_created" panels stamp `is_new:
+    # True` on their (only) `worker_start` fact — the render-time signal
+    # for legacy's distinct "created" panel variant, since no dedicated
+    # NodeKind exists for it (see SubAgentTurnPayload.created's docstring).
+    start = _worker_fact(
+        "w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="sub_session_created",
+        worker_description="a sub-session created", worker_session_id="sess-c", is_new=True,
+    )
+    container = build_subagent_panel_container([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.payload.created is True
+
+
+def test_build_subagent_panel_container_created_false_when_is_new_absent():
+    # Every non-"*_created" producer either omits `is_new` or sends False
+    # — either way `created` stays False, never guessed True.
+    start = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    container = build_subagent_panel_container([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.payload.created is False
+
+
+def test_build_subagent_panel_container_target_turn_id_from_worker_complete():
+    # `orchestrator._team_message_target_turn_id` threads the target
+    # session's own TYPED_PROMPT node_id onto the `worker_complete` fact
+    # once the delegation completes — the ONLY fact kind that ever carries
+    # it (see build_subagent_panel_container's docstring).
+    start = _worker_fact(
+        "w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="sub_session", worker_session_id="sess-t",
+    )
+    complete = _worker_fact(
+        "w:2", 2.0, 2, "worker_complete", "deleg-1",
+        worker_session_id="sess-t", target_turn_id="prompt-abc",
+    )
+    container = build_subagent_panel_container([start, complete], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.target_ref.session_id == "sess-t"
+    assert container.target_ref.turn_id == "prompt-abc"
+
+
+def test_build_subagent_panel_container_target_turn_id_none_while_running():
+    # No `worker_complete` fact yet (still running) — honest None, not
+    # guessed, even though `worker_session_id` (a DIFFERENT field) is
+    # already known.
+    start = _worker_fact(
+        "w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="sub_session", worker_session_id="sess-t",
+    )
+    container = build_subagent_panel_container([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.target_ref.session_id == "sess-t"
+    assert container.target_ref.turn_id is None
+
+
+def test_build_subagent_panel_container_sidecar_ref_mirrors_worker_session_id():
+    start = _worker_fact(
+        "w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker", worker_session_id="sess-side",
+    )
+    container = build_subagent_panel_container([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.sidecar_ref == "sess-side"
+
+
+def test_build_subagent_panel_container_sidecar_ref_none_without_worker_session_id():
+    start = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    container = build_subagent_panel_container([start], surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert container.sidecar_ref is None
+
+
+def test_delegation_id_of_ignores_non_worker_interaction_nodes():
+    assert delegation_id_of(_text("t1", 1.0, 1, "hi")) is None
+
+
+def test_delegation_id_of_ignores_facts_missing_delegation_id():
+    node = Node(
+        cv=1, node_id="w:1", parent_id=None, turn_id=TURN, surface_id=SURFACE,
+        kind=NodeKind.WORKER_INTERACTION, ts=1.0, seq=1, status=ContentStatus.COMPLETE,
+        payload=WorkerInteractionPayload(fact_kind="worker_start", fact={}),
+    )
+    assert delegation_id_of(node) is None
+
+
+def test_derive_turn_counts_one_renderable_item_per_worker_turn():
+    # Full pipeline parity, mirroring test_derive_turn_counts_one_
+    # renderable_item_per_subagent_turn: once worker facts are grouped
+    # (as chat_adapter._build_turn_view now does before calling
+    # derive_turn), the enclosing turn's own manifest counts the panel as
+    # exactly ONE renderable BodyItem.
+    start = _worker_fact("w:1", 1.0, 1, "worker_start", "deleg-1", panel_kind="worker")
+    body_source, _extra = build_subagent_turns_for_panels(
+        [start], surface_id=SURFACE, turn_id=TURN, cv=1,
+    )
+    turn = derive_turn(TURN, body_source, surface_id=SURFACE, cv=1)
+    panel_items = [n for n in turn["body"].items if n.kind == NodeKind.WORKER_TURN]
+    assert len(panel_items) == 1
+    assert turn["turn"].child_manifest.renderable_child_count == 1
 
 
 if __name__ == "__main__":

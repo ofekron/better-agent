@@ -21,6 +21,7 @@ import type {
   NodeWire,
   RunWire,
   SnapshotIdentity,
+  UserInteractionWire,
 } from "../../src/adapter/wire";
 
 /** Logical key -> extension id served by GET /api/extensions/builtin-ids.
@@ -75,8 +76,20 @@ export interface SurfaceSessionState {
   turns: CompactTurnWire[];
   liveTurnNodes: NodeWire[];
   runs: RunWire[];
+  /** Cold-hydration source for `CompactSessionSnapshotWire.interactions`
+   *  (ADR 0006 §5) — every currently-pending UserInteraction on this
+   *  session. Live updates project via `applySurfaceFrame`'s
+   *  `user_interaction_upsert` case below, same real-backend-consistency
+   *  rationale as every other frame kind here. */
+  interactions: UserInteractionWire[];
   olderCursor: string | null;
   childrenByNodeId: Map<string, NodeWire[]>;
+  /** Page served by GET `/api/v2/surface/sessions/:id/older` when the
+   *  snapshot's `olderCursor` is non-null. Absent (undefined) keeps the
+   *  MVP always-empty-page stub (no seeded-pagination support); present
+   *  (including an explicit empty page) serves this instead — see
+   *  `seedSurface`'s doc and message-pagination migration notes. */
+  olderPage?: { turns: CompactTurnWire[]; runs: RunWire[]; olderCursor: string | null };
 }
 
 function emptySurfaceSessionState(): SurfaceSessionState {
@@ -86,9 +99,38 @@ function emptySurfaceSessionState(): SurfaceSessionState {
     turns: [],
     liveTurnNodes: [],
     runs: [],
+    interactions: [],
     olderCursor: null,
     childrenByNodeId: new Map(),
   };
+}
+
+/** Mirrors backend/user_input_store.py's `interaction_request_dict` +
+ * `chat_adapter._map_pending_interactions` (ADR 0006 §5, Package A
+ * backend outcomes): the SAME real-backend-consistency rationale
+ * `applySurfaceFrame`'s docstring states for live frames applies to cold
+ * hydration too — a session seeded with legacy `userInputs` (the
+ * `/api/user-input/pending` route's source) must serve the SAME pending
+ * rows through the v2 `/snapshot` route's `interactions` field, or a
+ * suite exercising ONLY the legacy seed (most of this suite, pre-dating
+ * the v2 hydration path) would see its pending card silently vanish once
+ * `usePendingUserInteractions`'s v2 hydration for the open session lands
+ * and finds nothing. One seed (`userInputs`), two routes, always
+ * consistent — never a second interactions fixture list to keep in sync. */
+function toWireUserInteraction(request: UserInteractionRequest): UserInteractionWire {
+  const base = {
+    interaction_ref: `user_input:${request.request_id}`,
+    kind: "input" as const,
+    state: "pending" as const,
+    response: null,
+  };
+  if (request.kind === "approval") {
+    return { ...base, request: { schema: { kind: "approval" }, prompt: request.prompt } };
+  }
+  if (request.kind === "memory") {
+    return { ...base, request: { schema: { kind: "memory", memory_proposal: request.memory_proposal }, prompt: "" } };
+  }
+  return { ...base, request: { schema: { kind: "questions", questions: request.questions }, prompt: "" } };
 }
 
 export interface InstallationProfileState {
@@ -450,10 +492,12 @@ export class MockBackend {
    *  above: a later REST snapshot refetch (resync_required, or a fresh
    *  mount) must see what the live frame already delivered. Called by the
    *  harness's `emitSurface` before delivering the frame to the mock
-   *  socket. approval_upsert/sidecar_upsert/session_state/notice are not
-   *  part of the CHAT CONTENT plane this mock models — no-ops here,
-   *  mirroring useSurfaceSession.ts's own historical gap list (now the
-   *  native store's, see surface/state.ts). */
+   *  socket. sidecar_upsert/session_state/notice are not part of the CHAT
+   *  CONTENT plane this mock models — no-ops here, mirroring
+   *  useSurfaceSession.ts's own historical gap list (now the native
+   *  store's, see surface/state.ts). user_interaction_upsert IS modeled
+   *  (below) since it's the cold-hydration/live-projection pair a suite
+   *  seeding interactions needs to stay consistent, same as run_upsert. */
   applySurfaceFrame(sessionId: string, frame: ChatFrame): void {
     const state = this.state.surface.get(sessionId) ?? emptySurfaceSessionState();
     this.state.surface.set(sessionId, state);
@@ -523,11 +567,19 @@ export class MockBackend {
         else state.runs[idx] = frame.run;
         break;
       }
-      // turn_lifecycle/approval_upsert/sidecar_upsert/session_state/notice:
-      // not modeled by this mock's REST snapshot shape (turn_lifecycle's
-      // phase/reason/usage isn't part of CompactTurnWire — the real
-      // backend derives it live-only; a snapshot refetch never carries
-      // it either, so there's nothing to project here).
+      case "user_interaction_upsert": {
+        const idx = state.interactions.findIndex(
+          (i) => i.interaction_ref === frame.user_interaction.interaction_ref,
+        );
+        if (idx === -1) state.interactions.push(frame.user_interaction);
+        else state.interactions[idx] = frame.user_interaction;
+        break;
+      }
+      // turn_lifecycle/sidecar_upsert/session_state/notice: not modeled by
+      // this mock's REST snapshot shape (turn_lifecycle's phase/reason/
+      // usage isn't part of CompactTurnWire — the real backend derives it
+      // live-only; a snapshot refetch never carries it either, so there's
+      // nothing to project here).
       default:
         break;
     }
@@ -1699,6 +1751,39 @@ export class MockBackend {
       if (this.state.installationProfile.setup_required) return setupGate();
       return this.runtimeProfilesSnapshot();
     }
+    // Closure 3 (ADR 0007 RuntimeProfile v2 parity): `useRuntimeProfiles.ts`
+    // now sources its cold-hydrate from this v2 route instead of the
+    // legacy one above — same underlying snapshot, reshaped onto
+    // `RuntimeProfilesSnapshotWire`'s field names
+    // (`runtime_profile_id`/`deleted_providers[].provider_id`).
+    if (method === "GET" && path === "/api/v2/surface/runtime-profiles") {
+      if (this.state.installationProfile.setup_required) return setupGate();
+      const legacy = this.runtimeProfilesSnapshot();
+      return {
+        kind: "ok",
+        profiles: legacy.runtime_profiles.map((p) => ({
+          runtime_profile_id: p.id,
+          provider_id: p.provider_id,
+          runner: p.runner,
+          default_model: p.default_model,
+          default_reasoning_effort: p.default_reasoning_effort || null,
+          name: p.name,
+          deleted_at: p.deleted_at,
+          created_at: p.created_at,
+          updated_at: p.updated_at,
+        })),
+        default_runtime_profile_id: legacy.default_runtime_profile_id,
+        last_models: legacy.last_models,
+        last_reasoning_efforts: legacy.last_reasoning_efforts,
+        deleted_providers: legacy.deleted_providers.map((d) => ({
+          provider_id: d.id,
+          name: d.name,
+          nickname: (d as { nickname?: string }).nickname ?? "",
+          kind: d.kind,
+          deleted_at: d.deleted_at,
+        })),
+      };
+    }
     if (method === "GET" && path === "/api/config") return this.state.config;
     if (method === "POST" && path === "/api/config") return { ok: true };
     const traceMatch = path.match(/^\/api\/traces\/([^/]+)$/);
@@ -1730,6 +1815,20 @@ export class MockBackend {
     if (surfaceSnapshotMatch && method === "GET") {
       const sessionId = decodeURIComponent(surfaceSnapshotMatch[1]);
       const seeded = this.state.surface.get(sessionId);
+      // Derived-then-explicit merge, keyed by interaction_ref: an explicit
+      // `h.seedSurface(sessionId, { interactions: [...] })` entry (raw wire
+      // shape, used by tests exercising kinds `userInputs` can't express —
+      // tool/worker approval, malformed shapes) wins over the auto-derived
+      // one for the same ref; every other pending `userInputs` row for this
+      // session is included automatically (see `toWireUserInteraction`).
+      const interactionsByRef = new Map<string, UserInteractionWire>();
+      for (const request of this.state.userInputs) {
+        if (request.status !== "pending" || request.app_session_id !== sessionId) continue;
+        const wire = toWireUserInteraction(request);
+        interactionsByRef.set(wire.interaction_ref, wire);
+      }
+      for (const wire of seeded?.interactions ?? []) interactionsByRef.set(wire.interaction_ref, wire);
+      const interactions = [...interactionsByRef.values()];
       if (!seeded) {
         return {
           kind: "ok",
@@ -1739,6 +1838,7 @@ export class MockBackend {
           turns: [],
           live_turn_nodes: [],
           runs: [],
+          interactions,
           older_cursor: null,
           snapshot_identity: { incarnation: "mock", render_rev: 0, hist_rev: 0 },
         };
@@ -1751,6 +1851,7 @@ export class MockBackend {
         turns: seeded.turns,
         live_turn_nodes: seeded.liveTurnNodes,
         runs: seeded.runs,
+        interactions,
         older_cursor: seeded.olderCursor,
         snapshot_identity: seeded.identity,
       };
@@ -1774,10 +1875,16 @@ export class MockBackend {
       const sessionId = decodeURIComponent(surfaceOlderMatch[1]);
       const seeded = this.state.surface.get(sessionId);
       const identity = seeded?.identity ?? { incarnation: "mock", render_rev: 0, hist_rev: 0 };
-      // MVP: no seeded-pagination support yet — every session reports no
-      // older page. A suite exercising load-older against the native
-      // surface needs this extended before it can migrate.
-      return { kind: "ok", turns: [], runs: [], older_cursor: null, snapshot_identity: identity };
+      // A suite seeds a page via `seedSurface(id, { olderPage: {...} })`;
+      // absent that, every session reports no older page (MVP default).
+      const page = seeded?.olderPage;
+      return {
+        kind: "ok",
+        turns: page?.turns ?? [],
+        runs: page?.runs ?? [],
+        older_cursor: page?.olderCursor ?? null,
+        snapshot_identity: identity,
+      };
     }
 
     throw new Error(`MockBackend: unhandled ${method} ${path}`);

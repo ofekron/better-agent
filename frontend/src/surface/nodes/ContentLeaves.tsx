@@ -29,7 +29,8 @@ import type {
   SteeringMessagePayloadWire,
   ThinkingPayloadWire,
 } from "../../adapter/wire";
-import { Markdown } from "../leaf/Markdown";
+import { ArtificialSectionSegments } from "../leaf/ArtificialSections";
+import { AttachmentChips } from "../leaf/AttachmentChips";
 
 const MessageBox = lazy(() => import("../../components/MessageBubble").then((m) => ({ default: m.MessageBox })));
 const ThinkingBlock = lazy(() => import("../../components/ThinkingBlock").then((m) => ({ default: m.ThinkingBlock })));
@@ -60,6 +61,18 @@ export function ThinkingView({ node }: { node: NodeWire }) {
   );
 }
 
+/** `steering_message` — legacy's `SteerPromptEvent`
+ * (`.event-steer-prompt`/`-label`/`-text`, all pre-existing, no new CSS).
+ * Text renders through the same shared artificial-section-chip renderer
+ * as TypedPromptView (`leaf/ArtificialSections.tsx` — one parser, no
+ * fork), matching legacy's `UserContentSegments` treatment.
+ *
+ * Attachments render through the same `leaf/AttachmentChips.tsx` renderer
+ * TypedPromptView uses for `TypedPromptPayloadWire.attachments` — one
+ * component, no fork. `SteeringMessagePayloadWire.attachments`
+ * (backend/surface_contract/nodes.py's `SteeringMessagePayload`,
+ * populated by `normalize._handle_steer_prompt` from the steer's saved
+ * images) carries the exact same `Attachment` shape. */
 export function SteeringMessageView({ node }: { node: NodeWire }) {
   const payload = node.payload as SteeringMessagePayloadWire | null;
   if (!payload) return null;
@@ -67,8 +80,9 @@ export function SteeringMessageView({ node }: { node: NodeWire }) {
     <div className="event-steer-prompt" data-testid="surface-steering-message">
       <span className="event-steer-label">Steer</span>
       <span className="event-steer-text">
-        <Markdown text={payload.text} />
+        <ArtificialSectionSegments text={payload.text} />
       </span>
+      <AttachmentChips attachments={payload.attachments} sessionId={node.surface_id} />
     </div>
   );
 }

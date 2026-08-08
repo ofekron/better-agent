@@ -39,6 +39,14 @@ ADAPTER_API_PY = BACKEND_DIR / "adapter_api.py"
 # backend.adapters.command_port to implement the Protocol, so it needs
 # the same permitted-importer exemption as main.py/adapter_api.py.
 SURFACE_COMMANDS_PY = BACKEND_DIR / "surface_commands.py"
+# Same exemption, same rationale, for SessionCommandPort's implementation
+# (ADR 0008 command plane) — it imports backend.adapters.command_port to
+# implement that Protocol too.
+SESSION_COMMANDS_PY = BACKEND_DIR / "session_commands.py"
+# Same exemption, same rationale, for SystemCommandPort's implementation
+# (ADR 0011 System & Host Surface command plane) — it imports
+# backend.adapters.command_port to implement that Protocol too.
+SYSTEM_COMMANDS_PY = BACKEND_DIR / "system_commands.py"
 
 SURFACE_CONTRACT_PREFIX = "backend.surface_contract"
 ADAPTERS_PREFIX = "backend.adapters"
@@ -94,6 +102,30 @@ STORE_ACCESS_ALLOWLIST = (
     "backend.project_store",
     "backend.runs_dir",
     "backend.worker_store",
+    "backend.llm_call_log",
+    "backend.session_organization_store",
+    "backend.tool_approval",
+    "backend.pending_approvals",
+    "backend.session_bridge",
+    "backend.user_input_store",
+    # ADR 0011 (System & Host Surface) additions — see store_access.py's
+    # _ALLOWED_STORE_NAMES docstring note for the rationale per entry.
+    "backend.extension_store",
+    "backend.harness_profile_store",
+    "backend.harness_profile_resolver",
+    "backend.marketplace_bridge",
+    "backend.schedule_store",
+    "backend.startup_tasks",
+    "backend.installation_profile",
+    "backend.node_store",
+    "backend.node_link",
+    "backend.node_provider_credential_sync",
+    # Package E (ADR 0009) addition — RunsSurfaceAdapter.run_detail()'s
+    # on-demand process-tree enrichment (store_access.inspect_process_tree).
+    "backend.process_inspect",
+    # Closure 3 (ADR 0007 RuntimeProfile v2 parity) — last-used-model/
+    # reasoning-effort prefill store, read-only.
+    "backend.user_prefs",
 )
 
 # The two files permitted to mutate sys.modules directly (the
@@ -551,7 +583,9 @@ def _claude_shape_allowlist_dead_entries() -> list[str]:
 
 def _external_adapters_import_violations() -> list[str]:
     exempt = {SURFACE_CONTRACT_DIR, ADAPTERS_DIR}
-    exempt_files = {MAIN_PY, ADAPTER_API_PY, SURFACE_COMMANDS_PY}
+    exempt_files = {
+        MAIN_PY, ADAPTER_API_PY, SURFACE_COMMANDS_PY, SESSION_COMMANDS_PY, SYSTEM_COMMANDS_PY,
+    }
     violations = []
     for path in _iter_py_files(BACKEND_DIR):
         if path in exempt_files:

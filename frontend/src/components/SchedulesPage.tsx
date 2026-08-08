@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { deleteScheduleById, fetchAllSchedules } from "../api";
 import type { Schedule } from "../types";
 import { eventBus } from "../lib/eventBus";
+import { subscribeSystemFrames } from "../lib/systemFeedRegistry";
+import { deleteScheduleNativeOrRest } from "../lib/scheduleMutations";
 import { sessionPath } from "../hooks/useRoute";
 import Icon from "./Icon";
 
@@ -53,7 +55,18 @@ export function SchedulesPage({ onBack, onOpenSession }: Props) {
     void load();
     // Global ping: any schedule mutated anywhere → refetch snapshot.
     const off = eventBus.subscribe("schedules_changed", () => void load());
-    return off;
+    // ADR 0011 §6 `schedules` feed — additional live-refresh trigger
+    // alongside the legacy ping above (dual SIGNAL; the rendered list
+    // stays legacy REST-sourced — `fetchAllSchedules`'s `Schedule` type
+    // carries `session_exists`/`session_name` this page renders directly,
+    // which `ScheduleSummary` doesn't model).
+    const offV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "schedule_upsert" || frame.type === "schedule_removed") void load();
+    });
+    return () => {
+      off();
+      offV2();
+    };
   }, [load]);
 
   const removeAnimated = useCallback(
@@ -74,7 +87,7 @@ export function SchedulesPage({ onBack, onOpenSession }: Props) {
   const cancelOne = useCallback(
     async (id: string) => {
       try {
-        await deleteScheduleById(id);
+        await deleteScheduleNativeOrRest(id, () => deleteScheduleById(id));
         removeAnimated([id]);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -89,7 +102,7 @@ export function SchedulesPage({ onBack, onOpenSession }: Props) {
     const failed: string[] = [];
     await Promise.all(
       ids.map((id) =>
-        deleteScheduleById(id).catch(() => {
+        deleteScheduleNativeOrRest(id, () => deleteScheduleById(id)).catch(() => {
           failed.push(id);
         }),
       ),

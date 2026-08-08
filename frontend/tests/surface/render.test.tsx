@@ -182,7 +182,15 @@ describe("Live turn (chat-panel.md renderLiveTurn — trailing-path forced expan
 });
 
 describe("native_subagent_turn — lazy collapsible block", () => {
-  it("does not fetch children until explicitly expanded, then renders them", async () => {
+  it("shows a boundary-inline preview of already-cached content while collapsed, then the full body once expanded", async () => {
+    // "already-cached" here mirrors the real-world case this gap closure
+    // targets: a subagent turn nested inside a live turn's eager-seeded
+    // bounded-nodes window (state.ts's seedLiveTurnNodes), so its
+    // children are present in the store the moment it first renders
+    // collapsed — `fake.seed("sub1", ...)` reproduces exactly that
+    // precondition. No fetch is triggered to build this preview: it only
+    // reads what's already there (see the "does not fetch" case below for
+    // the cold/nothing-cached counterpart).
     const fake = new FakeSurfaceStore();
     const sub = nativeSubagentTurnNode("t1", "sub1", "turn:t1", { renderable_child_count: 1, has_children: true });
     fake.seed("turn:t1", [sub]);
@@ -192,9 +200,28 @@ describe("native_subagent_turn — lazy collapsible block", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /expand hidden content/i }));
     await waitFor(() => expect(screen.getByTestId("surface-subagent-turn")).toBeTruthy());
-    expect(screen.queryByText("subagent output")).toBeNull(); // collapsed: no preview, unlike Explanation
+    expect(screen.getByTestId("surface-subagent-preview").textContent).toContain("subagent output");
+    // Still collapsed: the real (extended) body region hasn't rendered.
+    expect(screen.getByTestId("surface-subagent-turn").querySelector(".surface-collapsible-body")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { expanded: false }));
-    await waitFor(() => expect(screen.getByText("subagent output")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByTestId("surface-subagent-turn").querySelector(".surface-collapsible-body")).not.toBeNull(),
+    );
+    expect(screen.getByText("subagent output")).toBeTruthy();
+    expect(screen.queryByTestId("surface-subagent-preview")).toBeNull(); // preview row gone once expanded
+  });
+
+  it("does not fetch children until explicitly expanded, and shows no preview when nothing is cached", async () => {
+    const fake = new FakeSurfaceStore();
+    const sub = nativeSubagentTurnNode("t1", "sub1", "turn:t1", { renderable_child_count: 1, has_children: true });
+    fake.seed("turn:t1", [sub]);
+    // Deliberately NOT seeding "sub1" — nothing cached for it yet.
+    const entry = entryWithBody({ renderable_child_count: 1, has_children: true });
+    render(<TurnView entry={entry} store={asStore(fake)} runsById={NO_RUNS} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /expand hidden content/i }));
+    await waitFor(() => expect(screen.getByTestId("surface-subagent-turn")).toBeTruthy());
+    expect(screen.queryByTestId("surface-subagent-preview")).toBeNull();
   });
 });

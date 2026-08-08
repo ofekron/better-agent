@@ -193,6 +193,18 @@ _STARTUP_ACTIVITY_KINDS = {
     "claude": "provider_response",
 }
 
+# `run.state.*` fact types — the event-driven publication surface
+# `RunsSurfaceAdapter` (backend/adapters/runs_adapter.py) subscribes to and
+# folds into its live overlay. One constant per distinguishable "what
+# happened to _run_state" shape; see `_publish_run_state_fact`. Facts
+# describe events, never commands — the subscriber decides what to project.
+_RUN_STATE_FACT_ANCHOR_CHANGED = "run.state.anchor_changed"
+_RUN_STATE_FACT_PID_CHANGED = "run.state.pid_changed"
+_RUN_STATE_FACT_RETRYING = "run.state.retrying"
+_RUN_STATE_FACT_REMOVED = "run.state.removed"
+_RUN_STATE_FACT_STARTUP_PHASE_CHANGED = "run.state.startup_phase_changed"
+_RUN_STATE_FACT_RECOVERY_CLASSIFIED = "run.state.recovery_classified"
+
 
 def _provider_capability_contexts(
     contexts: Optional[list[dict]],
@@ -572,6 +584,17 @@ class TurnManager:
             "message": {"role": "user", "content": [{"type": "text", "text": text}]},
             "origin": origin,
         }
+        # `user_msg["client_id"]` (`_init_turn_messages`'s echo of `run_turn`'s
+        # `client_id` kwarg — itself `surface_commands.send_prompt`'s unified
+        # `cid`, fed by EITHER the v2 intent transport's `intent_id` or the
+        # legacy WS transport's `client_id`; see that function's docstring)
+        # is the ONE correlator a client-side optimistic send can reconcile
+        # against once this row round-trips through `normalize._handle_user`
+        # into `TypedPromptPayload.intent_id`. Omitted when the prompt was
+        # dispatched without one (closed-set payload discipline).
+        client_id = user_msg.get("client_id")
+        if isinstance(client_id, str) and client_id:
+            data["intent_id"] = client_id
         attachments = [
             {"name": img["filename"], "media_type": img.get("media_type") or "", "ref": "", "size": None}
             for img in self._image_filename_records(user_msg)
@@ -662,6 +685,7 @@ class TurnManager:
         reason: Optional[str] = None,
         provider_kind: Optional[str] = None,
         prompt_uuid: Optional[str] = None,
+        usage: Optional[dict] = None,
     ) -> None:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
@@ -674,6 +698,20 @@ class TurnManager:
         / "error" — so
         subscribers can distinguish causes without resorting to two
         event types per cause.
+
+        `usage` — when given — is a `trace_collector._normalize_token_usage`
+        -shaped dict (`input_tokens`/`output_tokens`/
+        `cache_creation_input_tokens`/`cache_read_input_tokens`, every call
+        site sources it via `extract_provider_result_token_usage(primary_
+        result)`, the SAME helper `record_turn_result`'s own token_usage
+        already uses). `chat_adapter._on_lifecycle` reads it straight off
+        this SAME bus event to build the live `TurnLifecycle` frame's
+        `Usage` — this event is `persist=False` (live-plane only, matching
+        the wire's `UsageWire` living only on `TurnLifecycleFrame`, never
+        REST/`CompactTurn`), so a turn's usage summary is only ever shown
+        while it completes in the current browser session, not after a
+        cold reload — an accepted trade-off, not a bug (same as `TurnPhase`
+        itself).
         """
         self._validate_lifecycle_identity(
             user_turn_id=user_turn_id,
@@ -700,6 +738,8 @@ class TurnManager:
                 payload["provider_kind"] = provider_kind
             if prompt_uuid is not None:
                 payload["prompt_uuid"] = prompt_uuid
+            if usage is not None:
+                payload["usage"] = usage
             event_type = (
                 "lifecycle.turn_complete" if kind == "complete"
                 else "lifecycle.turn_stopped"
@@ -1133,6 +1173,49 @@ class TurnManager:
             entries,
         )
 
+    def _publish_run_state_fact(
+        self, fact_type: str, app_session_id: str, run_id: str, **fields: Any,
+    ) -> None:
+        """Single publication point for every `run.state.*` fact —
+        `RunsSurfaceAdapter` (backend/adapters/runs_adapter.py) is the
+        subscriber, folding these into its own live overlay. A fact
+        describes what just happened to `_run_state`, never a command;
+        this method never decides what the projection does with it.
+
+        `bus.publish_threadsafe` is used (never `bus.publish`) because
+        `_run_state` mutators are called from BOTH the owner event loop
+        (most turn-lifecycle call sites) AND a plain background OS
+        thread (`tick_running_state`'s 2 s tick, which drives
+        `_prune_dead_entries`/`_update_startup_stalls`) — delivery is
+        handed off via `call_soon_threadsafe`, which is safe from either
+        context, so this never needs the loop-affinity dance
+        `emit_run_state`'s cross-thread callers do (see
+        `tick_running_state`), and never blocks a run-state mutation on
+        bus delivery. `persist=False`: `_run_state` is in-memory-only —
+        disk (`RunRecord`, the `runner_alive` sentinel) remains the
+        durable source of truth (see runs_adapter.py's persistence-
+        honesty split) — these facts have no replay/WAL role and are
+        never expected to survive a backend restart.
+        """
+        try:
+            root_id = session_manager._root_id_for(app_session_id) or app_session_id
+        except Exception:
+            root_id = app_session_id
+        try:
+            bus.publish_threadsafe(BusEvent(
+                type=fact_type,
+                root_id=root_id,
+                sid=app_session_id,
+                payload={"run_id": run_id, "session_id": app_session_id, **fields},
+                run_id=run_id,
+                persist=False,
+            ))
+        except Exception:
+            logger.exception(
+                "run-state fact publish failed type=%s sid=%s run=%s",
+                fact_type, app_session_id[:8], (run_id or "?")[:8],
+            )
+
     def run_state_add(
         self,
         app_session_id: str,
@@ -1169,6 +1252,12 @@ class TurnManager:
                 "pid": pid,
                 "last_event_at": now,
             })
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+                kind=kind, target_message_id=target_message_id,
+                delegation_id=delegation_id, pid=pid,
+                started_at=entry.get("started_at"),
+            )
             if project_streaming:
                 self._maybe_flip_streaming(
                     app_session_id, target_message_id, True, kind,
@@ -1187,6 +1276,11 @@ class TurnManager:
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)
+        self._publish_run_state_fact(
+            _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+            kind=kind, target_message_id=target_message_id,
+            delegation_id=delegation_id, pid=pid, started_at=entry["started_at"],
+        )
         if project_streaming:
             self._maybe_flip_streaming(
                 app_session_id, target_message_id, True, kind,
@@ -1218,6 +1312,11 @@ class TurnManager:
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
             self._turn_creators.pop(app_session_id, None)
+        for r in removed:
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_REMOVED, app_session_id,
+                r.get("run_id") or run_id, reason="explicit",
+            )
         if project_streaming:
             for r in removed:
                 self._maybe_flip_streaming(
@@ -1477,6 +1576,13 @@ class TurnManager:
             run_id = r.get("run_id")
             if run_id:
                 self._pop_run_id(sid, run_id)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_REMOVED, sid, run_id,
+                    reason=(
+                        "pruned_pidless_orphan" if r.get("pid") is None
+                        else "pruned_dead_pid"
+                    ),
+                )
             self._maybe_flip_streaming(
                 sid,
                 r.get("target_message_id"),
@@ -1513,6 +1619,14 @@ class TurnManager:
             run["startup_phase"] = "stalled"
             run["stalled_at"] = now.isoformat()
             changed = True
+            run_id = run.get("run_id")
+            if run_id:
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, sid, run_id,
+                    startup_phase="stalled",
+                    stalled_at=run["stalled_at"],
+                    provider_kind=run.get("provider_kind"),
+                )
             logger.warning(
                 "TURN_START_STALLED sid=%s run=%s provider=%s expected=%s "
                 "silence_seconds=%s threshold_seconds=%s",
@@ -1819,6 +1933,16 @@ class TurnManager:
                     if silence_threshold_seconds is not None
                     else self._load_task_start_silence_seconds()
                 )
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                startup_phase=run["startup_phase"],
+                provider_kind=provider_kind,
+                startup_expected_activity=expected,
+                startup_silence_threshold_seconds=run.get(
+                    "startup_silence_threshold_seconds",
+                ),
+                stalled_at=None,
+            )
             logger.info(
                 "TURN_START_MONITORING sid=%s run=%s provider=%s expected=%s "
                 "threshold_seconds=%s",
@@ -1863,6 +1987,13 @@ class TurnManager:
                 run["startup_phase_started_at"] = now
                 run["startup_expected_activity"] = "turn_context"
                 run.pop("stalled_at", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                    startup_phase=run["startup_phase"],
+                    startup_expected_activity="turn_context",
+                    last_activity_kind=activity_kind,
+                    stalled_at=None,
+                )
                 logger.info(
                     "TURN_START_ACCEPTED sid=%s run=%s provider=%s "
                     "next_expected=turn_context recovered_from_stall=%s",
@@ -1879,6 +2010,26 @@ class TurnManager:
                 return False
             run["startup_phase"] = "running"
             run.pop("stalled_at", None)
+            if activity_kind == "recovered_run":
+                # The ONE recovery-classification signal reachable from
+                # inside this module: `run_recovery.py`'s startup
+                # reattachment path (out of this file's edit scope) marks
+                # a reattached run's first activity as "recovered_run",
+                # never fired for a freshly-started run. Sticky for the
+                # projection's overlay (see runs_adapter.py) even after
+                # `startup_phase` moves on to "running" below in this same
+                # mutation — RunPhase.RECONNECTING/UNKNOWN_AFTER_RECOVERY
+                # key off this, not off startup_phase alone.
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_RECOVERY_CLASSIFIED, app_session_id, run_id,
+                    classification="recovered_at_startup",
+                )
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                startup_phase=run["startup_phase"],
+                last_activity_kind=activity_kind,
+                stalled_at=None,
+            )
             logger.info(
                 "TURN_START_ACKNOWLEDGED sid=%s run=%s provider=%s activity=%s "
                 "recovered_from_stall=%s",
@@ -1906,6 +2057,9 @@ class TurnManager:
             if r.get("run_id") == run_id:
                 r["pid"] = pid
                 r.pop("retrying", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_PID_CHANGED, app_session_id, run_id, pid=pid,
+                )
                 self._dbg_runstate(
                     app_session_id, f"set_pid:{run_id[:8]}:{pid}",
                 )
@@ -1927,6 +2081,9 @@ class TurnManager:
         for r in runs:
             if r.get("run_id") == run_id:
                 r.pop("pid", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_PID_CHANGED, app_session_id, run_id, pid=None,
+                )
                 self._dbg_runstate(app_session_id, f"clear_pid:{run_id[:8]}")
                 return
 
@@ -1937,6 +2094,9 @@ class TurnManager:
         for r in runs:
             if r.get("run_id") == run_id:
                 r["retrying"] = True
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_RETRYING, app_session_id, run_id,
+                )
                 self._dbg_runstate(app_session_id, f"retrying:{run_id[:8]}")
                 return
 
@@ -1971,6 +2131,10 @@ class TurnManager:
                         target_message_id,
                         True,
                         r.get("kind"),
+                    )
+                    self._publish_run_state_fact(
+                        _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+                        target_message_id=target_message_id,
                     )
                 return
 
@@ -2777,6 +2941,7 @@ class TurnManager:
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
                     prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
             else:
                 await finish_execution("failed")
@@ -2793,6 +2958,7 @@ class TurnManager:
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
                     prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
 
         except _Cancelled:
@@ -2850,6 +3016,7 @@ class TurnManager:
                     primary_result.get("provider_kind") or frozen_provider_kind
                 ),
                 prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                usage=extract_provider_result_token_usage(primary_result),
             )
 
         except asyncio.CancelledError:
@@ -3001,6 +3168,7 @@ class TurnManager:
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
                     prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
 
         finally:

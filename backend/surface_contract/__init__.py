@@ -7,6 +7,7 @@ from backend.surface_contract.identity import CONTRACT_VERSION
 from backend.surface_contract.provider_config_surface import ProviderConfigSurface
 from backend.surface_contract.runs_surface import RunsSurface
 from backend.surface_contract.session_surface import SessionSurface
+from backend.surface_contract.system_surface import SystemSurface
 
 __all__ = [
     "CONTRACT_VERSION",
@@ -15,4 +16,5 @@ __all__ = [
     "ProviderConfigSurface",
     "RunsSurface",
     "SessionSurface",
+    "SystemSurface",
 ]

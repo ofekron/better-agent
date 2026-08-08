@@ -15,6 +15,9 @@ from backend.surface_contract.nodes import (
     Node,
     NodeKind,
     ResultKind,
+    SubAgentTurnPayload,
+    TargetRef,
+    usage_from_raw,
 )
 
 # Items directly preserved in place by deriveBodyItems (never folded into
@@ -156,6 +159,83 @@ def derive_body(nodes: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv
 def child_manifest(nodes: list[Node]) -> ChildManifest:
     renderable = sum(1 for n in nodes if n.kind not in _NON_RENDERABLE_KINDS)
     return ChildManifest(renderable_child_count=renderable, has_children=bool(nodes))
+
+
+def compaction_child_manifest(children: tuple[Node, ...]) -> ChildManifest:
+    """Every compaction-replay child (`normalize._compaction_replay_
+    children`) is real transcript content — never a structural/anchor
+    node — unlike `child_manifest()`'s turn/explanation-body semantics,
+    which excludes `_NON_RENDERABLE_KINDS` (including TYPED_PROMPT, since
+    THERE it's normally a turn's own anchoring prompt, not renderable
+    content of its own turn). That exclusion doesn't apply to a
+    compaction's children, so nothing is excluded here."""
+    return ChildManifest(renderable_child_count=len(children), has_children=bool(children))
+
+
+def extract_compaction_children(
+    nodes: list[Node],
+) -> tuple[list[Node], dict[NodeId, tuple[Node, ...]]]:
+    """Pulls each COMPACTION node's own replay children (nodes whose
+    `parent_id` already points at a COMPACTION node present in this SAME
+    batch — stamped by `normalize._compaction_replay_children`) out of a
+    turn's flat node list, exactly like `build_subagent_turns` segregates
+    sidechain subtrees: without this, `derive_body`'s Explanation
+    partitioning would flatten them into ordinary VISIBLE sibling body
+    items instead of leaving them hidden-until-expanded under their owning
+    compaction node. Call BEFORE `derive_body`/`build_subagent_turns`,
+    same as that function.
+
+    Returns `(kept, children_by_compaction_id)`: `kept` is `nodes` with
+    every extracted child removed (the compaction nodes themselves stay,
+    unchanged, and flow through `derive_body` as ordinary content exactly
+    as before); `children_by_compaction_id` maps each COMPACTION node_id
+    to its own extracted children, in `(ts, seq)` order. The caller merges
+    these into `index` (the same generic mechanism `build_subagent_turns`'
+    `extra_index` already uses for `children()` to serve) and stamps the
+    compaction node's own `child_manifest` (via `compaction_child_
+    manifest`) once its FINAL Node — after `attach_body_items`, which may
+    leave it top-level or move it inside a synthetic Explanation — is
+    known."""
+    compaction_ids = {n.node_id for n in nodes if n.kind == NodeKind.COMPACTION}
+    if not compaction_ids:
+        return nodes, {}
+    kept: list[Node] = []
+    by_parent: dict[NodeId, list[Node]] = {}
+    for n in nodes:
+        if n.parent_id in compaction_ids:
+            by_parent.setdefault(n.parent_id, []).append(n)
+        else:
+            kept.append(n)
+    return kept, {pid: tuple(_ordered(cs)) for pid, cs in by_parent.items()}
+
+
+def attach_compaction_manifests(nodes: list[Node]) -> list[Node]:
+    """Live/replay delivery variant of the manifest-attach step
+    `_build_turn_view` does via `extract_compaction_children`: the live
+    (`chat_adapter._process_row`) and replay (`chat_adapter._replay`)
+    paths broadcast every node flat, one NodeUpsert per node, with no
+    Explanation partitioning to protect against — so no extraction is
+    needed there; a compaction-replay child's own `parent_id` is already
+    correct and is simply broadcast like any other node. Only the
+    COMPACTION node's own `child_manifest` needs filling in, from whichever
+    of its children are present in THIS SAME batch (a single journal row's
+    produced set, or a whole turn segment's finished set — both always
+    include a compaction row's children alongside it, since they're born
+    from the one row together)."""
+    children_by_parent: dict[NodeId, list[Node]] = {}
+    for n in nodes:
+        if n.parent_id is not None:
+            children_by_parent.setdefault(n.parent_id, []).append(n)
+    if not children_by_parent:
+        return nodes
+    out: list[Node] = []
+    for n in nodes:
+        if n.kind == NodeKind.COMPACTION and n.node_id in children_by_parent:
+            children = tuple(_ordered(children_by_parent[n.node_id]))
+            out.append(replace(n, child_manifest=compaction_child_manifest(children)))
+        else:
+            out.append(n)
+    return out
 
 
 def attach_body_items(
@@ -350,6 +430,160 @@ def build_subagent_turns(
         # separately-computed, differently-ordered `live_nodes` bound).
 
     kept = [n for n in nodes if n.node_id not in sidechain_node_ids] + subagent_nodes
+    return kept, extra_index
+
+
+_WORKER_TURN_NODE_ID_PREFIX = "workerturn:"
+
+# `worker_start` fact's `panel_kind` -> the contract NodeKind it groups
+# into. The `_created` variants (`sub_session_created`/`session_created` —
+# legacy's lighter "just created" panel) map onto the SAME kind as their
+# non-created sibling: no dedicated NodeKind exists for "just created" yet
+# (a real, documented contract gap — no `status`/flag is available on
+# structural kinds to signal it either, see nodes.py's module docstring).
+PANEL_KIND_TO_NODE_KIND: dict[str, NodeKind] = {
+    "worker": NodeKind.WORKER_TURN,
+    "sub_session": NodeKind.SUB_SESSION_TURN,
+    "sub_session_created": NodeKind.SUB_SESSION_TURN,
+    "session": NodeKind.SESSION_TURN,
+    "session_created": NodeKind.SESSION_TURN,
+}
+
+
+def worker_turn_container_id(delegation_id: str) -> NodeId:
+    """The ONE place a WORKER_TURN/SUB_SESSION_TURN/SESSION_TURN
+    container's node_id is derived from its delegation_id — shared by the
+    batch grouping below and chat_adapter's live per-row incremental
+    variant, so both name the SAME container for the SAME delegation."""
+    return f"{_WORKER_TURN_NODE_ID_PREFIX}{delegation_id}"
+
+
+def delegation_id_of(n: Node) -> str | None:
+    if n.kind != NodeKind.WORKER_INTERACTION or n.payload is None:
+        return None
+    delegation_id = n.payload.fact.get("delegation_id")
+    return delegation_id if isinstance(delegation_id, str) and delegation_id else None
+
+
+def build_subagent_panel_container(
+    group: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv: int,
+) -> Node:
+    """Builds (or rebuilds) ONE WORKER_TURN/SUB_SESSION_TURN/SESSION_TURN
+    container from every WORKER_INTERACTION fact journaled so far for a
+    single delegation_id — the SAME pure builder `build_subagent_turns_
+    for_panels` calls once per FINAL group, and chat_adapter's live path
+    re-calls on every new fact for that delegation (recomputing from the
+    accumulated list is simpler, and just as correct as an incremental
+    merge, since one delegation's own fact count is always small).
+
+    `panel_kind`/`worker_description`/`worker_session_id` are read off
+    whichever fact in the group carries them (every `worker_start`/
+    `worker_event`/`worker_complete` producer re-sends `delegation_id`/
+    `worker_session_id` on every fact — `orchestrator._start_team_message_
+    panel`/`_forward_team_message_panel_event`/`_emit_team_message_panel_
+    complete` — so a group that hasn't seen its own `worker_start` fact
+    yet, e.g. mid-stream on the live path, still resolves them). `usage`
+    is real only once a `worker_complete` fact carrying `token_usage` is
+    present in the group — never guessed while a delegation is still
+    running or for a producer that hasn't threaded real usage yet (see
+    `orchestrator.py`'s team-message flow vs. the still-unthreaded
+    Task-tool worker flow, documented in this round's final report).
+    `created` is read off the `worker_start` fact's own `is_new` (only
+    ever present there). `target_ref.turn_id` is read off a `worker_
+    complete` fact's `target_turn_id` (only ever present there — see
+    `orchestrator._team_message_target_turn_id`) — None for a still-
+    running delegation, same "never guessed while running" rule as
+    `usage`. `sidecar_ref` mirrors `worker_session_id` when known: real
+    for a registered worker (`stores/worker_store.py`), an honest
+    terminal "not_found" `Sidecar` via `fetch_sidecar` otherwise — never
+    the perpetual-retry `Rebuilding` a nonexistent-but-plausible ref used
+    to produce."""
+    ordered = _ordered(group)
+    earliest = ordered[0]
+    delegation_id = delegation_id_of(earliest) or ""
+    panel_kind: str | None = None
+    worker_description: str | None = None
+    worker_session_id: str | None = None
+    token_usage_raw: object = None
+    created = False
+    target_turn_id: str | None = None
+    for n in ordered:
+        fact = n.payload.fact
+        if panel_kind is None and isinstance(fact.get("panel_kind"), str):
+            panel_kind = fact["panel_kind"]
+        if worker_description is None and isinstance(fact.get("worker_description"), str):
+            worker_description = fact["worker_description"]
+        if worker_session_id is None and isinstance(fact.get("worker_session_id"), str):
+            worker_session_id = fact["worker_session_id"]
+        if n.payload.fact_kind == "worker_start" and isinstance(fact.get("is_new"), bool):
+            created = fact["is_new"]
+        if n.payload.fact_kind == "worker_complete":
+            if fact.get("token_usage") is not None:
+                token_usage_raw = fact.get("token_usage")
+            if isinstance(fact.get("target_turn_id"), str) and fact["target_turn_id"]:
+                target_turn_id = fact["target_turn_id"]
+
+    kind = PANEL_KIND_TO_NODE_KIND.get(panel_kind or "", NodeKind.WORKER_TURN)
+    container_id = worker_turn_container_id(delegation_id)
+    target_ref = (
+        TargetRef(session_id=worker_session_id, turn_id=target_turn_id)
+        if worker_session_id else None
+    )
+    return Node(
+        cv=cv, node_id=container_id, parent_id=None, turn_id=turn_id, surface_id=surface_id,
+        kind=kind, ts=earliest.ts, seq=earliest.seq, status=None,
+        payload=SubAgentTurnPayload(label=worker_description, created=created),
+        target_ref=target_ref,
+        sidecar_ref=worker_session_id,
+        child_manifest=ChildManifest(renderable_child_count=len(ordered), has_children=True),
+        usage=usage_from_raw(token_usage_raw),
+    )
+
+
+def build_subagent_turns_for_panels(
+    nodes: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv: int,
+) -> tuple[list[Node], dict[NodeId, Node]]:
+    """Batch counterpart to `build_subagent_panel_container` — groups
+    EVERY WORKER_INTERACTION node in `nodes` by its `delegation_id` into
+    one SubAgentTurn-family container each, exactly like
+    `build_subagent_turns` segregates sidechain content: without this,
+    `derive_body`'s Explanation partitioning would scatter one turn's
+    worker/sub_session/session facts as individual ungrouped members
+    instead of nesting them under their own collapsible panel (chat-
+    panel.md: SubAgentTurn is a BodyItem embedding a full nested Turn).
+
+    Call BEFORE `derive_body`/`build_subagent_turns`, same as `extract_
+    compaction_children`. Returns `(kept, extra_index)` with the exact
+    same contract as `build_subagent_turns`: `kept` is `nodes` with every
+    grouped WORKER_INTERACTION node removed and one container node
+    inserted per delegation_id found (`parent_id` unset — stamped by the
+    caller, same convention `derive_body`'s Explanation nodes use);
+    `extra_index` is every removed WORKER_INTERACTION node, `parent_id`
+    stamped to its own container — merge into the turn's index so
+    `children()` serves them, the same generic mechanism Explanation
+    members and subagent-turn descendants already use."""
+    groups: dict[str, list[Node]] = {}
+    for n in nodes:
+        delegation_id = delegation_id_of(n)
+        if delegation_id is None:
+            continue
+        groups.setdefault(delegation_id, []).append(n)
+    if not groups:
+        return nodes, {}
+
+    grouped_node_ids: set[NodeId] = set()
+    extra_index: dict[NodeId, Node] = {}
+    containers: list[Node] = []
+    for delegation_id, group in groups.items():
+        grouped_node_ids.update(n.node_id for n in group)
+        container = build_subagent_panel_container(
+            group, surface_id=surface_id, turn_id=turn_id, cv=cv,
+        )
+        for n in group:
+            extra_index[n.node_id] = replace(n, parent_id=container.node_id)
+        containers.append(container)
+
+    kept = [n for n in nodes if n.node_id not in grouped_node_ids] + containers
     return kept, extra_index
 
 
