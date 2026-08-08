@@ -27,18 +27,12 @@ Six assertions lock the new contract:
    run dir registered AND NO recovery match, produces a msg that
    loads with `isStreaming=False` AND `stopped_at` stamped, so the
    user can Retry — without the deleted `_reap_zombie_streaming`.
-
-Run with:
-    cd backend && .venv/bin/python scripts/test_isstreaming_runner_authority.py
 """
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import json
 import os
-import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -65,10 +59,6 @@ import session_store  # noqa: E402
 # uvicorn/FastAPI startup and is too heavy for these targeted tests.
 # State on this instance is isolated from production.
 coordinator = Coordinator()
-
-
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _seed_session(mode: str = "native") -> tuple[str, str]:
@@ -103,7 +93,7 @@ def _msg(sid: str, msg_id: str) -> dict:
 # ---------------------------------------------------------------------
 # (1) Primary runner add/remove drives isStreaming; worker does not.
 # ---------------------------------------------------------------------
-def test_primary_runner_drives_streaming_worker_does_not() -> bool:
+def test_primary_runner_drives_streaming_worker_does_not():
     sid, asst_id = _seed_session("native")
 
     # Clean slate — turn the seed flag off so we can observe the hook
@@ -133,13 +123,12 @@ def test_primary_runner_drives_streaming_worker_does_not() -> bool:
 
     coordinator.turn_manager.run_state_remove(sid, run_id_worker)
     assert _msg(sid, asst_id).get("isStreaming") is False, "worker remove → still False"
-    return True
 
 
 # ---------------------------------------------------------------------
 # (2) Write path strips isStreaming from disk.
 # ---------------------------------------------------------------------
-def test_isstreaming_stripped_from_disk() -> bool:
+def test_isstreaming_stripped_from_disk():
     sid, asst_id = _seed_session("native")
     # Set isStreaming True in-memory (via the hook), then force a
     # persist by mutating something the manager writes.
@@ -173,13 +162,12 @@ def test_isstreaming_stripped_from_disk() -> bool:
     assert _msg(sid, asst_id).get("isStreaming") is True, (
         "in-memory isStreaming clobbered by write — restore is broken"
     )
-    return True
 
 
 # ---------------------------------------------------------------------
 # (3) Legacy on-disk isStreaming=True → stripped on load + stopped_at stamped.
 # ---------------------------------------------------------------------
-def test_legacy_disk_isstreaming_stripped_and_stopped_stamped() -> bool:
+def test_legacy_disk_isstreaming_stripped_and_stopped_stamped():
     # Build a session on disk with a baked-in isStreaming=True on the
     # last assistant msg, simulating a pre-refactor write.
     root_id = str(uuid.uuid4())
@@ -226,13 +214,12 @@ def test_legacy_disk_isstreaming_stripped_and_stopped_stamped() -> bool:
         "legacy streaming msg did not get stopped_at stamp → Retry "
         "button would not appear"
     )
-    return True
 
 
 # ---------------------------------------------------------------------
 # (4) Recovery flips isStreaming via the hook — NO direct call.
 # ---------------------------------------------------------------------
-async def test_recovery_uses_hook_not_direct_set_streaming() -> bool:
+async def test_recovery_uses_hook_not_direct_set_streaming():
     sid, asst_id = _seed_session("native")
     # Reset to baseline.
     session_manager.set_streaming(sid, asst_id, False)
@@ -263,13 +250,12 @@ async def test_recovery_uses_hook_not_direct_set_streaming() -> bool:
     assert len(calls) == 1, f"expected 1 streaming call, got {len(calls)}: {calls}"
     assert calls[0] == (sid, asst_id, True), f"unexpected call shape: {calls[0]}"
     assert _msg(sid, asst_id).get("isStreaming") is True
-    return True
 
 
 # ---------------------------------------------------------------------
 # (5) Worker AFTER primary completes does not re-flip parent.
 # ---------------------------------------------------------------------
-def test_worker_after_primary_does_not_reflip_parent() -> bool:
+def test_worker_after_primary_does_not_reflip_parent():
     sid, asst_id = _seed_session("native")
     primary_run = str(uuid.uuid4())
     coordinator.turn_manager.run_state_add(
@@ -289,13 +275,12 @@ def test_worker_after_primary_does_not_reflip_parent() -> bool:
         "worker registered after primary done flipped parent back to True — "
         "the allowlist on _maybe_flip_streaming is broken"
     )
-    return True
 
 
 # ---------------------------------------------------------------------
 # (6) Dead-subprocess-no-rundir load yields stopped_at, no reaper.
 # ---------------------------------------------------------------------
-def test_dead_subprocess_loads_stopped_no_reaper() -> bool:
+def test_dead_subprocess_loads_stopped_no_reaper():
     # Simulate a pre-refactor on-disk session whose subprocess died
     # without writing complete.json AND whose run dir is gone (manually
     # deleted, $BETTER_CLAUDE_HOME swap, etc.). Recovery has nothing to
@@ -352,45 +337,3 @@ def test_dead_subprocess_loads_stopped_no_reaper() -> bool:
                     assert state.get("target_message_id") != asst_id
                 except Exception:
                     pass
-    return True
-
-
-TESTS = [
-    ("primary_drives_streaming_worker_does_not", test_primary_runner_drives_streaming_worker_does_not),
-    ("isstreaming_stripped_from_disk", test_isstreaming_stripped_from_disk),
-    ("legacy_disk_isstreaming_stripped_and_stopped", test_legacy_disk_isstreaming_stripped_and_stopped_stamped),
-    ("recovery_uses_hook_not_direct_call", test_recovery_uses_hook_not_direct_set_streaming),
-    ("worker_after_primary_does_not_reflip", test_worker_after_primary_does_not_reflip_parent),
-    ("dead_subprocess_loads_stopped_no_reaper", test_dead_subprocess_loads_stopped_no_reaper),
-]
-
-
-def main_run() -> int:
-    failed = 0
-    try:
-        for name, fn in TESTS:
-            try:
-                if inspect.iscoroutinefunction(fn):
-                    ok = asyncio.run(fn())
-                else:
-                    ok = fn()
-            except Exception as e:
-                ok = False
-                import traceback
-                traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
-                failed += 1
-    finally:
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    print()
-    if failed:
-        print(f"{failed} of {len(TESTS)} test(s) FAILED")
-    else:
-        print(f"all {len(TESTS)} tests passed")
-    return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main_run())

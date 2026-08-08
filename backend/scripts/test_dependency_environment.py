@@ -238,3 +238,16 @@ class TestVerifiedActivePython:
             lambda *a, **k: subprocess.CompletedProcess(a, 0),
         )
         assert de.verified_active_python(tmp_path) == de.python_in(env_dir)
+
+
+class TestActiveRuntimePython:
+    def test_returns_python_inside_active_runtime_env(self, tmp_path) -> None:
+        # The default _make_active_venv interpreter is an executable shell stub
+        # that exits 0, so active_runtime_env's `-c "import sys; sys.exit(0)"`
+        # probe passes end-to-end via a real subprocess.
+        env_dir = _make_active_venv(tmp_path)
+        (env_dir / de.PLAN_MARKER).write_text(
+            json.dumps({"schema_version": 1, "hash": "activated-plan"}),
+            encoding="utf-8",
+        )
+        assert de.active_runtime_python(tmp_path) == de.python_in(env_dir)

@@ -29,7 +29,6 @@ import type { InstallRunWire } from "../adapter/wire";
 
 export type InstallRun = BusEventMap["provider_install_finished"];
 export type InstallLine = InstallRun["lines"][number];
-export type InstallStream = InstallLine["s"];
 
 function mapInstallRunWire(run: InstallRunWire): InstallRun {
   return {
@@ -37,7 +36,7 @@ function mapInstallRunWire(run: InstallRunWire): InstallRun {
     label: run.label,
     command: run.command,
     state: run.state,
-    lines: run.lines.map((line) => ({ s: line.stream as InstallStream, t: line.text })),
+    lines: run.lines.map((line) => ({ s: line.stream as InstallLine["s"], t: line.text })),
     started_at: run.started_at,
     finished_at: run.finished_at,
     returncode: run.returncode,

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import _test_home
+import pytest
 _TMP_HOME = _test_home.isolate_installed("bc-test-extension-iframe-auth-")
 os.environ.pop("BETTER_CLAUDE_TEST_AUTH_BYPASS", None)
 
@@ -94,35 +95,43 @@ def _seed_extension() -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _seed_extension_for_pytest() -> None:
+    # `main_run()` seeds the extension once before the __main__ run; pytest
+    # never calls main_run(), so bridge that setup here or the public-asset
+    # tests hit a store without the fixture extension and 404 instead of 200.
+    _seed_extension()
+
+
 def _client() -> TestClient:
     return TestClient(main.app, client=("127.0.0.1", 50000))
 
 
-def test_frontend_asset_is_public_without_token() -> tuple[bool, str]:
+def test_frontend_asset_is_public_without_token() -> None:
     # Public static asset: served with no credentials at all. This is the
     # security-relevant baseline — the asset is intentionally public, NOT
     # authenticated via any token.
     res = _client().get(_FRONTEND_ASSET)
-    return res.status_code == 200, f"expected 200 (public asset), got {res.status_code}: {res.text}"
+    assert res.status_code == 200, f"expected 200 (public asset), got {res.status_code}: {res.text}"
 
 
-def test_frontend_asset_ignores_query_token() -> tuple[bool, str]:
+def test_frontend_asset_ignores_query_token() -> None:
     # A query token on the public asset changes nothing — it is not honored as
     # auth. The asset serves exactly as it does with no token.
     res = _client().get(f"{_FRONTEND_ASSET}?token={_TOKEN}")
-    return res.status_code == 200, f"expected 200 (token ignored on public asset), got {res.status_code}: {res.text}"
+    assert res.status_code == 200, f"expected 200 (token ignored on public asset), got {res.status_code}: {res.text}"
 
 
-def test_other_api_query_token_rejected() -> tuple[bool, str]:
+def test_other_api_query_token_rejected() -> None:
     # Protected APIs MUST reject query-param tokens — HTTP auth never reads the
     # query string. This is the core guard against URL-token authentication.
     res = _client().get(f"/api/extensions?token={_TOKEN}")
-    return res.status_code == 401, f"expected 401, got {res.status_code}: {res.text}"
+    assert res.status_code == 401, f"expected 401, got {res.status_code}: {res.text}"
 
 
-def test_bogus_query_token_rejected_on_protected_api() -> tuple[bool, str]:
+def test_bogus_query_token_rejected_on_protected_api() -> None:
     res = _client().get("/api/extensions?token=not-real")
-    return res.status_code == 401, f"expected 401, got {res.status_code}: {res.text}"
+    assert res.status_code == 401, f"expected 401, got {res.status_code}: {res.text}"
 
 
 TESTS = [
@@ -138,12 +147,12 @@ def main_run() -> int:
     failed = 0
     for name, fn in TESTS:
         try:
-            ok, detail = fn()
+            fn()
         except Exception as e:  # noqa: BLE001
-            ok, detail = False, f"exception: {e}"
-        print(f"  {PASS if ok else FAIL} {name}{'' if ok else ' - ' + detail}")
-        if not ok:
+            print(f"  {FAIL} {name} - exception: {e}")
             failed += 1
+        else:
+            print(f"  {PASS} {name}")
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed else f"all {len(TESTS)} tests passed")
     return 1 if failed else 0
 

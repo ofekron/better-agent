@@ -44,6 +44,15 @@ def _reset_headless_state(monkeypatch):
     monkeypatch.setattr(auth_secrets, "_headless_ephemeral_session_secret", None)
 
 
+@pytest.fixture
+def darwin_platform(monkeypatch):
+    """Pin sys.platform to 'darwin' so the subprocess-backed keychain path
+    — the path these tests monkeypatch — is exercised regardless of the host
+    running the suite (Docker Linux container, CI). Without it, the code
+    takes the keyring branch and the subprocess patches never engage."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
 def _check_output_table(table):
     """Build a check_output stub keyed by (service, account).
 
@@ -143,12 +152,12 @@ def test_headless_get_session_secret_ephemeral_then_cached(monkeypatch, capsys):
 # --------------------------------------------------------------------------- #
 # _kc_get (darwin path)
 # --------------------------------------------------------------------------- #
-def test_kc_get_darwin_happy(monkeypatch):
+def test_kc_get_darwin_happy(monkeypatch, darwin_platform):
     monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: "value\n")
     assert auth_secrets._kc_get("better-agent", "username") == "value"
 
 
-def test_kc_get_darwin_timeout(monkeypatch):
+def test_kc_get_darwin_timeout(monkeypatch, darwin_platform):
     def _raise(*a, **k):
         raise subprocess.TimeoutExpired(cmd="security", timeout=5)
 
@@ -157,7 +166,7 @@ def test_kc_get_darwin_timeout(monkeypatch):
         auth_secrets._kc_get("better-agent", "username")
 
 
-def test_kc_get_darwin_missing(monkeypatch):
+def test_kc_get_darwin_missing(monkeypatch, darwin_platform):
     def _raise(*a, **k):
         raise subprocess.CalledProcessError(returncode=44, cmd="security")
 
@@ -182,7 +191,7 @@ def test_kc_get_non_darwin_keychain_missing(monkeypatch):
 # --------------------------------------------------------------------------- #
 # _kc (multi-service loop)
 # --------------------------------------------------------------------------- #
-def test_kc_returns_first_success(monkeypatch):
+def test_kc_returns_first_success(monkeypatch, darwin_platform):
     services = auth_secrets._services()
     monkeypatch.setattr(
         subprocess, "check_output", _check_output_table({(services[0], "username"): "u1\n"})
@@ -190,7 +199,7 @@ def test_kc_returns_first_success(monkeypatch):
     assert auth_secrets._kc("username") == "u1"
 
 
-def test_kc_falls_through_to_next_service(monkeypatch):
+def test_kc_falls_through_to_next_service(monkeypatch, darwin_platform):
     services = auth_secrets._services()
     table = {
         (services[0], "username"): subprocess.CalledProcessError(44, "security"),
@@ -200,7 +209,7 @@ def test_kc_falls_through_to_next_service(monkeypatch):
     assert auth_secrets._kc("username") == "u2"
 
 
-def test_kc_all_services_fail_raises_last(monkeypatch):
+def test_kc_all_services_fail_raises_last(monkeypatch, darwin_platform):
     services = auth_secrets._services()
     table = {(s, "username"): subprocess.CalledProcessError(44, "security") for s in services}
     monkeypatch.setattr(subprocess, "check_output", _check_output_table(table))
@@ -219,7 +228,7 @@ def _patch_all_accounts(monkeypatch, values):
     monkeypatch.setattr(subprocess, "check_output", _check_output_table(table))
 
 
-def test_get_trio_keychain(monkeypatch):
+def test_get_trio_keychain(monkeypatch, darwin_platform):
     _patch_all_accounts(monkeypatch, {"username": "bob", "password_hash": "H", "session_secret": "S"})
     assert auth_secrets.get_username() == "bob"
     assert auth_secrets.get_password_hash() == "H"
@@ -243,7 +252,7 @@ def test_get_trio_headless(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # read_all_parallel
 # --------------------------------------------------------------------------- #
-def test_read_all_parallel(monkeypatch):
+def test_read_all_parallel(monkeypatch, darwin_platform):
     _patch_all_accounts(monkeypatch, {"username": "p", "password_hash": "PH", "session_secret": "PS"})
     user, ph, ps = auth_secrets.read_all_parallel()
     assert (user, ph, ps) == ("p", "PH", "PS")
@@ -260,12 +269,12 @@ def _run_returning(returncode):
     return _fake
 
 
-def test_account_exists_darwin_found(monkeypatch):
+def test_account_exists_darwin_found(monkeypatch, darwin_platform):
     monkeypatch.setattr(subprocess, "run", _run_returning(0))
     assert auth_secrets._account_exists("username") is True
 
 
-def test_account_exists_darwin_missing(monkeypatch):
+def test_account_exists_darwin_missing(monkeypatch, darwin_platform):
     monkeypatch.setattr(subprocess, "run", _run_returning(44))
     assert auth_secrets._account_exists("username") is False
 
@@ -290,12 +299,12 @@ def test_needs_bootstrap_headless_is_false(monkeypatch):
     assert auth_secrets.needs_bootstrap() is False
 
 
-def test_needs_bootstrap_all_present(monkeypatch):
+def test_needs_bootstrap_all_present(monkeypatch, darwin_platform):
     monkeypatch.setattr(subprocess, "run", _run_returning(0))
     assert auth_secrets.needs_bootstrap() is False
 
 
-def test_needs_bootstrap_some_missing(monkeypatch):
+def test_needs_bootstrap_some_missing(monkeypatch, darwin_platform):
     def _fake(cmd, *args, **kwargs):
         account = _argv_val(cmd, "-a")
         return subprocess.CompletedProcess(cmd, 0 if account == "username" else 44)

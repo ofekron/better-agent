@@ -406,6 +406,35 @@ class Client:
             timeout=timeout,
         )
 
+    def ai_rank(
+        self,
+        kind: str,
+        query: str,
+        candidates: list[dict[str, Any]],
+        max_results: int,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Rank a bounded candidate list via core's generic ai_rank service.
+
+        `kind` must be declared by this extension's manifest under
+        `permissions.ai_rank_kinds` (`{kind: task_key}`); core rejects an
+        undeclared kind with HTTP 403. Returns
+        `{ids, reasoning, error, error_detail?}` -- `error` is one of
+        `None`, `"empty_query"`, `"timeout"`, `"dispatch_failed"`,
+        `"parse_failed"`. Requires `spawn_runs`.
+        """
+        return self._post(
+            "/api/internal/ai-rank",
+            {
+                "kind": kind,
+                "query": query,
+                "candidates": candidates,
+                "max_results": max_results,
+            },
+            timeout=timeout if timeout is not None else _LONG_TIMEOUT,
+        )
+
     # ── extension settings ────────────────────────────────────────────
     def get_settings(self) -> dict[str, Any]:
         """Read this extension's own declared settings (manifest
@@ -1329,6 +1358,43 @@ class Client:
         rejected batch under normal fire-and-forget use — callers that
         care about the outcome can still inspect the returned dict."""
         return self._post("/api/internal/traffic-facts", {"facts": facts}, timeout=timeout)
+
+    def background_work(
+        self,
+        label: str,
+        *,
+        total: int | None = None,
+        unit: str = "",
+        detail: str | None = None,
+        local_id: str | None = None,
+        session_id: str | None = None,
+        dismissible: bool = True,
+    ):
+        """Report long-running work into the user's background work stack.
+
+            with client.background_work("Indexing repo", total=120) as work:
+                work.progress(n)
+
+        Use as a context manager (sync or async): the item finishes as
+        succeeded on clean exit and failed with the exception message
+        otherwise, so it cannot be left spinning. Omit `total` when the work
+        has no countable end — the row is then explicitly indeterminate
+        rather than showing an invented percentage.
+
+        Requires the `background-work.*` capability grants in the manifest.
+        """
+        from better_agent_sdk.background_work import background_work as _start
+
+        return _start(
+            self,
+            label,
+            total=total,
+            unit=unit,
+            detail=detail,
+            local_id=local_id,
+            session_id=session_id,
+            dismissible=dismissible,
+        )
 
     # ── inter-extension calls ─────────────────────────────────────────
     def call_extension(

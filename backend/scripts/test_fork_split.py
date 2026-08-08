@@ -60,6 +60,15 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 def _reset_home() -> None:
     """Wipe the test home + reset session_store/session_manager in-memory
     state between tests so each test runs on a clean slate."""
+    # Drain in-flight background persists + durability commits from the
+    # previous test BEFORE wiping the dir. Otherwise a grouped-durability
+    # commit (on its own thread) can race this rmtree and fail mid-rename
+    # with FileNotFoundError, flaking the whole suite. (A separate
+    # fork-index race from the un-quiesced persist coordinator remains —
+    # see project board / routine memory.)
+    session_manager.flush_pending_persists()
+    if session_store._durability_writer is not None:
+        session_store._durability_writer.drain(timeout=5.0)
     sessions_dir = Path(_TMP_HOME) / "sessions"
     for _ in range(5):
         if not sessions_dir.exists():
@@ -714,9 +723,10 @@ def test_broadcaster_maps_created_to_session_created() -> bool:
 
 def test_broadcaster_maps_selectors_set_to_metadata_patch() -> bool:
     """DIV-4 regression: a `kind:selectors_set` change MUST produce a
-    `session_metadata_updated` WS frame carrying the model/cwd patch
-    and `originated_by` from `client_id` so the originating tab skips
-    its own echo."""
+    `session_metadata_updated` WS frame carrying the model/cwd patch and
+    `originated_by` from `client_id` so the originating tab skips its own
+    echo. The patch also carries `selectors_seq` (monotonic model-drift
+    counter, commit a5e4cbd05) so adopting tabs can order stale picks."""
     _reset_home()
     from session_ws_broadcaster import SessionWSBroadcaster
     captured: list[dict] = []
@@ -755,13 +765,13 @@ def test_broadcaster_maps_selectors_set_to_metadata_patch() -> bool:
     ok1 = (
         f1["type"] == "session_metadata_updated"
         and f1["data"]["session_id"] == "sid-A"
-        and f1["data"]["patch"] == {"model": "claude-opus-4-7[1m]"}
+        and f1["data"]["patch"] == {"model": "claude-opus-4-7[1m]", "selectors_seq": 0}
         and f1["data"]["originated_by"] == "tab-1"
     )
     ok2 = (
         f2["type"] == "session_metadata_updated"
         and f2["data"]["session_id"] == "sid-B"
-        and f2["data"]["patch"] == {"cwd": "/tmp/proj"}
+        and f2["data"]["patch"] == {"cwd": "/tmp/proj", "selectors_seq": 0}
         and f2["data"]["originated_by"] is None
     )
     ok = ok1 and ok2

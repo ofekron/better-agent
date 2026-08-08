@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from collections import defaultdict, deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,6 +162,54 @@ def test_verify_token_ignores_payload_without_username(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# identify_request — session user first, bearer identity as fallback
+# ---------------------------------------------------------------------------
+
+_NO_BEARER = object()
+
+
+class _FakeRequest:
+    """Minimal stand-in for a Starlette Request over only the two attributes
+    identify_request reads: `scope` (membership-tested for "session") and
+    `session` (a dict with `.get("user")`). `state.bearer_user` is set only
+    when the auth gate resolved a bearer identity for the request."""
+
+    def __init__(self, session=None, session_in_scope=True, bearer_user=_NO_BEARER):
+        self.scope = {"session": session} if session_in_scope else {}
+        self.session = session if session is not None else {}
+        self.state = (
+            SimpleNamespace()
+            if bearer_user is _NO_BEARER
+            else SimpleNamespace(bearer_user=bearer_user)
+        )
+
+
+def test_identify_request_prefers_session_user():
+    user = {"username": "alice"}
+    req = _FakeRequest(session={"user": user})
+    assert auth.identify_request(req) is user
+
+
+def test_identify_request_falls_back_to_bearer_when_no_session_user():
+    bearer = {"username": "bob"}
+    # Session is in scope but carries no user -> bearer identity wins.
+    req = _FakeRequest(session={}, bearer_user=bearer)
+    assert auth.identify_request(req) is bearer
+
+
+def test_identify_request_uses_bearer_when_no_session_in_scope():
+    bearer = {"username": "carol"}
+    req = _FakeRequest(session_in_scope=False, bearer_user=bearer)
+    assert auth.identify_request(req) is bearer
+
+
+def test_identify_request_returns_none_without_any_identity():
+    # No session user and no resolved bearer -> honest anonymous answer.
+    req = _FakeRequest(session={})
+    assert auth.identify_request(req) is None
+
+
+# ---------------------------------------------------------------------------
 # Constant-time username compare
 # ---------------------------------------------------------------------------
 
@@ -250,8 +300,6 @@ def test_rate_limit_pops_stale_attempts_for_same_ip(monkeypatch):
     once-per-window prune drops the whole entry first)."""
     clock = _FakeClock(10_000.0)
     monkeypatch.setattr(auth, "time", type("_T", (), {"monotonic": clock}))
-    from collections import defaultdict, deque
-
     monkeypatch.setattr(auth, "_rl_attempts", defaultdict(deque))
     monkeypatch.setattr(auth, "_rl_last_sweep", 0.0)
     ip = "203.0.113.7"
@@ -267,6 +315,52 @@ def test_rate_limit_pops_stale_attempts_for_same_ip(monkeypatch):
     assert auth.rate_limit_check(ip) is True
     assert auth._rl_attempts[ip][0] == 10_300.0
     assert auth._rl_attempts[ip][-1] == 10_400.0
+
+
+def test_rate_limit_prune_drops_stale_and_empty_entries(monkeypatch):
+    """The once-per-window sweep (`_rl_prune_stale`) must drop IPs whose last
+    attempt aged out (dq[-1] < cutoff) AND empty deques, while leaving a fresh
+    entry untouched. Seed all three, force the sweep, assert only the fresh
+    entry survives."""
+    clock = _FakeClock(10_000.0)
+    monkeypatch.setattr(auth, "time", type("_T", (), {"monotonic": clock}))
+    monkeypatch.setattr(auth, "_rl_attempts", defaultdict(deque))
+    monkeypatch.setattr(auth, "_rl_last_sweep", 0.0)  # now - 0 >= window -> sweep
+    # stale: last attempt @9500 is older than cutoff (10000-300=9700)
+    auth._rl_attempts["stale-ip"].append(9_500.0)
+    # empty deque (an entry fully popped on a prior check)
+    _ = auth._rl_attempts["empty-ip"]
+    # fresh: last attempt within the window -> must survive
+    auth._rl_attempts["fresh-ip"].append(9_800.0)
+    assert auth.rate_limit_check("caller-ip") is True
+    assert "stale-ip" not in auth._rl_attempts
+    assert "empty-ip" not in auth._rl_attempts
+    assert "fresh-ip" in auth._rl_attempts
+
+
+def test_rate_limit_locks_out_after_max_within_window(monkeypatch):
+    clock = _FakeClock(10_000.0)
+    monkeypatch.setattr(auth, "time", type("_T", (), {"monotonic": clock}))
+    monkeypatch.setattr(auth, "_rl_attempts", defaultdict(deque))
+    monkeypatch.setattr(auth, "_rl_last_sweep", clock())  # no mid-test sweep
+    ip = "198.51.100.5"
+    for _ in range(auth._RL_MAX):
+        assert auth.rate_limit_check(ip) is True
+    # One past the budget -> refused, and the deque does not keep growing.
+    assert auth.rate_limit_check(ip) is False
+    assert len(auth._rl_attempts[ip]) == auth._RL_MAX
+
+
+def test_rate_limit_reset_clears_ip_history(monkeypatch):
+    clock = _FakeClock(10_000.0)
+    monkeypatch.setattr(auth, "time", type("_T", (), {"monotonic": clock}))
+    monkeypatch.setattr(auth, "_rl_attempts", defaultdict(deque))
+    monkeypatch.setattr(auth, "_rl_last_sweep", clock())
+    ip = "198.51.100.9"
+    auth.rate_limit_check(ip)
+    assert ip in auth._rl_attempts
+    auth.rate_limit_reset(ip)
+    assert ip not in auth._rl_attempts
 
 
 if __name__ == "__main__":

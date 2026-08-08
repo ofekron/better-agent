@@ -36,42 +36,36 @@ def _run(body: str) -> tuple[str, str]:
     return home, proc.stderr
 
 
-def test_isolate_home_removed_at_exit() -> bool:
+def test_isolate_home_removed_at_exit() -> None:
     home, stderr = _run('print("HOME=" + _test_home.isolate("ba-cleanup-isolate-"))')
-    ok = bool(home) and not Path(home).exists()
-    print(f"{PASS if ok else FAIL} isolate() home is gone after the process exits")
-    if not ok:
-        print(f"  home={home!r} exists={bool(home) and Path(home).exists()} stderr={stderr[-400:]}")
-    return ok
+    assert bool(home) and not Path(home).exists(), \
+        f"home={home!r} exists={bool(home) and Path(home).exists()} stderr={stderr[-400:]}"
+    print(f"{PASS} isolate() home is gone after the process exits")
 
 
-def test_acquired_home_removed_at_exit() -> bool:
+def test_acquired_home_removed_at_exit() -> None:
     home, stderr = _run(
         'h = _test_home.TestHome.acquire("ba-cleanup-acquire-")\n'
         'print("HOME=" + h.path)'
     )
-    ok = bool(home) and not Path(home).exists()
-    print(f"{PASS if ok else FAIL} an unreleased TestHome is gone after the process exits")
-    if not ok:
-        print(f"  home={home!r} stderr={stderr[-400:]}")
-    return ok
+    assert bool(home) and not Path(home).exists(), \
+        f"home={home!r} stderr={stderr[-400:]}"
+    print(f"{PASS} an unreleased TestHome is gone after the process exits")
 
 
-def test_explicit_release_is_not_double_deleted() -> bool:
+def test_explicit_release_is_not_double_deleted() -> None:
     """release() then exit must stay quiet — the hook runs on a released handle."""
     home, stderr = _run(
         'h = _test_home.TestHome.acquire("ba-cleanup-release-")\n'
         'print("HOME=" + h.path)\n'
         'h.release()'
     )
-    ok = bool(home) and not Path(home).exists() and "Traceback" not in stderr
-    print(f"{PASS if ok else FAIL} explicit release() leaves the exit hook harmless")
-    if not ok:
-        print(f"  home={home!r} stderr={stderr[-400:]}")
-    return ok
+    assert bool(home) and not Path(home).exists() and "Traceback" not in stderr, \
+        f"home={home!r} stderr={stderr[-400:]}"
+    print(f"{PASS} explicit release() leaves the exit hook harmless")
 
 
-def test_writes_land_in_the_home_before_cleanup() -> bool:
+def test_writes_land_in_the_home_before_cleanup() -> None:
     """Guards against a hook that fires early: the home must be usable
     for the whole run, and only then removed."""
     home, stderr = _run(
@@ -82,11 +76,9 @@ def test_writes_land_in_the_home_before_cleanup() -> bool:
         'p.write_text("x", encoding="utf-8")\n'
         'assert p.is_file()'
     )
-    ok = bool(home) and not Path(home).exists() and "Traceback" not in stderr
-    print(f"{PASS if ok else FAIL} the home stays writable until exit, then is removed")
-    if not ok:
-        print(f"  home={home!r} stderr={stderr[-400:]}")
-    return ok
+    assert bool(home) and not Path(home).exists() and "Traceback" not in stderr, \
+        f"home={home!r} stderr={stderr[-400:]}"
+    print(f"{PASS} the home stays writable until exit, then is removed")
 
 
 def main() -> int:
@@ -96,9 +88,18 @@ def main() -> int:
         test_explicit_release_is_not_double_deleted,
         test_writes_land_in_the_home_before_cleanup,
     ]
-    results = [t() for t in tests]
-    failed = results.count(False)
-    print(f"\n{len(results) - failed} of {len(results)} passed")
+    failed = 0
+    for t in tests:
+        try:
+            t()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL} {t.__name__}")
+            failed += 1
+            continue
+        print(f"{PASS} {t.__name__}")
+    print(f"\n{len(tests) - failed} of {len(tests)} passed")
     return 1 if failed else 0
 
 

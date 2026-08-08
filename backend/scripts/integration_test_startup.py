@@ -8,7 +8,7 @@ Boots uvicorn under an isolated `BETTER_CLAUDE_HOME` and exercises:
   2. All known startup tasks (`bcfile_migration`, `recover_in_flight`)
      transition to
      `state=done` via BOTH the REST snapshot AND
-     `startup_task_changed` WS frames. (`v3_migration` was deleted
+     `background_work_changed` WS frames. (`v3_migration` was deleted
      by A11 — schema migrations are not supported per CLAUDE.md.)
 
   3. WS connection is opened concurrently with startup so the early
@@ -158,7 +158,7 @@ async def collect_startup_ws_frames(
     stop_event: asyncio.Event,
 ) -> None:
     """Subscribe with `subscribe_global=true` and accumulate every
-    `startup_task_changed` frame into `seen_tasks`. The map keys are
+    `background_work_changed` frame into `seen_tasks`. The map keys are
     task ids, values are the latest task dict received (last-write-
     wins). The `cleared: true` payload empties the map."""
     async with websockets.connect(
@@ -185,16 +185,16 @@ async def collect_startup_ws_frames(
                 ev = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if ev.get("type") != "startup_task_changed":
+            if ev.get("type") != "background_work_changed":
                 continue
             data = ev.get("data") or {}
             if data.get("cleared"):
                 seen_tasks.clear()
                 continue
-            task = data.get("task") or {}
-            tid = task.get("id")
+            item = data.get("item") or {}
+            tid = item.get("id")
             if tid:
-                seen_tasks[tid] = task
+                seen_tasks[tid] = item
 
 
 async def latency_pinger(
@@ -378,20 +378,26 @@ async def scenario_happy_path(ba_home: str, failures: list[str]) -> None:
             # `coordinator.broadcast_global` + cross-thread dispatch
             # path that frontend banner deltas depend on, without
             # depending on startup timing.
-            from startup_tasks import startup_task_registry
-            startup_task_registry.register("__test_synth__", "test.synth")
-            startup_task_registry.mark_done("__test_synth__")
+            import background_work
+            from background_work import background_work_registry
+            synth_id = background_work_registry.report(
+                owner_kind=background_work.OWNER_CORE,
+                owner_id="startup",
+                local_id="__test_synth__",
+                label="test.synth",
+            )
+            background_work_registry.finish(synth_id)
             # Give the loop a tick to schedule + deliver.
             deadline = time.monotonic() + 5.0
             synth_states: list[str] = []
             while time.monotonic() < deadline:
-                synth = seen_tasks.get("__test_synth__")
+                synth = seen_tasks.get(synth_id)
                 if synth is not None:
-                    synth_states.append(synth.get("state") or "?")
-                    if synth.get("state") == "done":
+                    synth_states.append(synth.get("status") or "?")
+                    if synth.get("status") == "succeeded":
                         break
                 await asyncio.sleep(0.05)
-            if not synth_states or synth_states[-1] != "done":
+            if not synth_states or synth_states[-1] != "succeeded":
                 failures.append(
                     f"WS broadcast path missed synthetic task — "
                     f"seen states: {synth_states or 'none'}"

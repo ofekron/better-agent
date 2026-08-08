@@ -3907,9 +3907,7 @@ class SessionManager:
         Caller must NOT already hold `_lock_for_root(root_id)`."""
         with self._lock_for_root(root_id):
             cached = self._roots.pop(root_id, None)
-            with self._persist_coordinator.lock:
-                self._persist_coordinator.pending.pop(root_id, None)
-                self._persist_coordinator.cancel_deadline_unlocked(root_id)
+            self._drop_pending_persist(root_id)
             if cached is not None:
                 self._drop_cached_root_for_reload(root_id, cached)
             self._root_file_checked_at[root_id] = 0.0
@@ -5202,9 +5200,10 @@ class SessionManager:
         # durable source of truth for agent_sid; this event is purely
         # a backend-internal "new sid exists" hook with no WS consumer.
         # Scheduled outside the per-root lock on the running loop;
-        # silently dropped when called from a sync-only context
-        # (which currently never happens for set_agent_sid in
-        # production paths — listed in `cluster_C_inventory`).
+        # silently dropped when called from a sync-only context. The
+        # only production sync-context caller is native_import's
+        # continuation stamp, where the drop is intentional: an
+        # imported session has no live run to tail.
         if sess is not None and agent_sid:
             root_id = self._root_id_for(sid)
             if root_id:

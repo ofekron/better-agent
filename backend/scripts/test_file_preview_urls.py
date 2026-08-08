@@ -55,6 +55,18 @@ def test_verify_fails_closed():
         pass
 
 
+def test_normalize_rejects_relative_paths():
+    # Relative paths (no leading "/") fail closed; the guard exists so a
+    # non-absolute preview path can never reach signature verification.
+    try:
+        file_preview_urls.normalize("relative/site/index.html")
+        raise AssertionError("normalize accepted a relative path")
+    except ValueError:
+        pass
+    # Clean absolute paths survive normalization unchanged.
+    assert file_preview_urls.normalize("/repo/site/index.html") == "/repo/site/index.html"
+
+
 def test_preview_route_serves_signed_tree_only():
     from fastapi.testclient import TestClient
     import main
@@ -102,5 +114,6 @@ def test_preview_route_serves_signed_tree_only():
 if __name__ == "__main__":
     test_mint_and_verify_roundtrip()
     test_verify_fails_closed()
+    test_normalize_rejects_relative_paths()
     test_preview_route_serves_signed_tree_only()
     print("PASS")

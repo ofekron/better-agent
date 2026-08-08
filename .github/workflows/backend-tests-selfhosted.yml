@@ -1,0 +1,144 @@
+# Backend test suite sharded across the owner's self-hosted runners.
+#
+# Security posture (public repo + self-hosted runners):
+# - Triggers are push-to-dev and manual dispatch ONLY — never pull_request,
+#   so code from forks can never execute on these runners.
+# - Repo Actions policy additionally requires approval for all external
+#   contributors' workflow runs (fork-pr-contributor-approval).
+# - checkout uses persist-credentials: false; jobs need no repo secrets.
+name: backend-tests-selfhosted
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+# One run executes at a time; the pending slot always holds only the NEWEST
+# queued push (GitHub replaces a pending run in the same group). No
+# cancel-in-progress: dev receives frequent pushes and cancelling mid-run
+# meant full suites never finished.
+concurrency:
+  group: backend-tests-selfhosted-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  backend-shard:
+    if: github.repository == 'ofekron/better-agent'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: [self-hosted, ba-tests]
+    timeout-minutes: 120
+    # Per-test timeout (scripts/run-backend-tests.sh forwards this to
+    # pytest-timeout as --timeout/--timeout-method=signal; see that script's
+    # header for the rationale). CI-only default — local dev runs stay
+    # timeout-free unless a caller sets BETTER_AGENT_TEST_TIMEOUT themselves.
+    # 120s bounds any single test well below the 120-minute job timeout, so a
+    # hang now fails one test with a thread-stack dump instead of silently
+    # consuming the whole job budget with no diagnostic (the failure mode
+    # that hid the 2026-08-07 shard-0 hang's stack trace and test name).
+    env:
+      BETTER_AGENT_TEST_TIMEOUT: "120"
+    steps:
+      # Belt-and-suspenders for docker/entrypoint-test.sh's own chown-back
+      # (scripts/lib/docker-test-lifecycle.sh's docker_test_chown_env_args):
+      # that only fires on a container that exits normally. A killed/137'd
+      # test container (OOM, timeout-killer, manual cancel) never reaches
+      # its entrypoint's post-pytest chown, so root-owned droppings from a
+      # PAST run can still be sitting in the workspace when THIS job's
+      # checkout runs. Self-heal them here, before checkout touches
+      # anything, using docker itself as the privilege boundary (root
+      # inside a throwaway container, not the unprivileged `runner` user
+      # gaining privileges) — no sudoers changes needed. Linux-only:
+      # macOS/Docker Desktop already remaps bind-mount ownership, so the
+      # `arm64` (owner's Mac) runner in this same matrix never accumulates
+      # root-owned files in the first place.
+      - name: Restore workspace ownership before checkout (self-hosted Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$GITHUB_WORKSPACE" ]; then
+            echo "workspace not present yet; nothing to restore"
+            exit 0
+          fi
+          # Any previously-materialized backend test image works — it's
+          # only used as a throwaway root shell for `chown`, never run as
+          # the app. Skip cleanly if none is cached yet (e.g. this runner's
+          # very first job): a workspace with no prior job in it has
+          # nothing to be poisoned.
+          image="$(docker images --filter 'reference=better-agent-backend-tests:deps-*' --format '{{.Repository}}:{{.Tag}}' | head -n1)"
+          if [ -z "$image" ]; then
+            echo "no cached backend test image yet; nothing to restore"
+            exit 0
+          fi
+          # --entrypoint: the image's default entrypoint is the pytest
+          # wrapper (docker/entrypoint-test.sh), which would swallow these
+          # args as pytest args — override it to run chown directly.
+          docker run --rm --entrypoint chown -v "$GITHUB_WORKSPACE:/w" "$image" \
+            -R "$(id -u):$(id -g)" /w
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Per-runner container resource caps (consumed by
+      # scripts/run-backend-tests.sh via docker_test_resource_cap_args in
+      # scripts/lib/docker-test-lifecycle.sh). Keyed off runner.arch, not
+      # runner.name, so this is independent of the shard matrix and doesn't
+      # need updating if a runner is renamed:
+      #   - arm64 == the owner's Mac. It's also their PRIMARY interactive
+      #     machine (8 cores; has hit load 30+ under concurrent CI+dev
+      #     work), so CI must never be able to starve foreground use. Cap
+      #     at half the box (4 CPUs / 6g) AND halve the cgroup CPU-share
+      #     weight (512 vs docker's default 1024): the weight only costs
+      #     the container CPU when something else is actually contending,
+      #     so an idle Mac still lets the container burst up to its 4-CPU
+      #     ceiling (fast), while a busy interactive session pushes the
+      #     container's share down (invisible).
+      #   - anything else == the Lenovo (WSL2 Ubuntu "TestApe", x64,
+      #     docker-ce inside WSL). It's a dedicated test box, not used
+      #     interactively, so there's no foreground work to protect —
+      #     just leave headroom so the WSL VM (8 cores / 7g total) never
+      #     OOMs the runner process itself: 6 CPUs / 5g, default CPU
+      #     share (no reason to deprioritize on a box nothing competes
+      #     with).
+      - name: Set per-runner backend test container caps
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.arch }}" = "ARM64" ]; then
+            echo "BETTER_AGENT_TEST_CPUS=4" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_CPU_SHARES=512" >> "$GITHUB_ENV"
+          else
+            echo "BETTER_AGENT_TEST_CPUS=6" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_MEMORY=5g" >> "$GITHUB_ENV"
+          fi
+      - name: Run backend test shard ${{ matrix.shard }}/4
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Shard only pytest-collectible files (standalone runner scripts in
+          # backend/scripts/test_*.py have no `def test_` and are exercised by
+          # their own harnesses, not this workflow).
+          cd backend
+          shard_files=$(grep -l "def test_" scripts/test_*.py | sort | awk -v s="${{ matrix.shard }}" 'NR % 4 == s')
+          cd ..
+          echo "shard ${{ matrix.shard }}: $(echo "$shard_files" | wc -l | tr -d ' ') files"
+          # --junitxml feeds phase-3 shard-rebalancing telemetry (per-test
+          # durations); the working-tree run path bind-mounts this checkout
+          # live at /repo, so the relative path lands directly under
+          # backend/ on the host once the container exits.
+          ./scripts/run-backend-tests.sh -- $shard_files -q "--junitxml=junit-shard-${{ matrix.shard }}.xml"
+      # Uploaded even on failure so a shard that fails partway still
+      # contributes the timings it did produce. Short retention: this is
+      # rebalancing input, not a durable record, and artifact storage is
+      # quota-limited.
+      - name: Upload JUnit timings (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-junit-shard-${{ matrix.shard }}
+          path: backend/junit-shard-${{ matrix.shard }}.xml
+          retention-days: 3
+          if-no-files-found: warn

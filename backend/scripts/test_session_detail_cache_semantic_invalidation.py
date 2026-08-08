@@ -59,14 +59,12 @@ def _fresh_session_with_render_event() -> tuple[str, str]:
     return sid, msg_id
 
 
-def test_non_render_event_keeps_detail_cache_valid() -> bool:
+def test_non_render_event_keeps_detail_cache_valid() -> None:
     sid, _msg_id = _fresh_session_with_render_event()
     key = session_detail_api._session_detail_response_cache_key_sync(
         sid, msg_limit=50, exchange_count=None,
     )
-    if key is None:
-        print("  failed to build detail cache key")
-        return False
+    assert key is not None, "failed to build detail cache key"
 
     event_ingester.ingest(
         sid,
@@ -77,22 +75,17 @@ def test_non_render_event_keeps_detail_cache_valid() -> bool:
         msg_id=None,
     )
 
-    if not session_detail_api._session_detail_cached_key_still_current(
+    assert session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
-    ):
-        print("  non-render event invalidated detail cache")
-        return False
-    return True
+    ), "non-render event invalidated detail cache"
 
 
-def test_render_event_invalidates_detail_cache() -> bool:
+def test_render_event_invalidates_detail_cache() -> None:
     sid, msg_id = _fresh_session_with_render_event()
     key = session_detail_api._session_detail_response_cache_key_sync(
         sid, msg_limit=50, exchange_count=None,
     )
-    if key is None:
-        print("  failed to build detail cache key")
-        return False
+    assert key is not None, "failed to build detail cache key"
 
     event_ingester.ingest(
         sid,
@@ -103,15 +96,12 @@ def test_render_event_invalidates_detail_cache() -> bool:
         msg_id=msg_id,
     )
 
-    if session_detail_api._session_detail_cached_key_still_current(
+    assert not session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
-    ):
-        print("  render event did not invalidate detail cache")
-        return False
-    return True
+    ), "render event did not invalidate detail cache"
 
 
-def test_route_populates_reusable_semantic_cache_key() -> bool:
+def test_route_populates_reusable_semantic_cache_key() -> None:
     sid, _msg_id = _fresh_session_with_render_event()
     session_detail_api._session_detail_response_cache.clear()
     session_detail_api._session_detail_response_cache_latest.clear()
@@ -122,12 +112,8 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
         ))
     simple_key = (sid, 50, None)
     key = session_detail_api._session_detail_response_cache_latest.get(simple_key)
-    if not isinstance(key, tuple) or len(key) != 4:
-        print(f"  route stored unexpected cache key: {key!r}")
-        return False
-    if session_detail_api._session_detail_cache_get(key) is None:
-        print("  route did not populate detail response cache")
-        return False
+    assert isinstance(key, tuple) and len(key) == 4, f"route stored unexpected cache key: {key!r}"
+    assert session_detail_api._session_detail_cache_get(key) is not None, "route did not populate detail response cache"
 
     event_ingester.ingest(
         sid,
@@ -137,23 +123,20 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
         source="test",
         msg_id=None,
     )
-    if not session_detail_api._session_detail_cached_key_still_current(
+    assert session_detail_api._session_detail_cached_key_still_current(
         key, sid, msg_limit=50, exchange_count=None,
-    ):
-        print("  route-populated key became stale after non-render event")
-        return False
+    ), "route-populated key became stale after non-render event"
 
     asyncio.run(session_detail_api.get_session(
             http_request(f"/sessions/{sid}"), sid,
             msg_limit=50, exchange_count=None,
         ))
-    if session_detail_api._session_detail_response_cache_latest.get(simple_key) != key:
-        print("  second route read replaced reusable cache key")
-        return False
-    return True
+    assert session_detail_api._session_detail_response_cache_latest.get(simple_key) == key, (
+        "second route read replaced reusable cache key"
+    )
 
 
-def test_last_opened_invalidates_cached_detail_response() -> bool:
+def test_last_opened_invalidates_cached_detail_response() -> None:
     sid, _msg_id = _fresh_session_with_render_event()
     session_detail_api._session_detail_response_cache.clear()
     session_detail_api._session_detail_response_cache_latest.clear()
@@ -164,23 +147,17 @@ def test_last_opened_invalidates_cached_detail_response() -> bool:
             msg_limit=50, exchange_count=None,
         )),
     )
-    if before.get("last_opened_at") is not None:
-        print(f"  fresh session unexpectedly opened: {before.get('last_opened_at')!r}")
-        return False
+    assert before.get("last_opened_at") is None, f"fresh session unexpectedly opened: {before.get('last_opened_at')!r}"
 
     simple_key = (sid, 50, None)
     old_key = session_detail_api._session_detail_response_cache_latest.get(simple_key)
-    if not isinstance(old_key, tuple):
-        print(f"  route stored unexpected cache key: {old_key!r}")
-        return False
+    assert isinstance(old_key, tuple), f"route stored unexpected cache key: {old_key!r}"
 
     opened_at = "2026-07-22T08:01:28.643495"
     session_manager.set_last_opened_at(sid, opened_at, return_session=False)
-    if session_detail_api._session_detail_cached_key_still_current(
+    assert not session_detail_api._session_detail_cached_key_still_current(
         old_key, sid, msg_limit=50, exchange_count=None,
-    ):
-        print("  last-opened mutation did not invalidate detail cache")
-        return False
+    ), "last-opened mutation did not invalidate detail cache"
 
     after = _response_json(
         asyncio.run(session_detail_api.get_session(
@@ -188,10 +165,9 @@ def test_last_opened_invalidates_cached_detail_response() -> bool:
             msg_limit=50, exchange_count=None,
         )),
     )
-    if after.get("last_opened_at") != opened_at:
-        print(f"  detail response returned stale last_opened_at: {after.get('last_opened_at')!r}")
-        return False
-    return True
+    assert after.get("last_opened_at") == opened_at, (
+        f"detail response returned stale last_opened_at: {after.get('last_opened_at')!r}"
+    )
 
 
 def main() -> int:
@@ -201,16 +177,17 @@ def main() -> int:
         ("route populates reusable semantic cache key", test_route_populates_reusable_semantic_cache_key),
         ("last-opened invalidates cached detail response", test_last_opened_invalidates_cached_detail_response),
     ]
-    ok = True
+    failures = 0
     for name, fn in tests:
         try:
-            passed = fn()
+            fn()
         except Exception as exc:
-            passed = False
             print(f"  exception: {exc!r}")
-        print(f"{PASS if passed else FAIL} {name}")
-        ok = ok and passed
-    return 0 if ok else 1
+            print(f"{FAIL} {name}")
+            failures += 1
+        else:
+            print(f"{PASS} {name}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

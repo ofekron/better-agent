@@ -78,7 +78,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 # ─── A: CursorLedgerWorker coalesces and flush_now waits correctly ──
 
-def test_a_worker_coalesces_and_flush_now_waits() -> bool:
+def test_a_worker_coalesces_and_flush_now_waits() -> None:
     w = CursorLedgerWorker(name="test-a-worker")
     try:
         results: list[int] = []
@@ -97,27 +97,24 @@ def test_a_worker_coalesces_and_flush_now_waits() -> bool:
 
         idle_ok = w.flush_now("never-noted-key", timeout=1.0) is True
 
-        ok = (
-            flushed is True
-            and results[0] == 1
-            and results[-1] == 29
-            and len(results) < 29  # proves coalescing actually happened
-            and idle_ok
-        )
         print(
-            f"{PASS if ok else FAIL} A: worker executed {len(results)}/29 "
+            f"A: worker executed {len(results)}/29 "
             f"notes (coalesced), first={results[0] if results else None}, "
             f"last={results[-1] if results else None}, flush_now={flushed}, "
             f"idle key flush_now={idle_ok}"
         )
-        return ok
+        assert flushed is True, "flush_now should return True for a noted key"
+        assert results[0] == 1, f"first write must be 1, got {results[0]!r}"
+        assert results[-1] == 29, f"last write must be 29, got {results[-1]!r}"
+        assert len(results) < 29, f"expected coalescing (<29 writes), got {len(results)}"
+        assert idle_ok, "flush_now on an idle key should return True"
     finally:
         w.stop()
 
 
 # ─── B: spawn_ledger dedup on repeated record_discovered ───────────
 
-def test_b_record_discovered_writes_sid_once() -> bool:
+def test_b_record_discovered_writes_sid_once() -> None:
     sid = "regress-sid-cursor-ledger-worker"
     for _ in range(50):
         spawn_ledger.record_discovered(sid)
@@ -126,17 +123,14 @@ def test_b_record_discovered_writes_sid_once() -> bool:
     lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
     occurrences = sum(1 for ln in lines if ln.strip() == sid)
 
-    ok = occurrences == 1 and sid in spawn_ledger.all_sids()
-    print(
-        f"{PASS if ok else FAIL} B: sid appended {occurrences} time(s) "
-        f"after 50 record_discovered calls (want 1)"
-    )
-    return ok
+    print(f"B: sid appended {occurrences} time(s) after 50 record_discovered calls (want 1)")
+    assert occurrences == 1, f"sid appended {occurrences} time(s), want 1"
+    assert sid in spawn_ledger.all_sids(), "sid missing from all_sids()"
 
 
 # ─── C: note() never blocks the caller, however slow the write is ──
 
-def test_c_note_never_blocks_caller() -> bool:
+def test_c_note_never_blocks_caller() -> None:
     w = CursorLedgerWorker(name="test-c-worker")
     try:
         def very_slow_write() -> None:
@@ -147,19 +141,18 @@ def test_c_note_never_blocks_caller() -> bool:
             w.note(f"run-{i}", very_slow_write)
         elapsed = time.monotonic() - start
 
-        ok = elapsed < 0.5  # 100 note() calls, each would cost 2s if blocking
         print(
-            f"{PASS if ok else FAIL} C: 100 note() calls (each scheduling a "
-            f"2s write) returned in {elapsed:.3f}s (want < 0.5s)"
+            f"C: 100 note() calls (each scheduling a 2s write) returned in "
+            f"{elapsed:.3f}s (want < 0.5s)"
         )
-        return ok
+        assert elapsed < 0.5, f"100 note() calls took {elapsed:.3f}s, want < 0.5s"
     finally:
         w.stop()
 
 
 # ─── D: dispatch stays decoupled from slow persistence end-to-end ──
 
-async def test_d_dispatch_decoupled_from_slow_persist() -> bool:
+async def test_d_dispatch_decoupled_from_slow_persist() -> None:
     events_path = Path(_TMP_HOME) / "cursor_ledger_worker_events.jsonl"
     with events_path.open("w", encoding="utf-8") as f:
         for i in range(20):
@@ -197,13 +190,13 @@ async def test_d_dispatch_decoupled_from_slow_persist() -> bool:
 
         # 20 lines * 0.3s of (simulated) persist latency would need 6s if
         # dispatch were still coupled to it; decoupled, it finishes fast.
-        ok = finished and elapsed < 1.0 and len(dispatched) == 20
         print(
-            f"{PASS if ok else FAIL} D: dispatched {len(dispatched)}/20 lines "
-            f"in {elapsed:.2f}s despite 0.3s simulated persist latency per "
-            f"line (want < 1.0s)"
+            f"D: dispatched {len(dispatched)}/20 lines in {elapsed:.2f}s "
+            f"despite 0.3s simulated persist latency per line (want < 1.0s)"
         )
-        return ok
+        assert finished, "dispatch did not finish within the 1.0s bound"
+        assert elapsed < 1.0, f"dispatch took {elapsed:.2f}s, want < 1.0s"
+        assert len(dispatched) == 20, f"dispatched {len(dispatched)}/20 lines"
     finally:
         w.stop()
 
@@ -216,14 +209,34 @@ async def _wait_for_count(lst: list, target: int) -> None:
 # ─── runner ───────────────────────────────────────────────────────
 
 async def _run() -> int:
-    results = [
-        test_a_worker_coalesces_and_flush_now_waits(),
-        test_b_record_discovered_writes_sid_once(),
-        test_c_note_never_blocks_caller(),
-        await test_d_dispatch_decoupled_from_slow_persist(),
+    sync_cases = [
+        ("A", test_a_worker_coalesces_and_flush_now_waits),
+        ("B", test_b_record_discovered_writes_sid_once),
+        ("C", test_c_note_never_blocks_caller),
     ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
+    passed = 0
+    total = len(sync_cases) + 1
+    for label, fn in sync_cases:
+        try:
+            fn()
+            print(f"{PASS} {label}")
+            passed += 1
+        except AssertionError as exc:
+            print(f"{FAIL} {label}: {exc}")
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL} {label} (unexpected error)")
+    try:
+        await test_d_dispatch_decoupled_from_slow_persist()
+        print(f"{PASS} D")
+        passed += 1
+    except AssertionError as exc:
+        print(f"{FAIL} D: {exc}")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print(f"{FAIL} D (unexpected error)")
     print(f"\n{passed}/{total} subtests passed")
     return 0 if passed == total else 1
 

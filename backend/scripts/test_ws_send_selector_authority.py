@@ -29,7 +29,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_ws_send_uses_backend_owned_session_selectors() -> bool:
+def test_ws_send_uses_backend_owned_session_selectors() -> None:
     captured: list[dict] = []
     original_submit = main.coordinator.submit_prompt_async
     provider = config_store.get_default_provider() or {}
@@ -47,43 +47,36 @@ def test_ws_send_uses_backend_owned_session_selectors() -> bool:
 
     main.coordinator.submit_prompt_async = fake_submit_prompt_async
     try:
-        with TestClient(main.app, client=("127.0.0.1", 50000)) as client:
-            authenticate_client(client)
-            token = auth.create_token("test")
-            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
-                ws.send_json({
-                    "type": "send_message",
-                    "app_session_id": session["id"],
-                    "prompt": "use authoritative selectors",
-                    "model": "frontend-stale-model",
-                    "cwd": "/tmp/frontend-stale",
-                    "orchestration_mode": "team",
-                    "client_id": "selector-authority-client",
-                })
-                for _ in range(40):
-                    if captured:
-                        break
-                    time.sleep(0.05)
+        client = TestClient(main.app, client=("127.0.0.1", 50000))
+        authenticate_client(client)
+        token = auth.create_token("test")
+        with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+            ws.send_json({
+                "type": "send_message",
+                "app_session_id": session["id"],
+                "prompt": "use authoritative selectors",
+                "model": "frontend-stale-model",
+                "cwd": "/tmp/frontend-stale",
+                "orchestration_mode": "team",
+                "client_id": "selector-authority-client",
+            })
+            for _ in range(40):
+                if captured:
+                    break
+                time.sleep(0.05)
     finally:
         main.coordinator.submit_prompt_async = original_submit
 
-    if not captured:
-        print("  submit_prompt_async was not called")
-        return False
+    assert captured, "submit_prompt_async was not called"
     params = captured[0]
-    if params.get("model") != "backend-model":
-        print(f"  model came from frontend: {params.get('model')!r}")
-        return False
-    if params.get("cwd") != "/tmp/backend-owned":
-        print(f"  cwd came from frontend: {params.get('cwd')!r}")
-        return False
-    if params.get("orchestration_mode") != "native":
-        print(f"  orchestration_mode came from frontend: {params.get('orchestration_mode')!r}")
-        return False
-    return True
+    assert params.get("model") == "backend-model", f"model came from frontend: {params.get('model')!r}"
+    assert params.get("cwd") == "/tmp/backend-owned", f"cwd came from frontend: {params.get('cwd')!r}"
+    assert params.get("orchestration_mode") == "native", (
+        f"orchestration_mode came from frontend: {params.get('orchestration_mode')!r}"
+    )
 
 
-def test_ws_send_forwards_disallowed_tools() -> bool:
+def test_ws_send_forwards_disallowed_tools() -> None:
     captured: list[dict] = []
     original_submit = main.coordinator.submit_prompt_async
     provider = config_store.get_default_provider() or {}
@@ -101,62 +94,50 @@ def test_ws_send_forwards_disallowed_tools() -> bool:
 
     main.coordinator.submit_prompt_async = fake_submit_prompt_async
     try:
-        with TestClient(main.app, client=("127.0.0.1", 50001)) as client:
-            authenticate_client(client)
-            token = auth.create_token("test")
-            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
-                ws.send_json({
-                    "type": "send_message",
-                    "app_session_id": session["id"],
-                    "prompt": "restricted turn",
-                    "model": "backend-model",
-                    "cwd": "/tmp/disallowed-tools",
-                    "orchestration_mode": "native",
-                    "client_id": "disallowed-tools-client",
-                    "disallowed_tools": [" Bash ", "Edit"],
-                })
-                for _ in range(40):
-                    if captured:
-                        break
-                    time.sleep(0.05)
+        client = TestClient(main.app, client=("127.0.0.1", 50001))
+        authenticate_client(client)
+        token = auth.create_token("test")
+        with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+            ws.send_json({
+                "type": "send_message",
+                "app_session_id": session["id"],
+                "prompt": "restricted turn",
+                "model": "backend-model",
+                "cwd": "/tmp/disallowed-tools",
+                "orchestration_mode": "native",
+                "client_id": "disallowed-tools-client",
+                "disallowed_tools": [" Bash ", "Edit"],
+            })
+            for _ in range(40):
+                if captured:
+                    break
+                time.sleep(0.05)
     finally:
         main.coordinator.submit_prompt_async = original_submit
 
-    if not captured:
-        print("  submit_prompt_async was not called")
-        return False
-    if captured[0].get("disallowed_tools") != ["Bash", "Edit"]:
-        print(f"  disallowed_tools not forwarded: {captured[0].get('disallowed_tools')!r}")
-        return False
-    return True
+    assert captured, "submit_prompt_async was not called"
+    assert captured[0].get("disallowed_tools") == ["Bash", "Edit"], (
+        f"disallowed_tools not forwarded: {captured[0].get('disallowed_tools')!r}"
+    )
 
 
-def test_ws_disallowed_tools_validation() -> bool:
-    if session_detail_api._parse_ws_disallowed_tools(None) is not None:
-        print("  None should stay None")
-        return False
-    if session_detail_api._parse_ws_disallowed_tools([" Bash ", "Edit"]) != ["Bash", "Edit"]:
-        print("  valid entries should be trimmed")
-        return False
+def test_ws_disallowed_tools_validation() -> None:
+    assert session_detail_api._parse_ws_disallowed_tools(None) is None, "None should stay None"
+    assert session_detail_api._parse_ws_disallowed_tools([" Bash ", "Edit"]) == ["Bash", "Edit"], (
+        "valid entries should be trimmed"
+    )
     try:
         session_detail_api._parse_ws_disallowed_tools("Bash")
     except ValueError as e:
-        if str(e) != "disallowed_tools must be an array":
-            print(f"  unexpected scalar error: {e}")
-            return False
+        assert str(e) == "disallowed_tools must be an array", f"unexpected scalar error: {e}"
     else:
-        print("  scalar input should be rejected")
-        return False
+        raise AssertionError("scalar input should be rejected")
     try:
         session_detail_api._parse_ws_disallowed_tools([""])
     except ValueError as e:
-        if str(e) != "disallowed_tools entries must be non-empty strings":
-            print(f"  unexpected entry error: {e}")
-            return False
+        assert str(e) == "disallowed_tools entries must be non-empty strings", f"unexpected entry error: {e}"
     else:
-        print("  empty entries should be rejected")
-        return False
-    return True
+        raise AssertionError("empty entries should be rejected")
 
 
 def main_run() -> int:
@@ -168,15 +149,15 @@ def main_run() -> int:
     failed = 0
     for name, fn in tests:
         try:
-            ok = fn()
+            fn()
         except Exception as e:
-            ok = False
+            failed += 1
             import traceback
             traceback.print_exc()
             print(f"  exception: {e}")
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
-            failed += 1
+            print(f"{FAIL}  {name}")
+            continue
+        print(f"{PASS}  {name}")
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 1 if failed else 0
 

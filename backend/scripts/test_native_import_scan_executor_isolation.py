@@ -69,7 +69,7 @@ async def _unrelated_default_pool_latency() -> float:
     return time.monotonic() - start
 
 
-async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> bool:
+async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> None:
     loop = asyncio.get_running_loop()
     workers = native_import._SCAN_EXECUTOR._max_workers
     started = threading.Barrier(workers + 1)
@@ -99,10 +99,9 @@ async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> 
         f"{elapsed:.3f}s while {workers} blocked tasks saturated "
         f"native_import._SCAN_EXECUTOR ({workers} workers) (want < 0.5s)"
     )
-    return True
 
 
-async def test_b_count_native_sessions_async_uses_dedicated_executor() -> bool:
+async def test_b_count_native_sessions_async_uses_dedicated_executor() -> None:
     captured: dict[str, str] = {}
     original = native_import.count_native_sessions
 
@@ -123,18 +122,17 @@ async def test_b_count_native_sessions_async_uses_dedicated_executor() -> bool:
         f"{PASS} B: count_native_sessions_async ran on "
         f"thread '{thread_name}' (want prefix 'native-import-scan')"
     )
-    return True
 
 
 async def _run() -> int:
-    results = [
-        await test_a_native_import_scan_saturation_does_not_block_default_pool(),
-        await test_b_count_native_sessions_async_uses_dedicated_executor(),
+    tests = [
+        test_a_native_import_scan_saturation_does_not_block_default_pool,
+        test_b_count_native_sessions_async_uses_dedicated_executor,
     ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{total} subtests passed")
-    return 0 if passed == total else 1
+    for fn in tests:
+        await fn()
+    print(f"\n{len(tests)}/{len(tests)} subtests passed")
+    return 0
 
 
 def main() -> int:

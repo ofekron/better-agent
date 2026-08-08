@@ -2998,8 +2998,9 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     cache_end = source.index("def _shutdown_kill_runners_flag()", cache_start)
     cache_source = source[cache_start:cache_end]
     assert "tuple[float, bytes, tuple[int, int, int]]" in source
-    assert "return _json_response_maybe_gzip(cached[1], accept_encoding)" in cache_source
-    assert "json.dumps(" in cache_source
+    assert "return await gzip_response_off_loop(cached[1], accept_encoding)" in cache_source
+    assert "await session_list_path.run(" in cache_source
+    assert "_serialize_response," in cache_source
     assert "copy.deepcopy" not in cache_source
     assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
     assert "def _sessions_list_transient_fingerprint(" not in source
@@ -3055,7 +3056,7 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
-    assert "cached_response = session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
+    assert "cached_response = await session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
     assert "cache_response = not (" not in route_source
     assert "search_query" in cache_source
     assert "\n        search,\n" not in cache_source
@@ -3071,7 +3072,7 @@ def test_session_summaries_response_cache_precedes_lookup() -> None:
     route_start = source.index("@app.get(\"/api/sessions/summaries\")")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/stats\")", route_start)
     route_source = source[route_start:route_end]
-    cache_call = "cached_response = session_list_cache._session_summaries_cache_get(cache_key, accept_encoding)"
+    cache_call = "cached_response = await session_list_cache._session_summaries_cache_get(cache_key, accept_encoding)"
     assert cache_call in route_source
     assert route_source.index(cache_call) < route_source.index(
         "_local_session_summaries_by_ids"
@@ -3370,8 +3371,8 @@ def test_session_detail_has_split_perf_timers() -> None:
     assert "_session_event_meta(" not in miss_cache_source
     assert "_session_event_file_fingerprint(" not in miss_cache_source
     assert "content = await _session_detail_cache_put_async(cache_key, tree)" in route_source
-    assert "content = (await asyncio.to_thread(\n            json.dumps" in route_source
-    assert "return await asyncio.to_thread(\n        session_list_cache._json_response_maybe_gzip" in route_source
+    assert "return await session_list_cache.json_response_off_loop(" in route_source
+    assert "return await session_list_cache.gzip_response_off_loop(" in route_source
     cache_start = source.index("async def _session_detail_cache_put_async(")
     cache_end = source.index("def _session_detail_simple_cache_key_from_full(", cache_start)
     cache_source = source[cache_start:cache_end]
@@ -4054,7 +4055,7 @@ def test_connected_session_list_defers_cold_sidebar_projections() -> None:
     assert route_source.index("sessions.list.projected_first_page_merge") < route_source.index(
         'with perf.timed("sessions.list.filter_sort")'
     )
-    assert "_json_response_maybe_gzip(\n                    json.dumps(" in route_source
+    assert "return await session_list_cache.json_response_off_loop(" in route_source
 
 
 def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
@@ -4126,7 +4127,7 @@ def test_session_search_uses_bounded_candidate_window() -> None:
     assert "content_limit=max(offset + limit, 1)" not in route_source
     assert "cache_response = not (" not in route_source
     assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
-    assert "cached_response = session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
+    assert "cached_response = await session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)" in route_source
     assert "sessions.list.search_local_page.worker" in route_source
     assert route_source.index("sessions.list.search_local_page.worker") < route_source.index(
         "with perf.timed(\"sessions.list.remote\")"
@@ -4838,6 +4839,57 @@ def test_model_refresh_due_discovery_does_not_block_event_loop() -> None:
         models._due_provider_ids = real_due
 
 
+def test_session_response_serialization_runs_off_loop() -> None:
+    """Large session-list/detail JSON responses must serialize and gzip on a
+    worker thread, never on the event-loop thread (2026-08-08 incident:
+    177s loop stall inside fastapi jsonable_encoder and sync dumps+gzip)."""
+    source = _api_source()
+    cache_source = (ROOT / "session_list_cache.py").read_text(encoding="utf-8")
+    assert "async def json_response_off_loop(" in cache_source
+    assert "async def gzip_response_off_loop(" in cache_source
+    assert "_content, response = await executor.run(" in cache_source
+    for helper in (
+        "async def _sessions_list_response_maybe_cache(",
+        "async def _sessions_list_cache_get(",
+        "async def _sessions_list_cache_put(",
+        "async def _session_summaries_cache_get(",
+        "async def _session_summaries_cache_put(",
+    ):
+        assert helper in cache_source, helper
+    # The only json.dumps in the module lives in the worker-side serializer.
+    serializer_start = cache_source.index("def _serialize_response(")
+    serializer_end = cache_source.index("async def json_response_off_loop(")
+    assert cache_source.count("json.dumps(") == 1
+    assert "json.dumps(" in cache_source[serializer_start:serializer_end]
+    # Detail endpoints return pre-serialized responses, not bare dicts that
+    # FastAPI would jsonable_encoder-encode on the loop.
+    for route_marker, end_marker in (
+        (
+            '@app.get("/api/sessions/{session_id}/runs/{run_id}/details")',
+            '@app.post("/api/sessions/{session_id}/stop")',
+        ),
+        (
+            '@app.get("/api/sessions/{session_id}/details")',
+            '@app.get("/api/sessions/{session_id}/changes")',
+        ),
+        (
+            '@app.get("/api/sessions/{session_id}/messages/{message_id}/events")',
+            "def _resolve_session_node_id(",
+        ),
+    ):
+        start = source.index(route_marker)
+        end = source.index(end_marker, start)
+        span = source[start:end]
+        assert "return await session_list_cache.json_response_off_loop(" in span, route_marker
+        assert "executor=session_detail_path," in span, route_marker
+    # The sessions-list route never serializes inline on the loop.
+    route_start = source.index('@app.get("/api/sessions")')
+    route_end = source.index('@app.post("/api/sessions/search-content")', route_start)
+    route_source = source[route_start:route_end]
+    assert "json.dumps(" not in route_source
+    assert "session_list_cache._json_response_maybe_gzip(" not in route_source
+
+
 if __name__ == "__main__":
     test_model_refresh_credential_lookup_does_not_block_event_loop()
     test_model_refresh_cache_commit_does_not_block_event_loop()
@@ -4980,4 +5032,5 @@ if __name__ == "__main__":
     test_ba_home_memoizes_resolution_off_loop()
     test_provider_start_run_is_off_loop_everywhere()
     test_startup_extension_package_resolution_stays_off_loop()
+    test_session_response_serialization_runs_off_loop()
     print("PASS event loop blocking regressions")

@@ -42,7 +42,6 @@ import run_recovery  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
 
 pytestmark = pytest.mark.anyio
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 _BOOTSTRAP_ERROR = (
     "runtime bootstrap unavailable before the turn started (backend was "
@@ -133,25 +132,22 @@ def _msg(sid: str, msg_id: str) -> dict:
     )
 
 
-async def test_never_started_run_auto_retries() -> bool:
+async def test_never_started_run_auto_retries() -> None:
     sid, asst_id = _seed_session()
     run_id = _seed_never_started_run(sid, asst_id)
     recorder = await _recover_with_recorder()
-    if len(recorder.calls) != 1:
-        print(f"  expected 1 retry call, got {len(recorder.calls)}")
-        return False
+    assert len(recorder.calls) == 1, (
+        f"expected 1 retry call, got {len(recorder.calls)}"
+    )
     call = recorder.calls[0]
-    if call.get("msg_id") != asst_id:
-        print(f"  retry targeted {call.get('msg_id')!r}, want {asst_id!r}")
-        return False
+    assert call.get("msg_id") == asst_id, (
+        f"retry targeted {call.get('msg_id')!r}, want {asst_id!r}"
+    )
     marker = _runs_root() / run_id / "reconciled.marker"
-    if not marker.exists():
-        print("  old run not reconciled after retry handoff")
-        return False
-    return True
+    assert marker.exists(), "old run not reconciled after retry handoff"
 
 
-async def test_newer_turn_blocks_auto_retry() -> bool:
+async def test_newer_turn_blocks_auto_retry() -> None:
     sid, asst_id = _seed_session()
     run_id = _seed_never_started_run(sid, asst_id)
     # User moved on: a newer user+assistant pair exists.
@@ -163,54 +159,54 @@ async def test_newer_turn_blocks_auto_retry() -> bool:
     newer_asst = get_strategy("native").build_assistant_scaffold()
     session_manager.append_assistant_msg(sid, newer_asst)
     recorder = await _recover_with_recorder()
-    if recorder.calls:
-        print(f"  retry fired for a non-latest target: {len(recorder.calls)}")
-        return False
-    if not (_runs_root() / run_id / "reconciled.marker").exists():
-        print("  non-latest cold run should still be reconciled")
-        return False
-    return True
+    assert not recorder.calls, (
+        f"retry fired for a non-latest target: {len(recorder.calls)}"
+    )
+    assert (_runs_root() / run_id / "reconciled.marker").exists(), (
+        "non-latest cold run should still be reconciled"
+    )
 
 
-async def test_cancelled_run_blocks_auto_retry() -> bool:
+async def test_cancelled_run_blocks_auto_retry() -> None:
     sid, asst_id = _seed_session()
     _seed_never_started_run(sid, asst_id, cancelled=True)
     recorder = await _recover_with_recorder()
-    if recorder.calls:
-        print(f"  retry fired for a cancelled run: {len(recorder.calls)}")
-        return False
-    return True
+    assert not recorder.calls, (
+        f"retry fired for a cancelled run: {len(recorder.calls)}"
+    )
 
 
-async def test_exhausted_budget_stamps_error_instead() -> bool:
+async def test_exhausted_budget_stamps_error_instead() -> None:
     sid, asst_id = _seed_session(transient_attempt=10)
     _seed_never_started_run(sid, asst_id)
     recorder = await _recover_with_recorder()
-    if recorder.calls:
-        print("  retry fired past the transient budget")
-        return False
+    assert not recorder.calls, "retry fired past the transient budget"
     msg = _msg(sid, asst_id)
-    if not msg.get("error"):
-        print(f"  budget-exhausted run left no error stamp: {msg.keys()}")
-        return False
-    if "bootstrap" not in str(msg.get("errorText") or ""):
-        print(f"  errorText not surfaced: {msg.get('errorText')!r}")
-        return False
-    return True
+    assert msg.get("error"), (
+        f"budget-exhausted run left no error stamp: {msg.keys()}"
+    )
+    assert "bootstrap" in str(msg.get("errorText") or ""), (
+        f"errorText not surfaced: {msg.get('errorText')!r}"
+    )
 
 
 async def main() -> int:
-    ok = True
     for fn in (
         test_never_started_run_auto_retries,
         test_newer_turn_blocks_auto_retry,
         test_cancelled_run_blocks_auto_retry,
         test_exhausted_budget_stamps_error_instead,
     ):
-        good = await fn()
-        print(f"{PASS if good else FAIL} {fn.__name__}")
-        ok = ok and good
-    return 0 if ok else 1
+        try:
+            await fn()
+        except AssertionError as exc:
+            print(f"FAIL {fn.__name__}: {exc}")
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR {fn.__name__}: {type(exc).__name__}: {exc}")
+            return 1
+        print(f"PASS {fn.__name__}")
+    return 0
 
 
 if __name__ == "__main__":

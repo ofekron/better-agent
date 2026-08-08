@@ -152,7 +152,7 @@ def _restore_native_roots(orig) -> None:
      nsp._windsurf_cascade_roots) = orig
 
 
-def test_whole_word_match_not_substring() -> bool:
+def test_whole_word_match_not_substring() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [("fix the ui layout", "2024-01-01")]),
         _candidate("s2", "/proj", [("rebuilding guise now", "2024-01-02")]),
@@ -162,23 +162,21 @@ def test_whole_word_match_not_substring() -> bool:
     finally:
         _reset_candidates()
     texts = {r["text"] for r in out}
-    ok = texts == {"fix the ui layout"}
-    print(f"{OK if ok else FAIL} whole-word match ignores substring (got {texts})")
-    return ok
+    assert texts == {"fix the ui layout"}, f"whole-word match ignores substring (got {texts})"
+    print(f"{OK} whole-word match ignores substring (got {texts})")
 
 
-def test_stopword_only_query_returns_empty() -> bool:
+def test_stopword_only_query_returns_empty() -> None:
     _patch_candidates([_candidate("s1", "/proj", [("the plan is in the doc", "2024-01-01")])])
     try:
         out = nsp.search_native_session_prompts(query="in the")
     finally:
         _reset_candidates()
-    ok = out == []
-    print(f"{OK if ok else FAIL} stopword-only query yields no matches (got {out})")
-    return ok
+    assert out == [], f"stopword-only query yields no matches (got {out})"
+    print(f"{OK} stopword-only query yields no matches (got {out})")
 
 
-def test_ranking_selects_higher_overlap_under_cap() -> bool:
+def test_ranking_selects_higher_overlap_under_cap() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [("offline sync mode broke", "2024-01-01")]),
         _candidate("s2", "/proj", [("offline notes only", "2024-01-02")]),
@@ -187,12 +185,13 @@ def test_ranking_selects_higher_overlap_under_cap() -> bool:
         out = nsp.search_native_session_prompts(query="offline sync mode", max_matches=1)
     finally:
         _reset_candidates()
-    ok = len(out) == 1 and out[0]["text"] == "offline sync mode broke"
-    print(f"{OK if ok else FAIL} ranking selects higher-overlap prompt under cap (got {out})")
-    return ok
+    assert len(out) == 1, f"ranking cap kept one result (got {out})"
+    assert out[0]["text"] == "offline sync mode broke", \
+        f"ranking selects higher-overlap prompt under cap (got {out})"
+    print(f"{OK} ranking selects higher-overlap prompt under cap (got {out})")
 
 
-def test_cwd_filter() -> bool:
+def test_cwd_filter() -> None:
     _patch_candidates([
         _candidate("s1", "/proj-a", [("offline sync here", "2024-01-01")]),
         _candidate("s2", "/proj-b", [("offline sync there", "2024-01-02")]),
@@ -202,12 +201,11 @@ def test_cwd_filter() -> bool:
     finally:
         _reset_candidates()
     texts = {r["text"] for r in out}
-    ok = texts == {"offline sync here"}
-    print(f"{OK if ok else FAIL} cwd filter restricts results (got {texts})")
-    return ok
+    assert texts == {"offline sync here"}, f"cwd filter restricts results (got {texts})"
+    print(f"{OK} cwd filter restricts results (got {texts})")
 
 
-def test_is_noise_drops_preamble() -> bool:
+def test_is_noise_drops_preamble() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [
             ("NOISE injected worker preamble offline", "2024-01-01"),
@@ -221,12 +219,11 @@ def test_is_noise_drops_preamble() -> bool:
     finally:
         _reset_candidates()
     texts = {r["text"] for r in out}
-    ok = texts == {"real offline requirement"}
-    print(f"{OK if ok else FAIL} is_noise drops programmatic preamble (got {texts})")
-    return ok
+    assert texts == {"real offline requirement"}, f"is_noise drops programmatic preamble (got {texts})"
+    print(f"{OK} is_noise drops programmatic preamble (got {texts})")
 
 
-def test_dedup_across_sessions() -> bool:
+def test_dedup_across_sessions() -> None:
     _patch_candidates([
         _candidate("s1", "/proj", [("offline sync must survive", "2024-01-01")]),
         _candidate("s2", "/proj", [("offline sync must survive", "2024-01-02")]),
@@ -235,12 +232,13 @@ def test_dedup_across_sessions() -> bool:
         out = nsp.search_native_session_prompts(query="offline sync")
     finally:
         _reset_candidates()
-    ok = len(out) == 1 and out[0]["text"] == "offline sync must survive"
-    print(f"{OK if ok else FAIL} identical prompt across sessions deduped (got {len(out)})")
-    return ok
+    assert len(out) == 1, f"identical prompt across sessions deduped (got {len(out)})"
+    assert out[0]["text"] == "offline sync must survive", \
+        f"identical prompt across sessions deduped (got {out})"
+    print(f"{OK} identical prompt across sessions deduped (got {len(out)})")
 
 
-def test_bad_transcript_does_not_abort_search() -> bool:
+def test_bad_transcript_does_not_abort_search() -> None:
     _patch_candidates([
         _RaisingCandidate("/proj"),
         _candidate("s2", "/proj", [("offline sync survivor", "2024-01-02")]),
@@ -250,12 +248,11 @@ def test_bad_transcript_does_not_abort_search() -> bool:
     finally:
         _reset_candidates()
     texts = {r["text"] for r in out}
-    ok = texts == {"offline sync survivor"}
-    print(f"{OK if ok else FAIL} non-OSError parse does not abort search (got {texts})")
-    return ok
+    assert texts == {"offline sync survivor"}, f"non-OSError parse does not abort search (got {texts})"
+    print(f"{OK} non-OSError parse does not abort search (got {texts})")
 
 
-def test_deterministic_order_for_empty_ts_ties() -> bool:
+def test_deterministic_order_for_empty_ts_ties() -> None:
     # All empty ts, equal score → the sid+text tiebreaker must fix the order.
     def build():
         return [
@@ -277,12 +274,12 @@ def test_deterministic_order_for_empty_ts_ties() -> bool:
     finally:
         _reset_candidates()
     expected = ["offline alpha", "offline beta", "offline gamma"]
-    ok = first == expected and second == expected
-    print(f"{OK if ok else FAIL} empty-ts ties order deterministically (got {first} vs {second})")
-    return ok
+    assert first == expected, f"empty-ts ties order deterministically (first got {first})"
+    assert second == expected, f"empty-ts ties order deterministically (second got {second})"
+    print(f"{OK} empty-ts ties order deterministically (got {first} vs {second})")
 
 
-def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
+def test_unlinked_transcript_found_via_filesystem_walk() -> None:
     """Regression: a claude native transcript with NO Better Agent session
     record (direct CLI / extension-spawned) must be found by the search.
 
@@ -313,12 +310,12 @@ def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
         _restore_native_roots(orig)
         _restore_rg()
     texts = {r["text"] for r in out}
-    ok = "zulifrangible task widget" in texts
-    print(f"{OK if ok else FAIL} unlinked claude transcript found via filesystem walk (got {texts})")
-    return ok
+    assert "zulifrangible task widget" in texts, \
+        f"unlinked claude transcript found via filesystem walk (got {texts})"
+    print(f"{OK} unlinked claude transcript found via filesystem walk (got {texts})")
 
 
-def test_codex_native_transcripts_found() -> bool:
+def test_codex_native_transcripts_found() -> None:
     """The native stores of every provider are covered — a codex rollout with
     no BA record must be found, and codex's injected ``<environment_context>``
     block must be dropped (not treated as a prompt)."""
@@ -351,15 +348,14 @@ def test_codex_native_transcripts_found() -> bool:
         _restore_native_roots(orig)
         _restore_rg()
     texts = {r["text"] for r in out}
-    ok = (
-        "zulifrangible codex widget" in texts
-        and not any("<environment_context>" in t for t in texts)
-    )
-    print(f"{OK if ok else FAIL} codex native transcripts found, env-context dropped (got {texts})")
-    return ok
+    assert "zulifrangible codex widget" in texts, \
+        f"codex native transcripts found (got {texts})"
+    assert not any("<environment_context>" in t for t in texts), \
+        f"codex env-context dropped (got {texts})"
+    print(f"{OK} codex native transcripts found, env-context dropped (got {texts})")
 
 
-def test_categorizer_maps_elements_to_categories() -> bool:
+def test_categorizer_maps_elements_to_categories() -> None:
     """The shared Categorizer maps structural kind + tool name → semantic
     category, provider-agnostic. Tool-name casing/spacing is normalized."""
     cat = Categorizer()
@@ -381,9 +377,8 @@ def test_categorizer_maps_elements_to_categories() -> bool:
         (NativeElement("tool_result", "user", "Traceback (most recent call last)"), ElementCategory.ERROR),
     ]
     bad = [(el, got, want) for el, want in cases if (got := cat.categorize(el)) != want]
-    ok = not bad
-    print(f"{OK if ok else FAIL} categorizer maps kind+tool -> category (mismatches={bad})")
-    return ok
+    assert not bad, f"categorizer maps kind+tool -> category (mismatches={bad})"
+    print(f"{OK} categorizer maps kind+tool -> category (mismatches={bad})")
 
 
 def _write_raw_transcript(records: list[dict]) -> Path:
@@ -395,14 +390,14 @@ def _write_raw_transcript(records: list[dict]) -> Path:
     return path
 
 
-def test_rg_filter_narrows_to_files_containing_needle() -> bool:
+def test_rg_filter_narrows_to_files_containing_needle() -> None:
     """The rg match-first path finds only files containing the needle and builds
     candidates from those paths. Skipped when rg isn't installed."""
     _reset_candidates()
     if not nsp._rg_filter(["zulifrangible"]):
         # rg unavailable — the None fallback is covered by the other tests.
         print(f"{OK} rg-filter test skipped (rg not installed)")
-        return True
+        return
     import native_session_miner as M
     projects = _SCRATCH / "rg-projects"
     cwd = "/Users/test/rg-proj"
@@ -431,12 +426,11 @@ def test_rg_filter_narrows_to_files_containing_needle() -> bool:
         _restore_native_roots(orig)
         idx.reset_for_test()
     sids = {c.sid for c in cands}
-    ok = sids == {"rg-hit"}
-    print(f"{OK if ok else FAIL} rg filter narrows to needle files (got sids={sids})")
-    return ok
+    assert sids == {"rg-hit"}, f"rg filter narrows to needle files (got sids={sids})"
+    print(f"{OK} rg filter narrows to needle files (got sids={sids})")
 
 
-def test_index_fast_path_serves_query_with_rg_disabled() -> bool:
+def test_index_fast_path_serves_query_with_rg_disabled() -> None:
     """With the native index built + fresh, a query is served from FTS even when
     rg is disabled — proving the fast path (not the rg fallback) answers."""
     import native_transcript_index as idx
@@ -462,12 +456,12 @@ def test_index_fast_path_serves_query_with_rg_disabled() -> bool:
         _restore_rg()
         idx.reset_for_test()
     texts = {r["text"] for r in out}
-    ok = "zulifrangible fastpath needle" in texts
-    print(f"{OK if ok else FAIL} index fast path serves query with rg disabled (got {texts})")
-    return ok
+    assert "zulifrangible fastpath needle" in texts, \
+        f"index fast path serves query with rg disabled (got {texts})"
+    print(f"{OK} index fast path serves query with rg disabled (got {texts})")
 
 
-def test_generalized_search_greps_tool_calls_and_results() -> bool:
+def test_generalized_search_greps_tool_calls_and_results() -> None:
     """search_in_native_session_transcript greps EVERYTHING — tool calls and
     tool results, not just prompts/replies — and labels each match with its
     category + tool_name. The category filter narrows the scope."""
@@ -495,18 +489,16 @@ def test_generalized_search_greps_tool_calls_and_results() -> bool:
     cats = {r["category"] for r in all_hits}
     tools = {r.get("tool_name") for r in all_hits}
     shell_cats = {r["category"] for r in shell_only}
-    ok = (
-        cats == {ElementCategory.REPLY, ElementCategory.SHELL, ElementCategory.TOOL_OUTPUT}
-        and tools == {"Bash", ""}
-        and shell_cats == {ElementCategory.SHELL}
-        and len(shell_only) == 1
-    )
-    print(f"{OK if ok else FAIL} generalized search greps tools+results, category filter works "
+    assert cats == {ElementCategory.REPLY, ElementCategory.SHELL, ElementCategory.TOOL_OUTPUT}, \
+        f"generalized search cats (got {cats})"
+    assert tools == {"Bash", ""}, f"generalized search tools (got {tools})"
+    assert shell_cats == {ElementCategory.SHELL}, f"category filter shell-only (got {shell_cats})"
+    assert len(shell_only) == 1, f"category filter keeps one shell hit (got {shell_only})"
+    print(f"{OK} generalized search greps tools+results, category filter works "
           f"(cats={cats}, tools={tools}, shell_only={shell_cats})")
-    return ok
 
 
-def test_sids_scopes_to_exactly_one_session() -> bool:
+def test_sids_scopes_to_exactly_one_session() -> None:
     """``sids`` resolves candidates via filename lookup, bypassing
     ``_matched_candidates`` (and therefore rg/token discovery) entirely —
     only the requested session's own content is returned, from a project
@@ -551,17 +543,15 @@ def test_sids_scopes_to_exactly_one_session() -> bool:
     scoped_sids = {r["sid"] for r in scoped}
     scoped_kinds = {r["element_kind"] for r in scoped}
     unscoped_sids = {r["sid"] for r in unscoped}
-    ok = (
-        scoped_sids == {wanted_sid}
-        and "tool_result" in scoped_kinds
-        and unscoped_sids == {wanted_sid, other_sid}
-    )
-    print(f"{OK if ok else FAIL} sids scopes to exactly one session incl. tool_result "
+    assert scoped_sids == {wanted_sid}, f"sids scopes to wanted session (got {scoped_sids})"
+    assert "tool_result" in scoped_kinds, f"sids keeps tool_result match (got {scoped_kinds})"
+    assert unscoped_sids == {wanted_sid, other_sid}, \
+        f"unscoped covers both sessions (got {unscoped_sids})"
+    print(f"{OK} sids scopes to exactly one session incl. tool_result "
           f"(scoped_sids={scoped_sids}, scoped_kinds={scoped_kinds}, unscoped_sids={unscoped_sids})")
-    return ok
 
 
-def test_sids_covers_pi_via_filename_and_content_fallback() -> bool:
+def test_sids_covers_pi_via_filename_and_content_fallback() -> None:
     """pi sessions are covered by sids two ways: the fast filename glob when
     the filename already matches the true id, and _pi_candidate_by_content_sid
     when it doesn't (the true id then only lives inside the file, per
@@ -607,13 +597,15 @@ def test_sids_covers_pi_via_filename_and_content_fallback() -> bool:
 
     filename_sids = {r["sid"] for r in by_filename}
     content_sids = {r["sid"] for r in by_content}
-    ok = filename_sids == {filename_match_sid} and content_sids == {true_sid}
-    print(f"{OK if ok else FAIL} sids covers pi via filename match and content fallback "
+    assert filename_sids == {filename_match_sid}, \
+        f"sids covers pi via filename match (got {filename_sids})"
+    assert content_sids == {true_sid}, \
+        f"sids covers pi via content fallback (got {content_sids})"
+    print(f"{OK} sids covers pi via filename match and content fallback "
           f"(filename_sids={filename_sids}, content_sids={content_sids})")
-    return ok
 
 
-def test_wiring_fails_closed_on_processor_error() -> bool:
+def test_wiring_fails_closed_on_processor_error() -> None:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
     requirement_context.prepare_requirements_local_read_context = lambda: None
@@ -625,18 +617,15 @@ def test_wiring_fails_closed_on_processor_error() -> bool:
     finally:
         requirement_context.prepare_requirements_local_read_context = orig_prepare
         requirement_context._run_requirements_processor = orig_proc
-    ok = (
-        resp.get("success") is False
-        and resp.get("error") == "processor_failed"
-        and resp.get("text") == ""
-        and "fallback" not in resp
-        and "processor_error" not in resp
-    )
-    print(f"{OK if ok else FAIL} processor error fails closed without raw fallback (got {resp})")
-    return ok
+    assert resp.get("success") is False, f"processor error fails closed (got {resp})"
+    assert resp.get("error") == "processor_failed", f"processor error surfaced (got {resp})"
+    assert resp.get("text") == "", f"empty text on processor error (got {resp})"
+    assert "fallback" not in resp, f"no raw fallback on processor error (got {resp})"
+    assert "processor_error" not in resp, f"no processor_error key (got {resp})"
+    print(f"{OK} processor error fails closed without raw fallback (got {resp})")
 
 
-def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
+def test_wiring_real_requirements_not_replaced_by_fallback() -> None:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
     requirement_context.prepare_requirements_local_read_context = lambda: None
@@ -649,15 +638,13 @@ def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
     finally:
         requirement_context.prepare_requirements_local_read_context = orig_prepare
         requirement_context._run_requirements_processor = orig_proc
-    ok = (
-        resp.get("text") == "real processor requirement"
-        and resp.get("error") == "partial"
-    )
-    print(f"{OK if ok else FAIL} real requirements not replaced by fallback (got {resp})")
-    return ok
+    assert resp.get("text") == "real processor requirement", \
+        f"real requirements not replaced by fallback (got {resp})"
+    assert resp.get("error") == "partial", f"truthy error preserved (got {resp})"
+    print(f"{OK} real requirements not replaced by fallback (got {resp})")
 
 
-def main_run() -> int:
+def main_run() -> None:
     tests = [
         test_whole_word_match_not_substring,
         test_stopword_only_query_returns_empty,
@@ -678,21 +665,29 @@ def main_run() -> int:
         test_wiring_fails_closed_on_processor_error,
         test_wiring_real_requirements_not_replaced_by_fallback,
     ]
-    results = []
-    for fn in tests:
-        try:
-            results.append(fn())
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"{FAIL} {fn.__name__} raised: {e}")
-            results.append(False)
-    n_pass = sum(1 for r in results if r)
-    n_total = len(results)
+    failures = []
+    try:
+        for fn in tests:
+            try:
+                fn()
+            except AssertionError as e:
+                print(f"{FAIL} {fn.__name__}: {e}")
+                failures.append(fn.__name__)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"{FAIL} {fn.__name__} raised: {e}")
+                failures.append(fn.__name__)
+            else:
+                print(f"{OK} {fn.__name__}")
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    n_pass = len(tests) - len(failures)
+    n_total = len(tests)
     print(f"\n{n_pass}/{n_total} native-prompt-search tests passed")
-    shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    return 0 if n_pass == n_total else 1
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main_run())
+    main_run()

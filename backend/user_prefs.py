@@ -36,6 +36,7 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_STATUS_SORT = False
 DEFAULT_SESSION_TABS_VISIBLE = True
+DEFAULT_BACKGROUND_WORK_VISIBLE = True
 DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
 DEFAULT_CROSS_SESSION_DELEGATE_AUTO = False
@@ -395,6 +396,15 @@ def set_session_tabs_visible(enabled: bool) -> bool:
     return enabled
 
 
+def set_background_work_visible(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ValueError(f"Invalid background_work_visible: {enabled!r}")
+    prefs = _load()
+    prefs["background_work_visible"] = enabled
+    _save(prefs)
+    return enabled
+
+
 def set_voice_close_on_background(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         raise ValueError(f"Invalid voice_close_on_background: {enabled!r}")
@@ -606,6 +616,11 @@ def get_all(login_username: str | None = None) -> dict:
             prefs,
             "sessions_tabs_visible",
             DEFAULT_SESSION_TABS_VISIBLE,
+        ),
+        "background_work_visible": _bool_pref(
+            prefs,
+            "background_work_visible",
+            DEFAULT_BACKGROUND_WORK_VISIBLE,
         ),
         "voice_close_on_background": _bool_pref(
             prefs,

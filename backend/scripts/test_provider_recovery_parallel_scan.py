@@ -22,9 +22,6 @@ _TMP_HOME = Path(_test_home.isolate("bc-test-provider-recovery-scan-"))
 import provider  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 
-PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
-
 
 class FakeProvider:
     def __init__(
@@ -37,6 +34,7 @@ class FakeProvider:
         self.id = provider_id
         self.defunct = False
         self.suspended = False
+        self.record = {"runner": ""}
         self._active_state = active_state
         self._fail = fail
 
@@ -71,7 +69,8 @@ def _with_fake_providers(fake_providers: dict[str, FakeProvider], fn):
     original_get_provider = provider.get_provider
     old_env = os.environ.get(provider._RECOVERY_SCAN_PARALLELISM_ENV)
 
-    def fake_get_provider(provider_id: str):
+    def fake_get_provider(provider_id: str, runner=None):
+        del runner
         return fake_providers[provider_id]
 
     provider.get_provider = fake_get_provider
@@ -86,7 +85,7 @@ def _with_fake_providers(fake_providers: dict[str, FakeProvider], fn):
             os.environ[provider._RECOVERY_SCAN_PARALLELISM_ENV] = old_env
 
 
-def test_provider_buckets_scan_in_parallel() -> bool:
+def test_provider_buckets_scan_in_parallel() -> None:
     active_state = {"active": 0, "max_active": 0}
     fake_providers = {
         f"provider-{index}": FakeProvider(f"provider-{index}", active_state)
@@ -103,23 +102,17 @@ def test_provider_buckets_scan_in_parallel() -> bool:
     recovered, elapsed = _with_fake_providers(fake_providers, run_scan)
 
     recovered_ids = sorted(row.get("run_id") for row in recovered)
-    if recovered_ids != ["run-0", "run-1", "run-2", "run-3"]:
-        print(f"{FAIL} unexpected recovered ids: {recovered_ids!r}")
-        return False
-    if active_state["max_active"] < 2:
-        print(
-            f"{FAIL} expected provider scans to overlap, "
-            f"max_active={active_state['max_active']}",
-        )
-        return False
-    if elapsed >= 0.45:
-        print(f"{FAIL} provider scans appear serial, elapsed={elapsed:.3f}s")
-        return False
-    print(f"{PASS} provider recovery buckets scan in parallel")
-    return True
+    assert recovered_ids == ["run-0", "run-1", "run-2", "run-3"], (
+        f"unexpected recovered ids: {recovered_ids!r}"
+    )
+    assert active_state["max_active"] >= 2, (
+        f"expected provider scans to overlap, "
+        f"max_active={active_state['max_active']}"
+    )
+    assert elapsed < 0.45, f"provider scans appear serial, elapsed={elapsed:.3f}s"
 
 
-def test_provider_scan_failure_propagates() -> bool:
+def test_provider_scan_failure_propagates() -> None:
     active_state = {"active": 0, "max_active": 0}
     fake_providers = {
         "provider-0": FakeProvider("provider-0", active_state),
@@ -132,16 +125,12 @@ def test_provider_scan_failure_propagates() -> bool:
     try:
         _with_fake_providers(fake_providers, provider.recover_all_in_flight)
     except RuntimeError as exc:
-        if "provider-1" not in str(exc):
-            print(f"{FAIL} failure did not name provider-1: {exc}")
-            return False
-        print(f"{PASS} provider scan failures propagate")
-        return True
-    print(f"{FAIL} expected provider scan failure to propagate")
-    return False
+        assert "provider-1" in str(exc), f"failure did not name provider-1: {exc}"
+        return
+    raise AssertionError("expected provider scan failure to propagate")
 
 
 if __name__ == "__main__":
-    ok = test_provider_buckets_scan_in_parallel()
-    ok = test_provider_scan_failure_propagates() and ok
-    raise SystemExit(0 if ok else 1)
+    test_provider_buckets_scan_in_parallel()
+    test_provider_scan_failure_propagates()
+    print("all checks passed")

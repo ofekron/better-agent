@@ -165,7 +165,7 @@ def test_startup_task_cleared_fact_bumps_epoch() -> None:
     received: list = []
     sub = adapter.subscribe(received.append)
     try:
-        _publish("startup_tasks.fire.changed", {"cleared": True})
+        _publish("background_work.fire.changed", {"cleared": True})
         cleared = [f for f in received if isinstance(f, HostStartupTaskCleared)]
         assert cleared, received
         assert cleared[0].epoch == 1
@@ -177,18 +177,26 @@ def test_startup_task_cleared_fact_bumps_epoch() -> None:
 
 
 def test_startup_task_upsert_fact_reads_through_registry() -> None:
-    from startup_tasks import startup_task_registry
+    """ADR 0005: startup work reports into the shared background_work
+    registry under owner_id `startup_tasks.OWNER` — the adapter's handler
+    must narrow `background_work.fire.changed` (which fires for every
+    owner sharing that registry) back down to this one before upserting."""
+    from background_work import OWNER_CORE, background_work_registry
+    from startup_tasks import OWNER as STARTUP_OWNER
 
     adapter = SystemSurfaceAdapter()
     adapter.bind()
     received: list = []
     sub = adapter.subscribe(received.append)
     try:
-        startup_task_registry.register("smoke_task", "Smoke Task")
-        _publish("startup_tasks.fire.changed", {"task": {"id": "smoke_task"}})
+        item_id = background_work_registry.report(
+            owner_kind=OWNER_CORE, owner_id=STARTUP_OWNER,
+            local_id="smoke_task", label="Smoke Task",
+        )
+        _publish("background_work.fire.changed", {"item": {"id": item_id}})
         upserts = [f for f in received if isinstance(f, HostStartupTaskUpsert)]
         assert upserts, received
-        assert upserts[0].task.id == "smoke_task"
+        assert upserts[0].task.id == item_id
         assert upserts[0].task.state == HostStartupTaskState.RUNNING
     finally:
         sub.close()

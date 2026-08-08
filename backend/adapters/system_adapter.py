@@ -4,7 +4,7 @@ Reads exclusively through `backend.adapters.store_access.store_access`;
 live deltas are bound to the `*.fire.*` facts this pass adds at each
 owning legacy mutation/broadcast site (extension_api.py,
 extension_ui_manager.py, harness_profiles_api.py, marketplace_bridge.py,
-scheduler.py, startup_tasks.py, mobile_desktop_api.py, node_store.py,
+scheduler.py, background_work.py, mobile_desktop_api.py, node_store.py,
 node_provider_credential_sync.py, node_link.py) — same "facts not
 commands" posture `runs_adapter.py` already uses for `lifecycle.turn_*`:
 a fact means "something changed, go re-derive the current truth from
@@ -396,7 +396,7 @@ class SystemSurfaceAdapter(SystemSurface):
             ("harness.fire.profile_changed", self._on_harness_profile_changed),
             ("marketplace.fire.changed", self._on_marketplace_changed),
             ("schedule.fire.changed", self._on_schedule_changed),
-            ("startup_tasks.fire.changed", self._on_startup_task_changed),
+            ("background_work.fire.changed", self._on_startup_task_changed),
             ("installation.fire.capability_changed", self._on_installation_capability_changed),
             ("machines.fire.node_changed", self._on_node_changed),
             ("machines.fire.credential_changed", self._on_credential_changed),
@@ -771,12 +771,29 @@ class SystemSurfaceAdapter(SystemSurface):
         self._known_schedule_ids[app_session_id] = current_ids
 
     async def _on_startup_task_changed(self, event: BusEvent) -> None:
+        """ADR 0005: `background_work.fire.changed` fires for EVERY owner in
+        the shared registry (startup steps, provider installs, node-
+        credential syncs, extension work, ...), not just startup tasks —
+        this handler is the one place that narrows it back down to the
+        startup-owned subset `store_access.list_host_startup_tasks` already
+        filters for, so a provider-install upsert on the same bus fact is a
+        silent no-op here (its id never matches a startup record).
+
+        gap: `background_work_registry.dismiss()` (a user dismissing a
+        startup row from the generic background-work manager UI) delivers a
+        `removed_id` payload with no analog in `HostStartupTask`'s Upsert/
+        Cleared union — that dismissal doesn't reach this feed until the
+        next full `cleared` reset or a page reload re-reads the (now-absent)
+        record via `host_startup_tasks()`."""
         if event.payload.get("cleared"):
             self._startup_epoch += 1
             cv = self._projection.bump_render()
             self._projection.broadcast(HostStartupTaskCleared(cv=cv, epoch=self._startup_epoch))
             return
-        task_id = str((event.payload.get("task") or {}).get("id") or "")
+        item = event.payload.get("item")
+        if not isinstance(item, dict):
+            return
+        task_id = str(item.get("id") or "")
         records = store_access.list_host_startup_tasks()
         record = next((r for r in records if r.id == task_id), None)
         if record is None:

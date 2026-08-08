@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import _test_home
 from live_llm_test_guard import live_llm_skip_message, live_llm_tests_enabled
-from pytest_collection_guard import should_ignore_test_module
+from pytest_collection_guard import has_main_entry, should_ignore_test_module
 
 # Engage at import time — before any backend import in collected test modules.
 # Layers 1+2 (ba_home guard + deletion guard) are always on. Layer 3 (FS lock
@@ -68,27 +69,81 @@ def pytest_collection_modifyitems(config, items):
     if live_llm_tests_enabled():
         return
 
+    # Cache the has-__main__-runner flag per module file across all items.
+    is_runner_cache: dict[str, bool] = {}
     for item in items:
         if item.get_closest_marker("live_llm"):
             item.add_marker(pytest.mark.skip(reason=live_llm_skip_message(item.name)))
-        # Dual-purpose standalone-runner files build a TestClient in `__main__`
-        # and pass it as `client` directly to their `test_*` functions. Under
-        # pytest that `client` parameter is an unresolved fixture (no such
-        # fixture exists), so the item errors at setup. These are e2e/standalone
-        # tests (run via `python scripts/<file>.py`), not unit-tier pytest; skip
-        # them here rather than letting the missing fixture abort the suite.
-        elif "client" in getattr(item, "fixturenames", ()):
+            continue
+        unresolved = _standalone_runner_unresolved_params(item, is_runner_cache)
+        if unresolved:
             item.add_marker(pytest.mark.skip(
-                reason="standalone-runner test: needs __main__-built client; "
-                       "run via `python scripts/<file>.py`",
+                reason="standalone-runner test: parameter(s) "
+                       + ", ".join(sorted(unresolved))
+                       + " are supplied by the module's __main__ runner, not "
+                       "pytest fixtures; run via `python scripts/<file>.py`",
             ))
 
 
-@pytest.fixture(autouse=True)
-def _ensure_ba_home_dirs(request):
+def _standalone_runner_unresolved_params(item, is_runner_cache):
+    """Unresolvable params on a dual-purpose standalone-runner test function.
+
+    Dual-purpose modules expose ``test_*`` helpers that their
+    ``if __name__ == "__main__"`` runner calls with arguments it builds
+    (a TestClient, a ``failures`` list, a temp path, ...). Under pytest those
+    arguments are not fixtures, so the item errors at setup
+    (``fixture 'x' not found``). Detect that precisely and return the param
+    names so the caller can skip the item — turning an inevitable setup ERROR
+    into a deterministic SKIP.
+
+    Gated on a ``__main__`` entry so a missing-fixture typo in a pure pytest
+    module still surfaces as a real setup error rather than being hidden, and
+    so that pollution-only collection failures (a real fixture that resolves in
+    a clean process) are not papered over.
+    """
+    module = getattr(item, "module", None)
+    source_path = getattr(module, "__file__", "") or ""
+    is_runner = is_runner_cache.get(source_path)
+    if is_runner is None:
+        try:
+            is_runner = has_main_entry(
+                Path(source_path).read_text(encoding="utf-8")
+            )
+        except (OSError, SyntaxError, ValueError):
+            is_runner = False
+        is_runner_cache[source_path] = is_runner
+    if not is_runner:
+        return ()
+
+    fixtureinfo = getattr(item, "_fixtureinfo", None)
+    argnames = getattr(fixtureinfo, "argnames", ()) or ()
+    resolved = getattr(fixtureinfo, "name2fixturedefs", {}) or {}
+    return tuple(name for name in argnames if name not in resolved)
+
+
+def _engage_module_home(module_name: str) -> None:
     import paths
-    module_home = _test_home.pytest_home_for_module(request.module.__name__)
+    module_home = _test_home.pytest_home_for_module(module_name)
     _test_home.engage(module_home or _SESSION_ROOT)
     home = paths.ba_home()
     for sub in ("sessions", "runs", "ask-status", "delegate-status"):
         (home / sub).mkdir(parents=True, exist_ok=True)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _ensure_ba_home_dirs_module(request):
+    # Pytest sets up autouse fixtures broadest-scope-first, so a module-scoped
+    # autouse fixture DEFINED IN A TEST FILE (e.g. an extension-store /
+    # config-store seeding fixture) runs before the function-scoped
+    # `_ensure_ba_home_dirs` below ever fires for that module's first test —
+    # at that point `ba_home()` still holds whatever the PREVIOUS module's
+    # last test left behind, so the seeding fixture would write into the
+    # wrong test home. Conftest-defined fixtures of a given scope run before
+    # same-scope fixtures the test module defines, so re-engaging here closes
+    # that gap before any such fixture in the module can execute.
+    _engage_module_home(request.module.__name__)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_ba_home_dirs(request):
+    _engage_module_home(request.module.__name__)

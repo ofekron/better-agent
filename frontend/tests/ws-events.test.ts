@@ -140,7 +140,7 @@ describe("WebSocket event handling", () => {
         },
       },
       { type: "models_catalog_changed", data: { provider_id: "codex" } },
-      { type: "startup_task_changed", data: { cleared: true } },
+      { type: "background_work_changed", data: { epoch: "e1", cleared: true } },
     ];
     const received = new Map<string, unknown[]>();
     const domEvents: string[] = [];

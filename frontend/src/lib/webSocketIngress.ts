@@ -4,12 +4,12 @@ import {
   type WSEventType,
 } from "../types";
 
-export type WireEventParseErrorCode =
+type WireEventParseErrorCode =
   | "invalid_envelope"
   | "untrusted_session"
   | "invalid_core_payload";
 
-export type WireEventParseResult =
+type WireEventParseResult =
   | { ok: true; event: WireEvent }
   | {
       ok: false;
@@ -172,18 +172,6 @@ function providerInstallFinishedPayload(data: Record<string, unknown>): boolean 
     && (data.returncode === null || Number.isSafeInteger(data.returncode))
     && (data.installed === null || typeof data.installed === "boolean")
     && isNullableString(data.message);
-}
-
-function startupTaskChangedPayload(data: Record<string, unknown>): boolean {
-  if (data.cleared === true) return true;
-  const task = data.task;
-  return isRecord(task)
-    && hasString(task, "id")
-    && hasString(task, "label")
-    && (task.state === "running" || task.state === "done" || task.state === "failed")
-    && hasString(task, "started_at")
-    && isNullableString(task.finished_at)
-    && isNullableString(task.error);
 }
 
 const BACKGROUND_WORK_STATUSES = new Set([
@@ -530,7 +518,6 @@ export const knownCoreEventValidators: Readonly<
   provider_install_progress: providerInstallProgressPayload,
   provider_install_finished: providerInstallFinishedPayload,
   models_catalog_changed: (data) => hasString(data, "provider_id"),
-  startup_task_changed: startupTaskChangedPayload,
   background_work_changed: backgroundWorkChangedPayload,
   schedules_updated: (data) =>
     hasString(data, "app_session_id") && hasArray(data, "schedules"),

@@ -47,7 +47,7 @@ def _reset(co) -> None:
     co._processor_tasks.clear()
 
 
-def test_claim_detects_duplicate() -> bool:
+def test_claim_detects_duplicate() -> None:
     co = main.coordinator
     _reset(co)
     sid, cid = "sess-claim", "pending-123"
@@ -65,9 +65,7 @@ def test_claim_detects_duplicate() -> bool:
         and after_release is None  # claim freed at turn end ⇒ reusable
     )
     print(f"{PASS if ok else FAIL} atomic claim detects a concurrent same-client_id duplicate")
-    if not ok:
-        print({"first": first, "dup": dup, "no_cid": no_cid, "after_release": after_release})
-    return ok
+    assert ok, {"first": first, "dup": dup, "no_cid": no_cid, "after_release": after_release}
 
 
 async def _submit_path() -> bool:
@@ -98,13 +96,13 @@ async def _submit_path() -> bool:
         co._run_session_processor = original_proc
 
 
-def test_submit_honors_claim_and_dedups_others() -> bool:
+def test_submit_honors_claim_and_dedups_others() -> None:
     ok = asyncio.run(_submit_path())
     print(f"{PASS if ok else FAIL} submit_prompt admits the claim owner, dedups other duplicates")
-    return ok
+    assert ok, "submit_prompt did not admit the claim owner / dedup other duplicates"
 
 
-def test_cancel_releases_claim() -> bool:
+def test_cancel_releases_claim() -> None:
     """Cancelling a claimed prompt must release its claim, else a future
     genuine re-send of that client_id is blocked forever."""
     import asyncio as _aio
@@ -125,19 +123,28 @@ def test_cancel_releases_claim() -> bool:
         and "itemX" not in co._prompt_client_id_by_item
     )
     print(f"{PASS if ok else FAIL} cancel releases the client_id claim (no leak)")
-    if not ok:
-        print({"claimed": claimed, "reusable": reusable})
-    return ok
+    assert ok, {"claimed": claimed, "reusable": reusable}
 
 
 def main_run() -> int:
+    tests = [
+        test_claim_detects_duplicate,
+        test_submit_honors_claim_and_dedups_others,
+        test_cancel_releases_claim,
+    ]
+    failed = 0
     try:
-        results = [
-            test_claim_detects_duplicate(),
-            test_submit_honors_claim_and_dedups_others(),
-            test_cancel_releases_claim(),
-        ]
-        return 0 if all(results) else 1
+        for runner in tests:
+            try:
+                runner()
+            except AssertionError:
+                failed += 1
+            except Exception:
+                failed += 1
+                import traceback
+                traceback.print_exc()
+        print(f"{len(tests) - failed}/{len(tests)} subtests passed")
+        return 1 if failed else 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 

@@ -17,6 +17,7 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +45,7 @@ def _make_tailer(name: str = "x") -> ClaudeJsonlTailer:
     )
 
 
-async def _scenario() -> bool:
+async def _scenario() -> None:
     t = _make_tailer()
 
     async def ok() -> None:
@@ -63,21 +64,16 @@ async def _scenario() -> bool:
 
     t._sub_tasks = [d_ok, d_boom, p]
     t._prune_done_sub_tasks()
-    if t._sub_tasks != [p]:
-        print(f"  expected only the pending task to remain, got {t._sub_tasks}")
-        p.cancel()
-        return False
+    assert t._sub_tasks == [p], \
+        f"expected only the pending task to remain, got {t._sub_tasks}"
 
     # Simulate many completed subagents across turns → must stay bounded.
     extra = [asyncio.create_task(ok()) for _ in range(200)]
     await asyncio.sleep(0.05)
     t._sub_tasks = [p, *extra]
     t._prune_done_sub_tasks()
-    if t._sub_tasks != [p]:
-        print(f"  list not bounded after 200 completed subagents: "
-              f"{len(t._sub_tasks)} retained")
-        p.cancel()
-        return False
+    assert t._sub_tasks == [p], \
+        f"list not bounded after 200 completed subagents: {len(t._sub_tasks)} retained"
 
     # A cancelled task is also pruned.
     p.cancel()
@@ -86,17 +82,14 @@ async def _scenario() -> bool:
     except BaseException:
         pass
     t._prune_done_sub_tasks()
-    if t._sub_tasks != []:
-        print("  cancelled task not pruned")
-        return False
-    return True
+    assert t._sub_tasks == [], "cancelled task not pruned"
 
 
-def test_prune_bounds_sub_tasks() -> bool:
-    return asyncio.run(_scenario())
+def test_prune_bounds_sub_tasks() -> None:
+    asyncio.run(_scenario())
 
 
-async def _duplicate_spawn_scenario() -> bool:
+async def _duplicate_spawn_scenario() -> None:
     original_run = ClaudeJsonlTailer.run
     started = 0
 
@@ -115,30 +108,23 @@ async def _duplicate_spawn_scenario() -> bool:
         first._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
         second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
         await asyncio.sleep(0.05)
-        if started != 1:
-            print(f"  expected one active sub-tailer, started={started}")
-            return False
-        if len(first._sub_tasks) != 1 or second._sub_tasks:
-            print(
-                "  duplicate task retained: "
-                f"first={len(first._sub_tasks)} second={len(second._sub_tasks)}"
-            )
-            return False
+        assert started == 1, f"expected one active sub-tailer, started={started}"
+        assert len(first._sub_tasks) == 1 and not second._sub_tasks, (
+            f"duplicate task retained: "
+            f"first={len(first._sub_tasks)} second={len(second._sub_tasks)}"
+        )
         first._sub_tasks[0].cancel()
         try:
             await first._sub_tasks[0]
         except BaseException:
             pass
         await asyncio.sleep(0.05)
-        if ClaudeJsonlTailer._active_sub_tailer_keys:
-            print("  active sub-tailer key not released")
-            return False
+        assert not ClaudeJsonlTailer._active_sub_tailer_keys, \
+            "active sub-tailer key not released after spawn task ended"
         second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
         await asyncio.sleep(0.05)
-        if started != 2 or len(second._sub_tasks) != 1:
-            print(f"  respawn after release failed: started={started}")
-            return False
-        return True
+        assert started == 2 and len(second._sub_tasks) == 1, \
+            f"respawn after release failed: started={started}"
     finally:
         for tailer in (first, second):
             for task in tailer._sub_tasks:
@@ -152,38 +138,32 @@ async def _duplicate_spawn_scenario() -> bool:
         ClaudeJsonlTailer.run = original_run
 
 
-def test_duplicate_sub_tailer_spawn_is_suppressed() -> bool:
-    return asyncio.run(_duplicate_spawn_scenario())
+def test_duplicate_sub_tailer_spawn_is_suppressed() -> None:
+    asyncio.run(_duplicate_spawn_scenario())
 
 
-def test_subagent_scan_backoff_and_stale_pending() -> bool:
+def test_subagent_scan_backoff_and_stale_pending() -> None:
     t = _make_tailer("backoff")
     t._SUB_DIR_POLL_INTERVAL = 0.01
     t._SUB_DIR_IDLE_POLL_INTERVAL = 0.08
     t._SUB_DIR_IDLE_BACKOFF = 2.0
-    if t._next_subagent_poll_interval(0.01, active=False) != 0.02:
-        print("  idle interval did not back off")
-        return False
-    if t._next_subagent_poll_interval(0.08, active=False) != 0.08:
-        print("  idle interval exceeded max")
-        return False
-    if t._next_subagent_poll_interval(0.08, active=True) != 0.01:
-        print("  active interval did not reset to fast poll")
-        return False
+    assert t._next_subagent_poll_interval(0.01, active=False) == 0.02, \
+        "idle interval did not back off from active poll to idle backoff step"
+    assert t._next_subagent_poll_interval(0.08, active=False) == 0.08, \
+        "idle interval exceeded the configured idle maximum"
+    assert t._next_subagent_poll_interval(0.08, active=True) == 0.01, \
+        "active interval did not reset to the fast active poll"
 
     t.subagent_registry.register("tool-1", "general-purpose", "work")
     t._subagent_pending_fast_until = time.monotonic() + 60
-    if not t._has_fresh_subagent_pending():
-        print("  fresh pending work did not stay fast")
-        return False
+    assert t._has_fresh_subagent_pending(), \
+        "fresh pending work did not keep the watcher on the fast poll"
     t._subagent_pending_fast_until = time.monotonic() - 1
-    if t._has_fresh_subagent_pending():
-        print("  stale pending work stayed fast forever")
-        return False
-    return True
+    assert not t._has_fresh_subagent_pending(), \
+        "stale pending work kept the watcher fast past its deadline"
 
 
-async def _scan_submission_bound_scenario() -> bool:
+async def _scan_submission_bound_scenario() -> None:
     tailers = [_make_tailer(f"scan-bound-{i}") for i in range(8)]
     block = threading.Event()
     submitted = 0
@@ -210,13 +190,10 @@ async def _scan_submission_bound_scenario() -> bool:
     tasks = [asyncio.create_task(t._watch_subagents()) for t in tailers]
     try:
         await asyncio.sleep(0.05)
-        if submitted > jt._SUBAGENT_SCAN_MAX_PENDING_FUTURES:
-            print(
-                "  too many executor scans submitted before bound applied: "
-                f"{submitted}"
-            )
-            return False
-        return True
+        assert submitted <= jt._SUBAGENT_SCAN_MAX_PENDING_FUTURES, (
+            "too many executor scans submitted before the global bound applied: "
+            f"{submitted}"
+        )
     finally:
         block.set()
         for tailer in tailers:
@@ -234,11 +211,11 @@ async def _scan_submission_bound_scenario() -> bool:
         jt._SUBAGENT_SCAN_SEMAPHORES.update(original_semaphores)
 
 
-def test_subagent_scan_submission_is_globally_bounded() -> bool:
-    return asyncio.run(_scan_submission_bound_scenario())
+def test_subagent_scan_submission_is_globally_bounded() -> None:
+    asyncio.run(_scan_submission_bound_scenario())
 
 
-async def _idle_without_pending_skips_executor_scenario() -> bool:
+async def _idle_without_pending_skips_executor_scenario() -> None:
     t = _make_tailer("idle-skip")
     t._SUB_DIR_POLL_INTERVAL = 0.01
     t._SUB_DIR_IDLE_POLL_INTERVAL = 0.02
@@ -254,10 +231,8 @@ async def _idle_without_pending_skips_executor_scenario() -> bool:
     task = asyncio.create_task(t._watch_subagents())
     try:
         await asyncio.sleep(0.08)
-        if submitted != 0:
-            print(f"  idle watcher submitted executor scans without pending work: {submitted}")
-            return False
-        return True
+        assert submitted == 0, \
+            f"idle watcher submitted executor scans without pending work: {submitted}"
     finally:
         t._stop_event.set()
         t._wake_subagent_scan()
@@ -268,11 +243,11 @@ async def _idle_without_pending_skips_executor_scenario() -> bool:
             pass
 
 
-def test_idle_without_pending_skips_executor_scans() -> bool:
-    return asyncio.run(_idle_without_pending_skips_executor_scenario())
+def test_idle_without_pending_skips_executor_scans() -> None:
+    asyncio.run(_idle_without_pending_skips_executor_scenario())
 
 
-async def _idle_wakeup_discovery_scenario() -> bool:
+async def _idle_wakeup_discovery_scenario() -> None:
     t = _make_tailer("idle-parent")
     t._SUB_DIR_POLL_INTERVAL = 0.01
     t._SUB_DIR_IDLE_POLL_INTERVAL = 0.2
@@ -299,19 +274,14 @@ async def _idle_wakeup_discovery_scenario() -> bool:
         deadline = time.monotonic() + 0.5
         while not spawned and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
-        if not spawned:
-            print("  backed-off watcher did not discover pending subagent")
-            return False
+        assert spawned, "backed-off watcher did not discover the pending subagent"
         agent_id, found_path, parent_tuid, agent_type = spawned[0]
-        if (
-            agent_id != "a"
-            or found_path != jsonl_path
-            or parent_tuid != "tool-1"
-            or agent_type != "general-purpose"
-        ):
-            print(f"  wrong spawned subagent tuple: {spawned[0]}")
-            return False
-        return True
+        assert (
+            agent_id == "a"
+            and found_path == jsonl_path
+            and parent_tuid == "tool-1"
+            and agent_type == "general-purpose"
+        ), f"wrong spawned subagent tuple: {spawned[0]}"
     finally:
         t._stop_event.set()
         t._wake_subagent_scan()
@@ -322,11 +292,11 @@ async def _idle_wakeup_discovery_scenario() -> bool:
             pass
 
 
-def test_backed_off_watcher_still_discovers_subagents() -> bool:
-    return asyncio.run(_idle_wakeup_discovery_scenario())
+def test_backed_off_watcher_still_discovers_subagents() -> None:
+    asyncio.run(_idle_wakeup_discovery_scenario())
 
 
-async def _known_workflow_keeps_scanning_scenario() -> bool:
+async def _known_workflow_keeps_scanning_scenario() -> None:
     t = _make_tailer("workflow-parent")
     t._SUB_DIR_POLL_INTERVAL = 0.01
     t._SUB_DIR_IDLE_POLL_INTERVAL = 0.02
@@ -346,9 +316,8 @@ async def _known_workflow_keeps_scanning_scenario() -> bool:
         deadline = time.monotonic() + 0.5
         while str(wf_path) not in t._known_workflow_dirs and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
-        if str(wf_path) not in t._known_workflow_dirs:
-            print("  workflow dir was not bound through pending Workflow claim")
-            return False
+        assert str(wf_path) in t._known_workflow_dirs, \
+            "workflow dir was not bound through the pending Workflow claim"
 
         jsonl_path = wf_path / "agent-a.jsonl"
         jsonl_path.write_text("", encoding="utf-8")
@@ -356,19 +325,15 @@ async def _known_workflow_keeps_scanning_scenario() -> bool:
         deadline = time.monotonic() + 0.5
         while not spawned and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
-        if not spawned:
-            print("  known workflow dir stopped scanning before later agent meta")
-            return False
+        assert spawned, \
+            "known workflow dir stopped scanning before the later agent meta arrived"
         agent_id, found_path, parent_tuid, agent_type = spawned[0]
-        if (
-            agent_id != "a"
-            or found_path != jsonl_path
-            or parent_tuid != "workflow-tool"
-            or agent_type != "workflow-subagent"
-        ):
-            print(f"  wrong workflow spawned tuple: {spawned[0]}")
-            return False
-        return True
+        assert (
+            agent_id == "a"
+            and found_path == jsonl_path
+            and parent_tuid == "workflow-tool"
+            and agent_type == "workflow-subagent"
+        ), f"wrong workflow spawned tuple: {spawned[0]}"
     finally:
         t._stop_event.set()
         t._wake_subagent_scan()
@@ -379,8 +344,8 @@ async def _known_workflow_keeps_scanning_scenario() -> bool:
             pass
 
 
-def test_known_workflow_keeps_scanning_for_late_agents() -> bool:
-    return asyncio.run(_known_workflow_keeps_scanning_scenario())
+def test_known_workflow_keeps_scanning_for_late_agents() -> None:
+    asyncio.run(_known_workflow_keeps_scanning_scenario())
 
 
 TESTS = [
@@ -402,22 +367,22 @@ TESTS = [
 
 
 def main_run() -> int:
-    failed = 0
+    failures: list[str] = []
     for name, fn in TESTS:
         try:
-            ok = fn()
+            fn()
+            print(f"{PASS}  {name}")
         except Exception as e:
-            ok = False
-            import traceback
             traceback.print_exc()
             print(f"  exception: {e}")
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
-            failed += 1
+            print(f"{FAIL}  {name}")
+            failures.append(name)
     print()
-    print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
-          else f"all {len(TESTS)} tests passed")
-    return 1 if failed else 0
+    if failures:
+        print(f"{len(failures)} of {len(TESTS)} test(s) FAILED")
+        return 1
+    print(f"all {len(TESTS)} tests passed")
+    return 0
 
 
 if __name__ == "__main__":

@@ -118,8 +118,8 @@ export function InstallationCapabilities({
       // Neither transport hands the new state back synchronously (the
       // intent ack is accept/reject-only; the legacy fallback's response
       // body is the OLD `InstallationProfile` shape, not this component's
-      // v2 read model) — re-pull the authoritative v2 list, same
-      // convergence rule `StartupTasksBanner.tsx` documents.
+      // v2 read model) — re-pull the authoritative v2 list rather than
+      // trust either response body.
       await refetch();
     } catch (e) {
       setError(e instanceof Error ? e.message : "update failed");

@@ -37,6 +37,13 @@ docker() {
         orphan) printf '%s\n' 'host-a|999999|dead-start' ;;
         live) printf '%s\n' "host-a|$$|$DOCKER_TEST_OWNER_START" ;;
         foreign) printf '%s\n' 'host-b|999999|dead-start' ;;
+        buildx_buildkit_*)
+          if [ -n "${DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK:-}" ]; then
+            printf '%s \n' legacy-net
+          else
+            printf '%s \n' "$DOCKER_TEST_REGISTRY_NETWORK"
+          fi
+          ;;
       esac
       ;;
     "image inspect") printf '%s\n' old ;;
@@ -47,6 +54,12 @@ docker() {
       [ "${4:-}" = "ancestor=kept" ] && printf '%s\n' using-kept
       ;;
     "buildx inspect") return 0 ;;
+    "volume inspect")
+      [ "${DOCKER_TEST_FAKE_VOLUME_MISSING:-}" != "1" ]
+      ;;
+    "run --rm")
+      printf '%s\t/data\n' "${DOCKER_TEST_FAKE_VOLUME_BYTES:-0}"
+      ;;
   esac
 }
 
@@ -59,7 +72,18 @@ hostname() {
 }
 
 id() {
-  [ "${1:-}" = -u ] && printf 'test-%s\n' "$$"
+  case "${1:-}" in
+    # -u's format is load-bearing for the symlink-lock-root test below,
+    # which independently derives TEST_LOCK_ROOT from the same "test-$$"
+    # shape docker_test_prepare_lock_root computes via `id -u`.
+    -u) printf 'test-%s\n' "$$" ;;
+    -g) printf 'test-gid-%s\n' "$$" ;;
+  esac
+}
+
+FAKE_UNAME_S="Darwin"
+uname() {
+  [ "${1:-}" = -s ] && printf '%s\n' "$FAKE_UNAME_S"
 }
 
 docker_test_with_builder_lock() {
@@ -96,11 +120,115 @@ assert_logged "buildx prune --builder better-agent-tests --force --max-used-spac
 assert_not_logged "volume"
 assert_not_logged "system prune"
 
+[ "$(docker_test_size_to_bytes 10GB)" -eq 10737418240 ] || fail "size_to_bytes: 10GB parsed incorrectly"
+[ "$(docker_test_size_to_bytes 512MB)" -eq 536870912 ] || fail "size_to_bytes: 512MB parsed incorrectly"
+[ "$(docker_test_size_to_bytes 100)" -eq 100 ] || fail "size_to_bytes: bare byte count parsed incorrectly"
+
+# Registry storage is a disposable cache: below the cap it is left alone;
+# once it exceeds the cap, container+volume are deleted so the next
+# materialize recreates them fresh (no in-place GC).
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_BYTES=$((5 * 1024 * 1024 * 1024))
+docker_test_ensure_registry_within_cap
+assert_not_logged "rm -f $DOCKER_TEST_REGISTRY"
+assert_not_logged "volume rm"
+
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_BYTES=$((20 * 1024 * 1024 * 1024))
+docker_test_ensure_registry_within_cap
+assert_logged "rm -f $DOCKER_TEST_REGISTRY"
+assert_logged "volume rm $DOCKER_TEST_REGISTRY_VOLUME"
+unset DOCKER_TEST_FAKE_VOLUME_BYTES
+
+: > "$LOG"
+DOCKER_TEST_FAKE_VOLUME_MISSING=1
+docker_test_registry_volume_bytes_result="$(docker_test_registry_volume_bytes)"
+[ "$docker_test_registry_volume_bytes_result" -eq 0 ] || fail "missing registry volume did not report 0 bytes"
+unset DOCKER_TEST_FAKE_VOLUME_MISSING
+
+# Builder network attachment is migrated only when missing, under the
+# builder lock, so concurrent sessions never see a half-configured builder.
+: > "$LOG"
+docker_test_ensure_builder_on_network
+assert_not_logged "buildx rm"
+assert_not_logged "buildx create --name"
+
+: > "$LOG"
+DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK=1
+docker_test_ensure_builder_on_network
+assert_logged "buildx rm better-agent-tests"
+assert_logged "buildx create --name better-agent-tests --driver docker-container --driver-opt network=$DOCKER_TEST_REGISTRY_NETWORK"
+unset DOCKER_TEST_FAKE_BUILDER_OFF_NETWORK
+
 : > "$LOG"
 docker_test_run --rm example -k smoke
 assert_logged "run --name better-agent-test-backend-"
 assert_logged "--label com.better-agent.test.run="
 assert_not_logged "volume rm"
+
+# Resource caps: unset env preserves the long-standing --cpus=2 default and
+# emits neither --memory nor --cpu-shares (both previously absent).
+unset BETTER_AGENT_TEST_CPUS BETTER_AGENT_TEST_MEMORY BETTER_AGENT_TEST_CPU_SHARES
+default_cap_args="$(docker_test_resource_cap_args)"
+[ "$default_cap_args" = "--cpus=2" ] \
+  || fail "default resource cap args changed local behavior: $default_cap_args"
+
+# Setting the knobs must reach the actual docker invocation, memory paired
+# with a matching --memory-swap (no swap thrash), unset shares still absent.
+RUN_ARGS_UNDER_TEST=()
+while IFS= read -r cap_arg; do
+  RUN_ARGS_UNDER_TEST+=("$cap_arg")
+done < <(BETTER_AGENT_TEST_CPUS=4 BETTER_AGENT_TEST_MEMORY=2g docker_test_resource_cap_args)
+[ "${RUN_ARGS_UNDER_TEST[*]}" = "--cpus=4 --memory=2g --memory-swap=2g" ] \
+  || fail "set BETTER_AGENT_TEST_CPUS/_MEMORY did not produce expected docker flags: ${RUN_ARGS_UNDER_TEST[*]}"
+
+: > "$LOG"
+docker_test_run "${RUN_ARGS_UNDER_TEST[@]}" example -k smoke
+assert_logged "run --name better-agent-test-backend-"
+assert_logged "--cpus=4 --memory=2g --memory-swap=2g example -k smoke"
+
+# CPU shares is an independent, still-optional knob (relative weight, not a
+# hard ceiling) — absent unless explicitly set.
+shares_cap_args="$(BETTER_AGENT_TEST_CPU_SHARES=512 docker_test_resource_cap_args)"
+[ "$shares_cap_args" = "$(printf '%s\n%s' '--cpus=2' '--cpu-shares=512')" ] \
+  || fail "set BETTER_AGENT_TEST_CPU_SHARES did not produce expected docker flag: $shares_cap_args"
+
+# BETTER_AGENT_TEST_CHOWN forwarding (docker_test_chown_env_args): must
+# reach the docker invocation on native Linux Docker hosts, so
+# entrypoint-test.sh can hand bind-mounted /repo ownership back to the
+# invoking user, and must be a complete no-op everywhere else (macOS/Docker
+# Desktop already remaps bind-mount ownership).
+FAKE_UNAME_S="Darwin"
+darwin_chown_args="$(docker_test_chown_env_args)"
+[ -z "$darwin_chown_args" ] \
+  || fail "docker_test_chown_env_args emitted flags on Darwin: $darwin_chown_args"
+
+FAKE_UNAME_S="Linux"
+linux_chown_args="$(docker_test_chown_env_args)"
+[ "$linux_chown_args" = "$(printf -- '-e\nBETTER_AGENT_TEST_CHOWN=test-%s:test-gid-%s' "$$" "$$")" ] \
+  || fail "docker_test_chown_env_args did not forward uid:gid on Linux: $linux_chown_args"
+
+CHOWN_ARGS_UNDER_TEST=()
+while IFS= read -r chown_arg; do
+  CHOWN_ARGS_UNDER_TEST+=("$chown_arg")
+done < <(docker_test_chown_env_args)
+: > "$LOG"
+docker_test_run "${CHOWN_ARGS_UNDER_TEST[@]}" example -k smoke
+assert_logged "-e BETTER_AGENT_TEST_CHOWN=test-$$:test-gid-$$ example -k smoke"
+
+FAKE_UNAME_S="Darwin"
+CHOWN_ARGS_UNDER_TEST_DARWIN=()
+while IFS= read -r chown_arg; do
+  CHOWN_ARGS_UNDER_TEST_DARWIN+=("$chown_arg")
+done < <(docker_test_chown_env_args)
+[ "${#CHOWN_ARGS_UNDER_TEST_DARWIN[@]}" -eq 0 ] \
+  || fail "docker_test_chown_env_args produced flags on Darwin: ${CHOWN_ARGS_UNDER_TEST_DARWIN[*]}"
+: > "$LOG"
+docker_test_run ${CHOWN_ARGS_UNDER_TEST_DARWIN[@]+"${CHOWN_ARGS_UNDER_TEST_DARWIN[@]}"} example -k smoke
+assert_not_logged "BETTER_AGENT_TEST_CHOWN"
+
+grep -F 'docker_test_chown_env_args' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not forward docker_test_chown_env_args into RUN_ARGS"
 
 for runner in "$HERE/run-backend-tests.sh" "$HERE/run-fullstack-tests.sh"; do
   grep -F 'source "$HERE/lib/docker-test-lifecycle.sh"' "$runner" >/dev/null \

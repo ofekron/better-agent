@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from event_shape import (
-    extract_output_text as _extract_output_text,
     is_synthetic_event as _is_synthetic_event,
 )
 import perf

@@ -733,6 +733,33 @@ class TestRunTeamDefinitionActivation:
         assert team_activation_store.get(act["id"])["status"] == "failed"
         assert team_store.get("team-pf") is None
 
+    def test_provisioned_worker_not_created_records_no_session(self, configured):
+        # The provisioner reports a worker that was not created, so it carries
+        # no session id to record for rollback — the if-False branch of the
+        # provisioning loop. Activation still completes.
+        act = team_activation_store.create(
+            root_session_id="root-1",
+            team_instance_id="team-nc",
+            source_id="src",
+            profile="prof",
+        )
+        configured.provisioner.result = {"workers": [{"created": False}]}
+        asyncio.run(
+            _run_with_id(
+                act["id"],
+                root_session_id="root-1",
+                plan={
+                    "team_instance_id": "team-nc",
+                    "profile": "prof",
+                    "manager": {"id": "mgr"},
+                    "activate": [{"member_id": "w1"}],
+                },
+                default_cwd="/repo",
+                bare_config=False,
+            )
+        )
+        assert team_activation_store.get(act["id"])["status"] == "complete"
+
 
 async def _run_with_id(activation_id, **kwargs):
     """Thin wrapper so each engine test passes a real activation_id."""
@@ -773,6 +800,17 @@ class TestRollbackTeamActivation:
             internal_orchestration_api._rollback_team_activation("", ["sess-1"])
         )
         assert rolled == ["sess-1"]
+
+    def test_falsy_delete_result_is_not_recorded(self, configured):
+        # A delete that returns falsy (session did not exist / no-op) must not
+        # be appended to the rolled-back list — the if-False branch of the
+        # rollback loop. An empty team_id keeps this focused on that branch.
+        configured.deleter.result = False
+        rolled_back = asyncio.run(
+            internal_orchestration_api._rollback_team_activation("", ["sess-1"])
+        )
+        assert rolled_back == []
+        assert configured.deleter.calls[0][0] == ("sess-1",)
 
     def test_team_delete_failure_is_logged_not_fatal(self, configured, monkeypatch):
         # Sessions rolled back fine, but team_store.delete raises — rollback

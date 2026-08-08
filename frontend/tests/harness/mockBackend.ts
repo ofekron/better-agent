@@ -28,7 +28,7 @@ import type {
  *  Single source for the `/api/extensions/<id>/backend/...` proxy family:
  *  a known id re-dispatches onto the canonical /api/... handler below, so
  *  each endpoint keeps exactly one mock implementation. */
-export const TEST_BUILTIN_EXTENSION_IDS: Record<BuiltinExtensionKey, string> = {
+const TEST_BUILTIN_EXTENSION_IDS: Record<BuiltinExtensionKey, string> = {
   ask: "ofek-dev.ask",
   team: "ofek-dev.team-orchestration",
   supervisor: "ofek-dev.supervisor",
@@ -872,7 +872,6 @@ export class MockBackend {
     // patch turns into a `window.setTimeout(send, 0)` POST to
     // /api/logs/frontend — a real timer with no unmount hook that can fire
     // during a LATER, unrelated test and pollute ITS fetch mock/call count.
-    if (method === "GET" && path === "/api/startup_tasks") return [];
     if (method === "GET" && path === "/api/extensions/app-settings") {
       return { sections: [] };
     }
@@ -1786,6 +1785,31 @@ export class MockBackend {
     }
     if (method === "GET" && path === "/api/config") return this.state.config;
     if (method === "POST" && path === "/api/config") return { ok: true };
+    // `HarnessProfileSelector` (mounted inside `NewSessionModal`, gates its
+    // create button on this resolving) — mirrors
+    // `backend/harness_profiles_api.py::list_harness_profiles`'s always-
+    // present synthetic "default" entry. No suite currently needs to seed
+    // named profiles, so this stays a fixed always-empty-of-named-profiles
+    // response rather than a `BackendState` field.
+    if (method === "GET" && path === "/api/harness-profiles") {
+      return {
+        profiles: [{
+          id: "default",
+          name: "Default",
+          description: "The live harness state before any profile override is applied.",
+          revision: "",
+          base_profile_id: null,
+          base_profile_revision: null,
+          default_runtime_profile_id: null,
+          default_model: null,
+          default_reasoning_effort: null,
+          provisioning_prompt: null,
+          read_only: false,
+          source: "",
+          extension_id: "",
+        }],
+      };
+    }
     const traceMatch = path.match(/^\/api\/traces\/([^/]+)$/);
     if (traceMatch && method === "GET") {
       return this.state.traces[traceMatch[1]] ?? notFound();

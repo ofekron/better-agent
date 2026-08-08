@@ -49,11 +49,6 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _check(cond: bool, name: str, detail: str = "") -> bool:
-    print(f"{PASS if cond else FAIL} {name}{'' if cond else ' -- ' + detail}")
-    return cond
-
-
 def _fresh() -> EventIngester:
     return EventIngester()
 
@@ -85,15 +80,13 @@ def _write_bytes(root_id: str, name: str, data: bytes) -> str:
 # --------------------------------------------------------------------------- #
 # _ref_ctx_for_root
 # --------------------------------------------------------------------------- #
-def test_ref_ctx_for_root() -> bool:
-    ok = True
+def test_ref_ctx_for_root():
     # Primary node, real cwd -> (cwd, False).
     sess = session_store.create_session(
         name="boot", cwd="/tmp", node_id="primary", id="boot-refctx-primary",
     )
     cwd, is_remote = event_ingester._ref_ctx_for_root(sess["id"])
-    ok = _check(cwd == "/tmp" and is_remote is False,
-                "primary session -> (cwd, False)", f"{cwd!r},{is_remote!r}") and ok
+    assert cwd == "/tmp" and is_remote is False, f"primary session -> (cwd, False) -- {cwd!r},{is_remote!r}"
     # Empty cwd -> (None, False). create_session fills empty cwd with
     # os.getcwd(), so drive this branch by injecting a summary whose cwd
     # is the empty string directly.
@@ -107,15 +100,13 @@ def test_ref_ctx_for_root() -> bool:
         cwd2, is_remote2 = event_ingester._ref_ctx_for_root("boot-refctx-nocwd")
     finally:
         session_store.summary_fields_many = orig_sfm  # type: ignore[assignment]
-    ok = _check(cwd2 is None and is_remote2 is False,
-                "empty cwd -> (None, False)", f"{cwd2!r},{is_remote2!r}") and ok
+    assert cwd2 is None and is_remote2 is False, f"empty cwd -> (None, False) -- {cwd2!r},{is_remote2!r}"
     # Non-primary node -> assume_exists True (files live on the node).
     sess3 = session_store.create_session(
         name="boot3", cwd="/tmp", node_id="node-remote", id="boot-refctx-remote",
     )
     cwd3, is_remote3 = event_ingester._ref_ctx_for_root(sess3["id"])
-    ok = _check(cwd3 == "/tmp" and is_remote3 is True,
-                "non-primary node -> (cwd, True)", f"{cwd3!r},{is_remote3!r}") and ok
+    assert cwd3 == "/tmp" and is_remote3 is True, f"non-primary node -> (cwd, True) -- {cwd3!r},{is_remote3!r}"
     # Lookup raises -> defensive (None, False).
     orig = session_store.summary_fields_many
 
@@ -127,43 +118,30 @@ def test_ref_ctx_for_root() -> bool:
         cwd4, is_remote4 = event_ingester._ref_ctx_for_root("never")
     finally:
         session_store.summary_fields_many = orig  # type: ignore[assignment]
-    ok = _check(cwd4 is None and is_remote4 is False,
-                "lookup exception -> (None, False)", f"{cwd4!r},{is_remote4!r}") and ok
+    assert cwd4 is None and is_remote4 is False, f"lookup exception -> (None, False) -- {cwd4!r},{is_remote4!r}"
     # Unknown root (no summary) -> (None, False) via the dict-miss path.
     cwd5, is_remote5 = event_ingester._ref_ctx_for_root("does-not-exist-sid")
-    ok = _check(cwd5 is None and is_remote5 is False,
-                "unknown root -> (None, False)", f"{cwd5!r},{is_remote5!r}") and ok
-    return ok
+    assert cwd5 is None and is_remote5 is False, f"unknown root -> (None, False) -- {cwd5!r},{is_remote5!r}"
 
 
 # --------------------------------------------------------------------------- #
 # _event_file_signature: stat OSError
 # --------------------------------------------------------------------------- #
-def test_event_file_signature_oserror() -> bool:
-    ok = True
+def test_event_file_signature_oserror():
     # A path whose parent does not exist -> stat raises OSError -> None.
     missing = Path(_root_dir("sig-missing")) / "events.jsonl"
-    ok = _check(
-        EventIngester._event_file_signature(missing) is None,
-        "stat OSError -> None", f"{missing}",
-    ) and ok
-    ok = _check(
-        EventIngester._event_file_identity(missing) is None,
-        "identity stat OSError -> None", f"{missing}",
-    ) and ok
+    assert EventIngester._event_file_signature(missing) is None, f"stat OSError -> None -- {missing}"
+    assert EventIngester._event_file_identity(missing) is None, f"identity stat OSError -> None -- {missing}"
     # Existing file -> real (mtime_ns, size) tuple.
     real = Path(_write_bytes("sig-ok", "events.jsonl", b"hi\n"))
     sig = EventIngester._event_file_signature(real)
-    ok = _check(sig is not None and sig[1] == 3,
-                "existing file signature", f"{sig}") and ok
-    return ok
+    assert sig is not None and sig[1] == 3, f"existing file signature -- {sig}"
 
 
 # --------------------------------------------------------------------------- #
 # _seed_write_caches_locked: hash fallback, sid/seq skip, projection folding
 # --------------------------------------------------------------------------- #
-def test_seed_write_caches_locked() -> bool:
-    ok = True
+def test_seed_write_caches_locked():
     ing = _fresh()
     root = "boot-seed"
     # Mixed-type dict keys (int + str) -> json.dumps(sort_keys=True) raises
@@ -193,42 +171,34 @@ def test_seed_write_caches_locked() -> bool:
     seq_offsets = [0, 10, 20, 30, 40, 50, 60]
     ing._seed_write_caches_locked(root, entries, seq_offsets, 70, (1, 2, 3, 70))
     # seq seeded to count of entries.
-    ok = _check(ing._seq[root] == 7, "seq seeded to entry count",
-                f"{ing._seq[root]}") and ok
-    ok = _check(ing._seq_offsets[root] == seq_offsets, "seq_offsets seeded") and ok
+    assert ing._seq[root] == 7, f"seq seeded to entry count -- {ing._seq[root]}"
+    assert ing._seq_offsets[root] == seq_offsets, "seq_offsets seeded"
     # max_seq_by_sid only captures valid sid/seq (entries 2,3 skipped).
-    ok = _check(ing._max_seq_by_sid[root] == {"s1": 7},
-                "max_seq_by_sid s1==7", f"{ing._max_seq_by_sid[root]}") and ok
+    assert ing._max_seq_by_sid[root] == {"s1": 7}, f"max_seq_by_sid s1==7 -- {ing._max_seq_by_sid[root]}"
     # render projection skips user_message but INCLUDES ownership_resolved
     # (it is in the render set), so s1 max = max(seq 1, 3, 4, 6) = 6.
-    ok = _check(ing._render_seq_by_sid[root] == {"s1": 6},
-                "render_seq s1==6 (agent+manager+ownership)",
-                f"{ing._render_seq_by_sid[root]}") and ok
+    assert ing._render_seq_by_sid[root] == {"s1": 6}, (
+        f"render_seq s1==6 (agent+manager+ownership) -- {ing._render_seq_by_sid[root]}")
     # candidate version: seq 3 was a candidate, then resolved -> folds to 0.
-    ok = _check(ing._root_events_candidate_version[root] == 0,
-                "resolved candidate folds to 0",
-                f"{ing._root_events_candidate_version[root]}") and ok
+    assert ing._root_events_candidate_version[root] == 0, (
+        f"resolved candidate folds to 0 -- {ing._root_events_candidate_version[root]}")
     # root_events_version counts every root-projection row (agent/manager/
     # ownership_resolved): entries 1,4,5,6 = 4 (2/3 skipped, 7 non-projection).
-    ok = _check(ing._root_events_version[root] == 4,
-                "root_events_version == 4", f"{ing._root_events_version[root]}") and ok
+    assert ing._root_events_version[root] == 4, f"root_events_version == 4 -- {ing._root_events_version[root]}"
     # mixed-key fallback hash present in seen set (uid-keyed).
     seen = ing._seen_uuids[root]
-    ok = _check(any(k.startswith("u1:") for k in seen),
-                "mixed-key data hashed via fallback", f"{seen}") and ok
-    return ok
+    assert any(k.startswith("u1:") for k in seen), f"mixed-key data hashed via fallback -- {seen}"
 
 
 # --------------------------------------------------------------------------- #
 # _load_event_meta_sidecar_locked
 # --------------------------------------------------------------------------- #
-def test_load_event_meta_sidecar() -> bool:
-    ok = True
+def test_load_event_meta_sidecar():
     ing = _fresh()
     root = "boot-meta"
     # Missing events file -> signature None -> None (253).
     ret = ing._load_event_meta_sidecar_locked(root, Path(_events_path(root)))
-    ok = _check(ret is None, "missing signature -> None", f"{ret}") and ok
+    assert ret is None, f"missing signature -> None -- {ret}"
 
     # Write events.jsonl + a fresh sidecar whose signature matches.
     epath = _write_bytes(root, "events.jsonl", b'{"seq":1}\n{"seq":2}\n')
@@ -242,23 +212,19 @@ def test_load_event_meta_sidecar() -> bool:
     }
     _write_bytes(root, "event_meta.json", json.dumps(sidecar).encode())
     ret = ing._load_event_meta_sidecar_locked(root, Path(epath))
-    ok = _check(ret == {"s1": 2}, "valid load returns max_by_sid",
-                f"{ret}") and ok
-    ok = _check(ing._seq[root] == 2, "seq loaded from sidecar",
-                f"{ing._seq.get(root)}") and ok
-    ok = _check(ing._root_events_version[root] == 5,
-                "root_events_version loaded", f"{ing._root_events_version[root]}") and ok
+    assert ret == {"s1": 2}, f"valid load returns max_by_sid -- {ret}"
+    assert ing._seq[root] == 2, f"seq loaded from sidecar -- {ing._seq.get(root)}"
+    assert ing._root_events_version[root] == 5, f"root_events_version loaded -- {ing._root_events_version[root]}"
     # root_events_cache populated (282-291).
     cached = ing._root_events_cache.get(root)
-    ok = _check(cached is not None and cached[0] == 5 and "s1" in cached[1],
-                "root_events_cache populated", f"{cached}") and ok
+    assert cached is not None and cached[0] == 5 and "s1" in cached[1], f"root_events_cache populated -- {cached}"
 
     # Stale signature -> rejected.
     ing2 = _fresh()
     sidecar["mtime_ns"] = sidecar["mtime_ns"] + 9999
     _write_bytes(root, "event_meta.json", json.dumps(sidecar).encode())
     ret2 = ing2._load_event_meta_sidecar_locked(root, Path(epath))
-    ok = _check(ret2 is None, "stale signature -> None", f"{ret2}") and ok
+    assert ret2 is None, f"stale signature -> None -- {ret2}"
 
     # Non-dict root_events_by_sid -> projection skipped (282 False branch).
     ing3 = _fresh()
@@ -267,19 +233,15 @@ def test_load_event_meta_sidecar() -> bool:
     sidecar2["root_events_by_sid"] = "not-a-dict"
     _write_bytes(root, "event_meta.json", json.dumps(sidecar2).encode())
     ret3 = ing3._load_event_meta_sidecar_locked(root, Path(epath))
-    ok = _check(ret3 == {"s1": 2}, "non-dict root_events still loads max_by_sid",
-                f"{ret3}") and ok
-    ok = _check(ing3._root_events_cache.get(root) is None,
-                "non-dict root_events -> no cache entry",
-                f"{ing3._root_events_cache.get(root)}") and ok
-    return ok
+    assert ret3 == {"s1": 2}, f"non-dict root_events still loads max_by_sid -- {ret3}"
+    assert ing3._root_events_cache.get(root) is None, (
+        f"non-dict root_events -> no cache entry -- {ing3._root_events_cache.get(root)}")
 
 
 # --------------------------------------------------------------------------- #
 # _write_event_meta_sidecar_locked: signature None + OSError unlink fallback
 # --------------------------------------------------------------------------- #
-def test_write_event_meta_sidecar() -> bool:
-    ok = True
+def test_write_event_meta_sidecar():
     ing = _fresh()
     root = "boot-wmeta"
     # Missing events file -> signature None -> no-op (309).
@@ -288,8 +250,7 @@ def test_write_event_meta_sidecar() -> bool:
         max_by_sid={"s1": 1}, render_by_sid={"s1": 1},
         root_events_version=1, root_events_candidate_version=0, seq=1,
     )
-    ok = _check(not os.path.exists(_meta_path(root)),
-                "missing signature -> no sidecar written") and ok
+    assert not os.path.exists(_meta_path(root)), "missing signature -> no sidecar written"
 
     # Real file; monkeypatch os.replace to raise -> tmp unlink fallback.
     epath = _write_bytes(root, "events.jsonl", b'{"seq":1}\n')
@@ -311,12 +272,11 @@ def test_write_event_meta_sidecar() -> bool:
         event_ingester.os.replace = orig_replace  # type: ignore[attr-defined]
     # tmp file cleaned up by the unlink fallback (325-328).
     tmp = _meta_path(root) + ".tmp"
-    ok = _check(not os.path.exists(tmp),
-                "OSError -> tmp unlinked", f"{tmp}") and ok
-    ok = _check(not os.path.exists(_meta_path(root)),
-                "OSError -> no sidecar finalized") and ok
+    assert not os.path.exists(tmp), f"OSError -> tmp unlinked -- {tmp}"
+    assert not os.path.exists(_meta_path(root)), "OSError -> no sidecar finalized"
 
     # Nested unlink failure: tmp removal also raises -> swallowed (328-329).
+    # Reaching here proves the nested OSError did not propagate.
     epath2 = _write_bytes("boot-wmeta2", "events.jsonl", b'{"seq":1}\n')
     root2 = "boot-wmeta2"
     orig_unlink = os.unlink
@@ -335,57 +295,51 @@ def test_write_event_meta_sidecar() -> bool:
     finally:
         event_ingester.os.replace = orig_replace  # type: ignore[attr-defined]
         event_ingester.os.unlink = orig_unlink  # type: ignore[attr-defined]
-    ok = _check(True, "nested unlink OSError swallowed (no raise)") and ok
-    return ok
+    # nested unlink OSError swallowed: control reached past the call.
 
 
 # --------------------------------------------------------------------------- #
 # _load_event_summaries_sidecar_locked + _valid_worker_rows / _valid_seq_offsets
 # --------------------------------------------------------------------------- #
-def test_valid_worker_rows() -> bool:
-    ok = True
+def test_valid_worker_rows():
     V = EventIngester._valid_worker_rows
     fs = 100
-    ok = _check(V("not a dict", fs) is False, "non-dict -> False") and ok
-    ok = _check(V({123: []}, fs) is False, "non-str delegation_id -> False") and ok
-    ok = _check(V({"d": "notlist"}, fs) is False, "non-list spans -> False") and ok
-    ok = _check(V({"d": "notlist-inner"}, fs) is False, "span not list -> False") and ok
-    ok = _check(V({"d": [123]}, fs) is False, "span non-list elem -> False") and ok
-    ok = _check(V({"d": [[1]]}, fs) is False, "span len!=2 -> False") and ok
-    ok = _check(V({"d": [[1, "x"]]}, fs) is False, "span non-int -> False") and ok
-    ok = _check(V({"d": [[True, 2]]}, fs) is False, "span bool -> False") and ok
-    ok = _check(V({"d": [[10, 5]]}, fs) is False, "span start>=end -> False") and ok
-    ok = _check(V({"d": [[-1, 5]]}, fs) is False, "span negative -> False") and ok
-    ok = _check(V({"d": [[90, 200]]}, fs) is False, "span beyond file_size -> False") and ok
-    ok = _check(V({"d": [[0, 50], [50, 100]]}, fs) is True, "valid -> True") and ok
-    ok = _check(V({}, fs) is True, "empty dict -> True") and ok
-    return ok
+    assert V("not a dict", fs) is False, "non-dict -> False"
+    assert V({123: []}, fs) is False, "non-str delegation_id -> False"
+    assert V({"d": "notlist"}, fs) is False, "non-list spans -> False"
+    assert V({"d": "notlist-inner"}, fs) is False, "span not list -> False"
+    assert V({"d": [123]}, fs) is False, "span non-list elem -> False"
+    assert V({"d": [[1]]}, fs) is False, "span len!=2 -> False"
+    assert V({"d": [[1, "x"]]}, fs) is False, "span non-int -> False"
+    assert V({"d": [[True, 2]]}, fs) is False, "span bool -> False"
+    assert V({"d": [[10, 5]]}, fs) is False, "span start>=end -> False"
+    assert V({"d": [[-1, 5]]}, fs) is False, "span negative -> False"
+    assert V({"d": [[90, 200]]}, fs) is False, "span beyond file_size -> False"
+    assert V({"d": [[0, 50], [50, 100]]}, fs) is True, "valid -> True"
+    assert V({}, fs) is True, "empty dict -> True"
 
 
-def test_valid_seq_offsets() -> bool:
-    ok = True
+def test_valid_seq_offsets():
     V = EventIngester._valid_seq_offsets
     fs = 100
-    ok = _check(V("nope", fs) is False, "non-list -> False (400)") and ok
-    ok = _check(V([1, "x"], fs) is False, "non-int elem -> False (403-404)") and ok
-    ok = _check(V([1, True], fs) is False, "bool elem -> False") and ok
-    ok = _check(V([10, 5], fs) is False, "non-monotonic -> False (405-406)") and ok
-    ok = _check(V([-1, 5], fs) is False, "negative offset -> False (407)") and ok
-    ok = _check(V([90, 200], fs) is False, "offset >= file_size -> False (408)") and ok
-    ok = _check(V([], 10) is False, "empty list + non-empty file -> False (410)") and ok
-    ok = _check(V([], 0) is True, "empty list + empty file -> True (410)") and ok
-    ok = _check(V([0, 10, 20], fs) is True, "valid monotonic -> True") and ok
-    return ok
+    assert V("nope", fs) is False, "non-list -> False (400)"
+    assert V([1, "x"], fs) is False, "non-int elem -> False (403-404)"
+    assert V([1, True], fs) is False, "bool elem -> False"
+    assert V([10, 5], fs) is False, "non-monotonic -> False (405-406)"
+    assert V([-1, 5], fs) is False, "negative offset -> False (407)"
+    assert V([90, 200], fs) is False, "offset >= file_size -> False (408)"
+    assert V([], 10) is False, "empty list + non-empty file -> False (410)"
+    assert V([], 0) is True, "empty list + empty file -> True (410)"
+    assert V([0, 10, 20], fs) is True, "valid monotonic -> True"
 
 
-def test_load_event_summaries_sidecar() -> bool:
-    ok = True
+def test_load_event_summaries_sidecar():
     ing = _fresh()
     root = "boot-summ"
     # Missing events file -> signature None (336).
     ret = ing._load_event_summaries_sidecar_locked(
         root, Path(_events_path(root)), tail=5)
-    ok = _check(ret is None, "missing signature -> None", f"{ret}") and ok
+    assert ret is None, f"missing signature -> None -- {ret}"
 
     # Valid sidecar with a non-int resolution key (skipped) + a good one.
     epath = _write_bytes(root, "events.jsonl", b'{"seq":1}\n{"seq":2}\n')
@@ -401,49 +355,42 @@ def test_load_event_summaries_sidecar() -> bool:
     }
     _write_bytes(root, "event_summaries.json", json.dumps(sidecar).encode())
     ret = ing._load_event_summaries_sidecar_locked(root, Path(epath), tail=5)
-    ok = _check(ret is not None and ret[1] == {2: "m1"},
-                "valid load, non-int resolution skipped",
-                f"{ret}") and ok
-    ok = _check(ing._seq_offsets[root] == [0, 12],
-                "seq_offsets loaded", f"{ing._seq_offsets.get(root)}") and ok
-    ok = _check(ing._worker_rows[root] == {"d1": [(0, 12)]},
-                "worker_rows loaded", f"{ing._worker_rows.get(root)}") and ok
+    assert ret is not None and ret[1] == {2: "m1"}, (
+        f"valid load, non-int resolution skipped -- {ret}")
+    assert ing._seq_offsets[root] == [0, 12], f"seq_offsets loaded -- {ing._seq_offsets.get(root)}"
+    assert ing._worker_rows[root] == {"d1": [(0, 12)]}, f"worker_rows loaded -- {ing._worker_rows.get(root)}"
 
     # Stale (wrong tail) -> rejected.
     ing2 = _fresh()
     ret2 = ing2._load_event_summaries_sidecar_locked(root, Path(epath), tail=99)
-    ok = _check(ret2 is None, "tail mismatch -> None", f"{ret2}") and ok
+    assert ret2 is None, f"tail mismatch -> None -- {ret2}"
 
     # Bad worker_rows shape -> rejected.
     ing3 = _fresh()
     sidecar["worker_rows"] = {"d1": [[999, 50]]}  # start>=end -> invalid
     _write_bytes(root, "event_summaries.json", json.dumps(sidecar).encode())
     ret3 = ing3._load_event_summaries_sidecar_locked(root, Path(epath), tail=5)
-    ok = _check(ret3 is None, "invalid worker_rows -> None", f"{ret3}") and ok
-    return ok
+    assert ret3 is None, f"invalid worker_rows -> None -- {ret3}"
 
 
 # --------------------------------------------------------------------------- #
 # _write_event_summaries_sidecar_locked: signature None + guard skip + OSError
 # --------------------------------------------------------------------------- #
-def test_write_event_summaries_sidecar() -> bool:
-    ok = True
+def test_write_event_summaries_sidecar():
     ing = _fresh()
     root = "boot-wsumm"
     # Missing events file -> signature None -> no-op (423).
     ing._write_event_summaries_sidecar_locked(
         root, Path(_events_path(root)), tail=5,
         summaries={"m1": {}}, resolutions={1: "m1"})
-    ok = _check(not os.path.exists(_summaries_path(root)),
-                "missing signature -> no write") and ok
+    assert not os.path.exists(_summaries_path(root)), "missing signature -> no write"
 
     # Guard mismatch: seq_offsets absent -> skip (425-431).
     epath = _write_bytes(root, "events.jsonl", b'{"seq":1}\n')
     ing._write_event_summaries_sidecar_locked(
         root, Path(epath), tail=5,
         summaries={"m1": {}}, resolutions={1: "m1"})
-    ok = _check(not os.path.exists(_summaries_path(root)),
-                "no seq_offsets -> guard skip") and ok
+    assert not os.path.exists(_summaries_path(root)), "no seq_offsets -> guard skip"
 
     # Seed valid offsets, then OSError on os.replace -> tmp unlink (452-456).
     ing._seq_offsets[root] = [0]
@@ -459,11 +406,11 @@ def test_write_event_summaries_sidecar() -> bool:
     finally:
         event_ingester.os.replace = orig_replace  # type: ignore[attr-defined]
     tmp = _summaries_path(root) + ".tmp"
-    ok = _check(not os.path.exists(tmp), "OSError -> tmp cleaned") and ok
-    ok = _check(not os.path.exists(_summaries_path(root)),
-                "OSError -> no final sidecar") and ok
+    assert not os.path.exists(tmp), "OSError -> tmp cleaned"
+    assert not os.path.exists(_summaries_path(root)), "OSError -> no final sidecar"
 
     # Nested unlink failure: tmp removal also raises -> swallowed (455-456).
+    # Reaching here proves the nested OSError did not propagate.
     ing2 = _fresh()
     ing2._seq_offsets[root] = [0]
     ing2._next_offset[root] = len(b'{"seq":1}\n')
@@ -472,25 +419,23 @@ def test_write_event_summaries_sidecar() -> bool:
     event_ingester.os.replace = lambda _s, _d: (_ for _ in ()).throw(OSError("x"))  # type: ignore[attr-defined]
     event_ingester.os.unlink = lambda _p: (_ for _ in ()).throw(OSError("unlink boom"))  # type: ignore[attr-defined]
     try:
-        ing2._write_event_summaries_sidecar_locked(  # must not raise
+        ing2._write_event_summaries_sidecar_locked(
             root, Path(epath), tail=5,
             summaries={"m1": {}}, resolutions={1: "m1"})
     finally:
         event_ingester.os.replace = orig_replace  # type: ignore[attr-defined]
         event_ingester.os.unlink = orig_unlink  # type: ignore[attr-defined]
-    ok = _check(True, "summaries nested unlink OSError swallowed") and ok
-    return ok
+    # summaries nested unlink OSError swallowed: control reached past the call.
 
 
 # --------------------------------------------------------------------------- #
 # _close_handle_locked: fsync OSError on drain (479-480)
 # --------------------------------------------------------------------------- #
-def test_close_handle_fsync_oserror() -> bool:
-    ok = True
+def test_close_handle_fsync_oserror():
     ing = _fresh()
     root = "boot-closefsync"
     epath = _write_bytes(root, "events.jsonl", b'{"seq":1}\n')
-    fh = ing._open_append_handle(root, Path(epath))
+    ing._open_append_handle(root, Path(epath))
     orig_fsync = os.fsync
     calls = {"n": 0}
 
@@ -503,16 +448,14 @@ def test_close_handle_fsync_oserror() -> bool:
         ing._close_handle_locked(root)  # must not raise
     finally:
         event_ingester.os.fsync = orig_fsync  # type: ignore[attr-defined]
-    ok = _check(calls["n"] >= 1, "fsync attempted on drain", f"{calls}") and ok
-    ok = _check(root not in ing._handles, "handle popped despite fsync OSError") and ok
-    return ok
+    assert calls["n"] >= 1, f"fsync attempted on drain -- {calls}"
+    assert root not in ing._handles, "handle popped despite fsync OSError"
 
 
 # --------------------------------------------------------------------------- #
 # _prune_append_handles: victim_lock-None skip + victim_id-None return
 # --------------------------------------------------------------------------- #
-def test_prune_append_handles_no_locks() -> bool:
-    ok = True
+def test_prune_append_handles_no_locks():
     ing = _fresh()
     # Over-cap handles, but NO per-root locks -> every victim's
     # victim_lock is None -> skipped (502-503) until victim_id is None (499).
@@ -521,24 +464,19 @@ def test_prune_append_handles_no_locks() -> bool:
         ing._handles[rid] = (Path("/nonexistent") / f"{rid}.jsonl", None)
     # _locks deliberately left empty.
     ing._prune_append_handles(exclude_root_id="boot-prune-0")
-    ok = _check(
-        len(ing._handles) == event_ingester._MAX_OPEN_APPEND_HANDLES + 5,
-        "no-lock victims all skipped -> cache unchanged",
-        f"{len(ing._handles)}") and ok
-    return ok
+    assert len(ing._handles) == event_ingester._MAX_OPEN_APPEND_HANDLES + 5, (
+        f"no-lock victims all skipped -> cache unchanged -- {len(ing._handles)}")
 
 
 # --------------------------------------------------------------------------- #
 # _fsync_dirty_now: fh-None skip + fsync OSError (580, 584-585)
 # --------------------------------------------------------------------------- #
-def test_fsync_dirty_now() -> bool:
-    ok = True
+def test_fsync_dirty_now():
     ing = _fresh()
     # Dirty root with no open handle -> fh None -> skip (580).
     ing._fsync_dirty.add("boot-fsyncnone")
     ing._fsync_dirty_now()  # must not raise
-    ok = _check("boot-fsyncnone" not in ing._fsync_dirty,
-                "fh-None root drained from dirty set") and ok
+    assert "boot-fsyncnone" not in ing._fsync_dirty, "fh-None root drained from dirty set"
 
     # Dirty root with a real handle, fsync raises -> logged, not raised (584-585).
     root = "boot-fsyncerr"
@@ -551,17 +489,14 @@ def test_fsync_dirty_now() -> bool:
         ing._fsync_dirty_now()  # must not raise
     finally:
         event_ingester.os.fsync = orig_fsync  # type: ignore[attr-defined]
-    ok = _check(root not in ing._fsync_dirty,
-                "OSError root drained from dirty set") and ok
+    assert root not in ing._fsync_dirty, "OSError root drained from dirty set"
     ing._close_handle_locked(root)
-    return ok
 
 
 # --------------------------------------------------------------------------- #
 # _ensure_open: torn-tail recovery (blank line reset + partial trailing JSON)
 # --------------------------------------------------------------------------- #
-def test_ensure_open_torn_tail() -> bool:
-    ok = True
+def test_ensure_open_torn_tail():
     ing = _fresh()
     root = "boot-torn"
     # Valid line, a blank line, a valid line, then a torn trailing partial.
@@ -574,21 +509,18 @@ def test_ensure_open_torn_tail() -> bool:
     )
     epath = Path(_write_bytes(root, "events.jsonl", body))
     original_size = epath.stat().st_size
-    ok = _check(original_size == len(body), "fixture written whole") and ok
+    assert original_size == len(body), "fixture written whole"
 
     path, fh = ing._ensure_open(root)
     # Torn tail truncated: file now ends after line 2.
     new_size = path.stat().st_size
-    ok = _check(new_size < original_size, "torn tail truncated",
-                f"{new_size} < {original_size}") and ok
+    assert new_size < original_size, f"torn tail truncated -- {new_size} < {original_size}"
     # Two valid entries seeded; next ingest gets seq 3 (not 4).
-    ok = _check(ing._seq[root] == 2, "two valid entries seeded",
-                f"{ing._seq.get(root)}") and ok
+    assert ing._seq[root] == 2, f"two valid entries seeded -- {ing._seq.get(root)}"
     s3 = ing.ingest(root, sid="s1", event_type="agent_message",
                     data={"uuid": "u3"}, source="t", msg_id="m3")
-    ok = _check(s3 == 3, "next ingest seq == 3 after truncation", f"{s3}") and ok
+    assert s3 == 3, f"next ingest seq == 3 after truncation -- {s3}"
     ing._close_handle_locked(root)
-    return ok
 
 
 TESTS = [
@@ -608,19 +540,26 @@ TESTS = [
 ]
 
 
-def main() -> int:
-    results = []
+def main() -> None:
+    failed = 0
+    total = len(TESTS)
     for test in TESTS:
         print(f"\n--- {test.__name__} ---")
         try:
-            results.append(test())
-        except Exception as exc:  # noqa: BLE001
-            print(f"{FAIL} {test.__name__} raised: {exc!r}")
-            results.append(False)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{len(results)} test groups passed")
-    return 0 if passed == len(results) else 1
+            test()
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL} {test.__name__}: {exc}")
+        except Exception:
+            failed += 1
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f"{PASS} {test.__name__}")
+    print(f"\n{total - failed}/{total} test groups passed")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

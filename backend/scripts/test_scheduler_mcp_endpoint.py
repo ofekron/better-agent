@@ -10,6 +10,18 @@ Also locks the spawn-side strip: provider_claude.start_run must append
 TIMER_TOOLS to every input.json disallowed_tools list (source-level),
 and the runner refuses to spawn without them (covered at runtime by
 test_runner_alive_outlives_complete.py / test_per_turn_runner_regression.py).
+
+Also locks that the `ofek-dev.scheduler` extension has no `internal_loopback`
+permission and never needs one: its MCP tools call
+`Client().invoke_capability("scheduler", ...)`, which POSTs to
+`/api/internal/capabilities/invoke` — a route intentionally exempted from
+the `internal_loopback` gate in `main.py`'s auth_gate because it enforces
+its own fine-grained per-`capability.action` grant instead (see
+`capability_api._require_grant`, checking the manifest's declared
+`permissions.capabilities` list). That in-process capability handler then
+calls `schedules_api.internal_schedules` directly (never over HTTP), so
+the raw `/api/internal/schedules` route stays gated by `internal_loopback`
+and correctly 403s a scheduler token that tries it directly.
 """
 from __future__ import annotations
 
@@ -199,23 +211,155 @@ def main_test() -> int:
     finally:
         restore_dispatch()
 
-    print("T8 spawn-side strip is wired (source-level)")
+    print("T8 spawn-side strip is wired (behavior-level)")
     from runs_dir import TIMER_TOOLS
     check(set(TIMER_TOOLS) == {
         "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
     }, "runs_dir.TIMER_TOOLS is the single source of the four names")
-    src = open(os.path.join(_BACKEND, "provider_claude.py")).read()
-    import ast
-    tree = ast.parse(src)
-    in_payload = False
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "start_run":
-            seg = ast.get_source_segment(src, node) or ""
-            in_payload = "TIMER_TOOLS" in seg and "disallowed_tools" in seg
-    check(in_payload, "start_run merges TIMER_TOOLS into input.json disallowed_tools")
+
+    # Behavior check, not a source-grep for a specific function name: build
+    # a real input.json payload through the provider's own payload builder
+    # and assert TIMER_TOOLS actually lands in disallowed_tools. This stays
+    # correct across internal renames/refactors of whichever private method
+    # currently owns payload assembly — only the module-level contract
+    # (ClaudeProvider produces a disallowed_tools list that always contains
+    # TIMER_TOOLS) is asserted.
+    import config_store
+    from provider_claude import ClaudeProvider
+    provider_record = config_store.add_provider({
+        "name": "T8 timer-tools test",
+        "kind": "claude",
+        "mode": "subscription",
+        "config_dir": "$HOME/.claude",
+    })
+    provider = ClaudeProvider(provider_record)
+    input_payload, _bare, _mode, _backend_url = provider._build_input_payload(
+        prompt="ping",
+        images=None,
+        files=None,
+        cwd=_TMP_HOME,
+        model=None,
+        reasoning_effort=None,
+        session_id=None,
+        mode="native",
+        app_session_id=sid,
+        source="test",
+        disallowed_tools=None,
+        setting_sources=None,
+        backend_url=None,
+        internal_token=None,
+        fork=False,
+        supervised=False,
+        supervisor_agent_session_id=None,
+        worker_agent_session_id=None,
+        mssg_sender_session_id=None,
+        is_worker=False,
+        browser_harness_enabled=False,
+        user_facing=False,
+        continuation_chain=None,
+        provider_run_config=None,
+        capability_contexts=None,
+        target_message_id=None,
+        turn_run_id=None,
+        disabled_builtin_extensions=None,
+        provisioned_tool_profile="",
+    )
+    check(
+        set(TIMER_TOOLS) <= set(input_payload.get("disallowed_tools") or []),
+        "ClaudeProvider input.json payload merges TIMER_TOOLS into disallowed_tools "
+        f"(got {input_payload.get('disallowed_tools')!r})",
+    )
     runner_src = open(os.path.join(_BACKEND, "runner.py")).read()
     check("from runs_dir import TIMER_TOOLS" in runner_src,
           "runner's fail-closed gate uses the same constant")
+
+    print("T9 scheduler has no internal_loopback — capability grant is its only path")
+    # Mirrors ofek-dev.scheduler's real `better-agent-extension.json`
+    # (better-agent-private/extensions/scheduler): permissions declare
+    # ONLY `capabilities: [scheduler.create, scheduler.list, scheduler.delete]`
+    # — no `internal_loopback`. Synthesized here (rather than depending on
+    # the extension being installed in this isolated test home) so the
+    # invariant is locked even when the extension checkout isn't present.
+    scheduler_id = "ofek-dev.scheduler"
+    scheduler_record = {
+        "enabled": True,
+        "manifest": {
+            "id": scheduler_id,
+            "permissions": {
+                "capabilities": [
+                    "scheduler.create", "scheduler.list", "scheduler.delete",
+                ],
+            },
+        },
+        "entitlement": {"status": "not_required"},
+    }
+    check(
+        extension_store.has_permission(scheduler_record, "internal_loopback") is False,
+        "scheduler manifest does NOT declare internal_loopback",
+    )
+
+    orig_get_extension = extension_store.get_extension
+    orig_is_active = extension_store.is_extension_active
+    orig_role_owners = extension_store.core_role_owners
+
+    def _get_extension(extension_id: str):
+        if extension_id == scheduler_id:
+            return scheduler_record
+        return orig_get_extension(extension_id)
+
+    def _is_active(extension_id: str) -> bool:
+        if extension_id == scheduler_id:
+            return True
+        return orig_is_active(extension_id)
+
+    def _role_owners():
+        owners = dict(orig_role_owners())
+        owners["scheduler"] = scheduler_id
+        return owners
+
+    extension_store.get_extension = _get_extension
+    extension_store.is_extension_active = _is_active
+    extension_store.core_role_owners = _role_owners
+    try:
+        import extension_token_registry
+        scheduler_token = extension_token_registry.mint(scheduler_id)
+
+        # The extension's own token, used directly against the raw
+        # loopback route, must be fail-closed rejected: scheduler was
+        # never granted internal_loopback.
+        r = CLIENT.post(
+            "/api/internal/schedules",
+            json={"action": "list", "app_session_id": sid},
+            headers={"X-Internal-Token": scheduler_token},
+        )
+        check(
+            r.status_code == 403
+            and r.json().get("detail") == "internal route requires internal_loopback permission",
+            f"scheduler token directly on /api/internal/schedules -> 403 (got {r.status_code}, {r.json()})",
+        )
+
+        # The same token DOES work on its real, production call path: the
+        # narrow capabilities/invoke gateway, authorized by the manifest's
+        # declared `capabilities` grant instead of internal_loopback.
+        r = CLIENT.post(
+            "/api/internal/capabilities/invoke",
+            json={
+                "capability": "scheduler",
+                "action": "list",
+                "payload": {"app_session_id": sid},
+            },
+            headers={"X-Internal-Token": scheduler_token},
+        )
+        check(
+            r.status_code == 200 and r.json().get("success") is True,
+            f"scheduler token via capabilities/invoke -> 200 success (got {r.status_code}, {r.json()})",
+        )
+    finally:
+        extension_store.get_extension = orig_get_extension
+        extension_store.is_extension_active = orig_is_active
+        extension_store.core_role_owners = orig_role_owners
+        import extension_token_registry
+        extension_token_registry.revoke(scheduler_id)
 
     print()
     if failures:

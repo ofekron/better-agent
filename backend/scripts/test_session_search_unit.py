@@ -1,8 +1,6 @@
 """Backend unit tests for AI-driven session search.
 
 Covers:
-  * `_extract_first_user_prompt` shape handling (string content / list
-    content / no user msgs / truncation at 200).
   * `_build_index` filtering — hidden (working_mode) / archived /
     normal — and the field shape it emits.
   * Stale-id filtering — `propose_sessions` ids that don't exist in the
@@ -138,58 +136,6 @@ def _write_session(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# _extract_first_user_prompt
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_extract_first_user_prompt_shapes() -> bool:
-    cases = [
-        ([], "", "empty list"),
-        (
-            [{"role": "assistant", "content": "hi"}],
-            "",
-            "no user msgs",
-        ),
-        (
-            [{"role": "user", "content": "fix the auth bug"}],
-            "fix the auth bug",
-            "string content",
-        ),
-        (
-            [{"role": "user", "content": [
-                {"type": "text", "text": "refactor "},
-                {"type": "text", "text": "the login flow"},
-            ]}],
-            "refactor \nthe login flow",
-            "list-of-blocks content",
-        ),
-        (
-            [
-                {"role": "user", "content": ""},  # empty user msg skipped
-                {"role": "user", "content": "second user msg wins"},
-            ],
-            "second user msg wins",
-            "skip empty user msgs",
-        ),
-    ]
-    for messages, expected, label in cases:
-        got = session_search._extract_first_user_prompt(messages)
-        if got != expected:
-            print(f"{FAIL} extract[{label}]: expected {expected!r} got {got!r}")
-            return False
-    # Truncation
-    long = "x" * 500
-    got = session_search._extract_first_user_prompt(
-        [{"role": "user", "content": long}]
-    )
-    if not got.endswith("…") or len(got) != 201:
-        print(f"{FAIL} extract[truncate]: got len={len(got)} tail={got[-3:]!r}")
-        return False
-    print(f"{PASS} _extract_first_user_prompt shapes + truncation")
-    return True
-
-
-# ──────────────────────────────────────────────────────────────────────
 # _build_index
 # ──────────────────────────────────────────────────────────────────────
 
@@ -307,12 +253,13 @@ def test_run_search_sessions_uses_provisioned_worker() -> bool:
     async def _fake_run(spec, query, ctx=None, *, model=None):
         calls.append((spec, query, ctx))
         return ProvisionedResult(
-            text='{"session_ids": ["auth-local", "ghost"], "reasoning": "r"}',
-            value={"session_ids": ["auth-local", "ghost"], "reasoning": "worker reasoning"},
+            text='{"ids": ["auth-local", "ghost"], "reasoning": "r"}',
+            value={"ids": ["auth-local", "ghost"], "reasoning": "worker reasoning"},
             config=None,
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": [{"type": "agent_message", "data": {"text": "x"}}]},
+            timings_ms={},
         )
 
     original = session_search.provisioning.run
@@ -369,7 +316,7 @@ def test_search_worker_instructions_wrap_bounded_candidates() -> bool:
     if instructions == "fix auth latency":
         print(f"{FAIL} instructions: raw query leaked as full prompt")
         return False
-    if "<session-search-task>" not in instructions or "</session-search-task>" not in instructions:
+    if "<ai-rank-task" not in instructions or "</ai-rank-task>" not in instructions:
         print(f"{FAIL} instructions: missing task wrapper {instructions!r}")
         return False
     if '"max_results":3' not in instructions or '"id":"s1"' not in instructions:
@@ -494,6 +441,7 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={"events": []},
+            timings_ms={},
         )
 
     original = session_search.provisioning.run
@@ -512,13 +460,17 @@ def test_run_search_sessions_worker_parse_failed() -> bool:
 
 
 def test_worker_parser_uses_last_valid_json_object() -> bool:
+    # The trailing-JSON parse now lives solely in `ai_rank` (single source of
+    # truth for every ai_rank kind, not just sessions).
+    import ai_rank
+
     text = (
         "I considered this malformed note first: {not json}\n"
         "{\"ignored\": true}\n"
-        "{\"session_ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
+        "{\"ids\":[\"live-1\"],\"reasoning\":\"matched {brace}\"}"
     )
-    parsed = session_search._parse_worker_result(text)
-    if parsed != {"session_ids": ["live-1"], "reasoning": "matched {brace}"}:
+    parsed = ai_rank._parse_worker_result(text)
+    if parsed != {"ids": ["live-1"], "reasoning": "matched {brace}"}:
         print(f"{FAIL} parser last valid object: got {parsed!r}")
         return False
     print(f"{PASS} parser accepts final valid JSON object after brace noise")
@@ -821,7 +773,7 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
         # Worker (mis)behaves: returns a filtered-out id alongside a match.
         return type("_R", (), {
             "value": {
-                "session_ids": ["other-1", "match-1"],
+                "ids": ["other-1", "match-1"],
                 "reasoning": "r",
             },
         })()
@@ -904,7 +856,7 @@ def test_run_search_sessions_scope_filters_candidates_and_postvalidates() -> boo
         captured["ctx"] = ctx or {}
         return type("_R", (), {
             "value": {
-                "session_ids": ["wrong-cwd", "wrong-tag", "scoped-1"],
+                "ids": ["wrong-cwd", "wrong-tag", "scoped-1"],
                 "reasoning": "r",
             },
             "dispatch_result": {},
@@ -1103,7 +1055,6 @@ def test_rebuild_indexes_needle_skips_bloat_and_stamps_schema() -> bool:
 
 def main_run() -> int:
     tests = [
-        test_extract_first_user_prompt_shapes,
         test_build_index_filters_hidden_and_archived,
         test_build_index_exposes_filter_fields,
         test_validate_proposed_drops_unknown,

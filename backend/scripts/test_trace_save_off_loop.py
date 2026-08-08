@@ -103,7 +103,7 @@ async def _count_ticks_while(coro) -> tuple[int, object]:
     return ticks, result
 
 
-async def test_wrapped_save_does_not_block_loop() -> bool:
+async def test_wrapped_save_does_not_block_loop() -> None:
     holder = _hold_index_lock_in_background(HOLD_SECONDS)
     trace = trace_collector.TraceCollector("sess-wrapped", "hello")
     trace.finalize()
@@ -121,10 +121,11 @@ async def test_wrapped_save_does_not_block_loop() -> bool:
         f"_to_turn_dispatch_thread: loop ticks during {HOLD_SECONDS}s "
         f"lock hold = {ticks} (want >=10, proves loop stayed responsive)"
     )
-    return ok
+    assert ok, (f"wrapped trace.save() blocked the loop: ticks={ticks} "
+                f"during {HOLD_SECONDS}s lock hold (want >=10)")
 
 
-async def test_unwrapped_save_blocks_loop_control() -> bool:
+async def test_unwrapped_save_blocks_loop_control() -> None:
     """Control: prove the OLD (unwrapped) call pattern really does freeze
     the loop, so a false pass above isn't hiding a no-op lock."""
     holder = _hold_index_lock_in_background(HOLD_SECONDS)
@@ -146,10 +147,11 @@ async def test_unwrapped_save_blocks_loop_control() -> bool:
         f"proves the lock contention is real and would have blocked "
         f"the loop pre-fix)"
     )
-    return ok
+    assert ok, (f"unwrapped trace.save() did not block the loop as expected: "
+                f"ticks={ticks} during {HOLD_SECONDS}s lock hold (want ==0)")
 
 
-async def test_turn_manager_call_sites_use_dispatch_thread() -> bool:
+async def test_turn_manager_call_sites_use_dispatch_thread() -> None:
     """Static guard: every `trace.save()` invocation inside turn_manager.py
     must be routed through `_to_turn_dispatch_thread`, not called bare."""
     import inspect
@@ -163,17 +165,29 @@ async def test_turn_manager_call_sites_use_dispatch_thread() -> bool:
         f"{PASS if ok else FAIL} turn_manager.py has no bare `trace.save()` "
         f"call sites left (found {len(bare_calls)})"
     )
-    return ok
+    assert ok, (f"turn_manager.py has bare `trace.save()` call sites left "
+                f"(found {len(bare_calls)}, want 0)")
 
 
 def main() -> int:
-    results = []
-    results.append(asyncio.run(test_wrapped_save_does_not_block_loop()))
-    results.append(asyncio.run(test_unwrapped_save_blocks_loop_control()))
-    results.append(asyncio.run(test_turn_manager_call_sites_use_dispatch_thread()))
-    ok = all(results)
-    print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
-    return 0 if ok else 1
+    runners = [
+        ("wrapped save off-loop", test_wrapped_save_does_not_block_loop),
+        ("unwrapped save control", test_unwrapped_save_blocks_loop_control),
+        ("call-sites static guard", test_turn_manager_call_sites_use_dispatch_thread),
+    ]
+    failed = 0
+    for label, runner in runners:
+        try:
+            asyncio.run(runner())
+        except AssertionError as exc:
+            failed += 1
+            print(f"{FAIL} {label}: {exc}")
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            failed += 1
+    print(f"\n{'ALL PASS' if not failed else 'FAILURES PRESENT'}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

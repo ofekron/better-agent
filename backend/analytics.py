@@ -22,7 +22,6 @@ magnitude. Counts and durations are reliable; token sums are not.
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -34,8 +33,6 @@ import native_analytics_snapshot
 import run_source_index
 import session_store
 import trace_collector
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)

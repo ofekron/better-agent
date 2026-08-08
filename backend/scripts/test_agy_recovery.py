@@ -124,20 +124,15 @@ def _seed_session_with_streaming_assistant() -> tuple[str, str]:
     return sid, asst_id
 
 
-def test_agy_is_gemini_family() -> bool:
+def test_agy_is_gemini_family() -> None:
     """agy must resolve as a gemini-family kind so recovery picks the
     session_events.jsonl reader."""
     desc = {"provider_kind": "agy"}
-    if _provider_kind(desc) != "agy":
-        print(f"  expected kind 'agy', got {_provider_kind(desc)!r}")
-        return False
-    if "agy" not in _GEMINI_FAMILY_KINDS_FN():
-        print("  'agy' not in session_events_family_kinds()")
-        return False
-    return True
+    assert _provider_kind(desc) == "agy", f"expected kind 'agy', got {_provider_kind(desc)!r}"
+    assert "agy" in _GEMINI_FAMILY_KINDS_FN(), "'agy' not in session_events_family_kinds()"
 
 
-def test_claude_parser_cannot_read_agy_events() -> bool:
+def test_claude_parser_cannot_read_agy_events() -> None:
     """Documents the bug: the Claude parser yields nothing for an agy
     session_events.jsonl, while the gemini reader yields the events."""
     app_sid, _ = _seed_session_with_streaming_assistant()
@@ -147,17 +142,13 @@ def test_claude_parser_cannot_read_agy_events() -> bool:
     run_dir = runs_root() / run_id
 
     via_claude = _replay_from_claude_jsonl(run_dir, unmatched_out=[])
-    if via_claude:
-        print(f"  Claude parser unexpectedly read agy events: {len(via_claude)}")
-        return False
+    assert not via_claude, f"Claude parser unexpectedly read agy events: {len(via_claude)}"
     via_gemini = _replay_from_session_events_jsonl(run_dir)
-    if len(via_gemini) != len(events):
-        print(f"  gemini reader expected {len(events)} events, got {len(via_gemini)}")
-        return False
-    return True
+    assert len(via_gemini) == len(events), \
+        f"gemini reader expected {len(events)} events, got {len(via_gemini)}"
 
 
-def test_agy_replay_lands_events_on_assistant() -> bool:
+def test_agy_replay_lands_events_on_assistant() -> None:
     """The real regression: _replay_and_apply must route agy through the
     gemini reader and land its events on the assistant message. Before the
     fix it routed to the Claude parser and the message stayed empty."""
@@ -177,48 +168,34 @@ def test_agy_replay_lands_events_on_assistant() -> bool:
 
     sess = session_manager.get(app_sid)
     asst = next((m for m in sess["messages"] if m["id"] == asst_id), None)
-    if asst is None:
-        print("  assistant message disappeared")
-        return False
+    assert asst is not None, "assistant message disappeared"
     evs = asst.get("events") or []
-    if len(evs) != len(events):
-        print(f"  expected {len(events)} events on assistant, got {len(evs)}")
-        return False
+    assert len(evs) == len(events), \
+        f"expected {len(events)} events on assistant, got {len(evs)}"
     for e in evs:
-        if e.get("type") != "agent_message":
-            print(f"  expected agent_message envelope, got {e.get('type')!r}")
-            return False
-    if "world" not in (asst.get("content") or ""):
-        print(f"  expected replayed text in content, got {asst.get('content')!r}")
-        return False
-    return True
+        assert e.get("type") == "agent_message", \
+            f"expected agent_message envelope, got {e.get('type')!r}"
+    assert "world" in (asst.get("content") or ""), \
+        f"expected replayed text in content, got {asst.get('content')!r}"
 
 
-def test_agy_ingestion_version_forces_redigest() -> bool:
+def test_agy_ingestion_version_forces_redigest() -> None:
     """agy must have its own bumped ingestion version so runs reconciled
     under the broken v1 (Claude-parser) path re-digest on next startup."""
     v = current_ingestion_version("agy")
-    if v != AGY_INGESTION_VERSION:
-        print(f"  current_ingestion_version('agy')={v} != AGY_INGESTION_VERSION={AGY_INGESTION_VERSION}")
-        return False
-    if v <= 1:
-        print(f"  agy ingestion version must be > 1 to force re-digest, got {v}")
-        return False
-    return True
+    assert v == AGY_INGESTION_VERSION, \
+        f"current_ingestion_version('agy')={v} != AGY_INGESTION_VERSION={AGY_INGESTION_VERSION}"
+    assert v > 1, f"agy ingestion version must be > 1 to force re-digest, got {v}"
 
 
-def test_copilot_gemini_family_parity() -> bool:
+def test_copilot_gemini_family_parity() -> None:
     """copilot is the same kind of provider (SessionEventsProvider subclass writing
     session_events.jsonl) and must share the same recovery routing + bumped
     ingestion version, or it carries the identical empty-render recovery bug."""
-    if "copilot" not in _GEMINI_FAMILY_KINDS_FN():
-        print("  'copilot' not in session_events_family_kinds()")
-        return False
+    assert "copilot" in _GEMINI_FAMILY_KINDS_FN(), "'copilot' not in session_events_family_kinds()"
     v = current_ingestion_version("copilot")
-    if v != COPILOT_INGESTION_VERSION or v <= 1:
-        print(f"  copilot ingestion version must be >1 and == COPILOT_INGESTION_VERSION, got {v}")
-        return False
-    return True
+    assert v == COPILOT_INGESTION_VERSION and v > 1, \
+        f"copilot ingestion version must be >1 and == COPILOT_INGESTION_VERSION, got {v}"
 
 
 def main() -> int:
@@ -229,17 +206,18 @@ def main() -> int:
         test_agy_ingestion_version_forces_redigest,
         test_copilot_gemini_family_parity,
     ]
-    ok = True
+    failed = 0
     for t in tests:
         try:
-            result = t()
-        except Exception as exc:
-            print(f"{FAIL} {t.__name__}: {type(exc).__name__}: {exc}")
-            ok = False
+            t()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL} {t.__name__}")
+            failed += 1
             continue
-        print(f"{PASS if result else FAIL} {t.__name__}")
-        ok = ok and result
-    return 0 if ok else 1
+        print(f"{PASS} {t.__name__}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

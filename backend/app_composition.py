@@ -56,6 +56,10 @@ def wire(
     runtime_profiles_api.configure(coordinator.broadcast_global)
     app.include_router(runtime_profiles_api.router)
 
+    import a2a_api
+    a2a_api.configure(coordinator.broadcast_global)
+    app.include_router(a2a_api.router)
+
     import harness_profiles_api
     harness_profiles_api.configure(coordinator.broadcast_global)
     app.include_router(harness_profiles_api.router)

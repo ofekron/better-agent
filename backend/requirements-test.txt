@@ -10,3 +10,14 @@ coverage>=7.6.0
 # fixed resources, and forcing parallelism on suites never vetted for it
 # risks flaky cross-worker races rather than fixing anything.
 pytest-xdist>=3.6.0
+# Per-test timeout enforcement. Opt-in via BETTER_AGENT_TEST_TIMEOUT, plumbed
+# through scripts/run-backend-tests.sh as `--timeout`/`--timeout-method=signal`
+# (see that script's header). Guards against a single hung test silently
+# burning the whole CI job budget with no diagnostic (see the 2026-08-07
+# self-hosted incident: a hang near 98% of shard 0 killed the job at ~100
+# minutes with no pytest failure summary). On timeout, pytest-timeout fails
+# just the hung test (via SIGALRM) with the interrupted line in its
+# traceback, and additionally dumps any OTHER live thread's stack to
+# stderr if the hang is in a background thread — exactly the diagnostic
+# that incident lacked.
+pytest-timeout>=2.4.0,<3

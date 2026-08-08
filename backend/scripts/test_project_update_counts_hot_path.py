@@ -19,11 +19,10 @@ import extension_store  # noqa: E402
 from project_match import worker as project_match_worker  # noqa: E402
 
 
-def test_counts_are_cached_after_warmup() -> bool:
+def test_counts_are_cached_after_warmup() -> None:
     project_update_store.append("proj-a", "change A")
     project_update_store.append("proj-b", "change B")
-    if project_update_store.unseen_count("proj-a") != 1:
-        return False
+    assert project_update_store.unseen_count("proj-a") == 1
     original = project_update_store._read_entries_locked
 
     def fail_read(project_id: str):
@@ -31,25 +30,23 @@ def test_counts_are_cached_after_warmup() -> bool:
 
     project_update_store._read_entries_locked = fail_read
     try:
-        return (
-            project_update_store.unseen_count("proj-a") == 1
-            and project_update_store.unseen_count("proj-b") == 1
-            and project_update_store.total_unseen() == 2
-            and project_update_store.peek_total_unseen() == 2
-        )
+        assert project_update_store.unseen_count("proj-a") == 1
+        assert project_update_store.unseen_count("proj-b") == 1
+        assert project_update_store.total_unseen() == 2
+        assert project_update_store.peek_total_unseen() == 2
     finally:
         project_update_store._read_entries_locked = original
 
 
-def test_mark_seen_updates_cached_count() -> bool:
+def test_mark_seen_updates_cached_count() -> None:
     entry = project_update_store.append("proj-c", "change C")
-    if project_update_store.unseen_count("proj-c") != 1:
-        return False
+    assert project_update_store.unseen_count("proj-c") == 1
     marked = project_update_store.mark_seen("proj-c", [entry["id"]])
-    return marked == 1 and project_update_store.unseen_count("proj-c") == 0
+    assert marked == 1
+    assert project_update_store.unseen_count("proj-c") == 0
 
 
-def test_builtin_enabled_state_is_fingerprint_cached() -> bool:
+def test_builtin_enabled_state_is_fingerprint_cached() -> None:
     extension_store._ENABLED_CACHE.clear()
     calls = 0
     fingerprint = (1, 1)
@@ -67,23 +64,19 @@ def test_builtin_enabled_state_is_fingerprint_cached() -> bool:
     extension_store.store_fingerprint = fake_fingerprint
     extension_store.get_extension = fake_get
     try:
-        if not extension_store.is_extension_enabled_cached("ext-a"):
-            return False
-        if not extension_store.is_extension_enabled_cached("ext-a"):
-            return False
-        if calls != 1:
-            return False
+        assert extension_store.is_extension_enabled_cached("ext-a")
+        assert extension_store.is_extension_enabled_cached("ext-a")
+        assert calls == 1
         fingerprint = (2, 1)
-        if not extension_store.is_extension_enabled_cached("ext-a"):
-            return False
-        return calls == 2
+        assert extension_store.is_extension_enabled_cached("ext-a")
+        assert calls == 2
     finally:
         extension_store.store_fingerprint = original_fingerprint
         extension_store.get_extension = original_get
         extension_store._ENABLED_CACHE.clear()
 
 
-def test_project_match_rebuild_skips_unchanged_sessions() -> bool:
+def test_project_match_rebuild_skips_unchanged_sessions() -> None:
     sessions = Path(_TMP_HOME) / "sessions"
     sessions.mkdir(exist_ok=True)
     (sessions / "a.json").write_text('{"id":"a","cwd":"/a","messages":[]}', encoding="utf-8")
@@ -97,10 +90,9 @@ def test_project_match_rebuild_skips_unchanged_sessions() -> bool:
         ".summary-index.json",
     ):
         (sessions / name).write_text("{}", encoding="utf-8")
-    if project_match_worker.sessions_fingerprint() != fingerprint:
-        return False
+    assert project_match_worker.sessions_fingerprint() == fingerprint
     result = project_match_worker.rebuild_index(fingerprint)
-    return result == {"rebuilt": False, "fingerprint": fingerprint}
+    assert result == {"rebuilt": False, "fingerprint": fingerprint}
 
 
 def run() -> int:
@@ -114,14 +106,12 @@ def run() -> int:
     try:
         for name, fn in tests:
             try:
-                ok = fn()
+                fn()
             except Exception as exc:
-                ok = False
+                failures.append(name)
                 print(f"FAIL {name}: {exc}")
             else:
-                print(("PASS" if ok else "FAIL") + f" {name}")
-            if not ok:
-                failures.append(name)
+                print(f"PASS {name}")
         if failures:
             print(f"FAILED: {failures}")
             return 1

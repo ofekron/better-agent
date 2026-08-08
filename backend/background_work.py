@@ -30,9 +30,20 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
+from event_bus import BusEvent, bus, register_event_schema
+
 logger = logging.getLogger(__name__)
 
 EVENT_TYPE = "background_work_changed"
+
+# ADR 0011 §7 bus fact mirroring every WS delta below — the one hook a
+# `backend/adapters/*.py` adapter (which may not import this module directly,
+# only `backend.event_bus` + `store_access`) can subscribe to for a live push.
+# `backend/adapters/system_adapter.py`'s host-startup-tasks feed is the first
+# consumer; any future adapter that wants live background-work deltas taps
+# the same fact rather than a bespoke second one.
+FACT_TYPE = "background_work.fire.changed"
+register_event_schema(FACT_TYPE, 1)
 
 OWNER_CORE = "core"
 OWNER_EXTENSION = "extension"
@@ -421,13 +432,14 @@ class BackgroundWorkRegistry:
         except Exception:
             logger.exception("background work broadcast failed")
 
-    def _broadcast(self, data: dict) -> None:
-        """Schedule the delta on whichever loop this caller can reach. The
-        two branches are exclusive and each closes the coroutine on failure,
-        so a coroutine is never scheduled twice or left un-awaited."""
-        if self._coordinator is None:
-            return
-        coro = self._broadcast_guarded(data)
+    def _schedule(self, coro, *, what: str) -> None:
+        """Schedule one fire-and-forget coroutine on whichever loop this
+        caller can reach: the running loop if there is one (loop-side
+        caller), else the bound loop via `run_coroutine_threadsafe` (worker-
+        thread caller). The two branches are exclusive and each closes the
+        coroutine on failure, so it is never scheduled twice or left
+        un-awaited. Factored out so the WS broadcast and the bus fact below
+        share one scheduling mechanism."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -437,7 +449,7 @@ class BackgroundWorkRegistry:
                 loop.create_task(coro)
                 return
             except Exception:
-                logger.exception("background work broadcast: create_task failed")
+                logger.exception("background work %s: create_task failed", what)
                 coro.close()
                 return
         if self._loop is not None and not self._loop.is_closed():
@@ -445,8 +457,23 @@ class BackgroundWorkRegistry:
                 asyncio.run_coroutine_threadsafe(coro, self._loop)
                 return
             except Exception:
-                logger.exception("background work broadcast schedule failed")
+                logger.exception("background work %s: schedule failed", what)
         coro.close()
+
+    def _broadcast(self, data: dict) -> None:
+        """Schedule the WS delta plus the `FACT_TYPE` bus fact — same `data`
+        shape (`{"item": {...}}` / `{"cleared": True}` / `{"removed_id":
+        ...}`, each carrying `epoch`), two independent deliveries of the one
+        change. The WS half is skipped until `bind()` has a coordinator; the
+        bus half has no such dependency and always fires."""
+        if self._coordinator is not None:
+            self._schedule(self._broadcast_guarded(data), what="ws broadcast")
+        self._schedule(
+            bus.publish(BusEvent(
+                type=FACT_TYPE, root_id="system", sid="system", payload=data, persist=False,
+            )),
+            what="bus fact",
+        )
 
 
 background_work_registry = BackgroundWorkRegistry()

@@ -324,10 +324,11 @@ def _start_extension_update_checker() -> None:
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
     recovery scans, jsonl replay) runs as a tracked background task
-    via `startup_task_registry`. The frontend renders a non-blocking
-    banner from `GET /api/startup_tasks` + the `startup_task_changed`
-    WS event; sessions still mid-recovery surface a per-message
-    `isRecovering` pill from `session_manager._recovering_msg_ids`.
+    reported into `background_work_registry`. The frontend renders it
+    in the background work manager from `GET /api/background-work` +
+    `background_work_changed`; sessions still mid-recovery surface a
+    per-message `isRecovering` pill from
+    `session_manager._recovering_msg_ids`.
 
     INVARIANT: this coroutine returns within milliseconds. Anything
     that touches disk, parses jsonl, or scans subprocesses MUST be
@@ -419,6 +420,16 @@ async def on_startup():
     if installation_profile.integrations_enabled():
         import operation_requests
         _fire_and_forget(operation_requests.recover())
+
+        # Durable jobs whose owner has no recovery path are re-seeded as
+        # `unknown` so a restart cannot leave the user staring at an empty
+        # corner while work sits non-terminal on disk. Owners that
+        # `recover()` re-registers are excluded by the seeder itself.
+        async def _seed_background_work() -> None:
+            import extension_jobs
+            await asyncio.to_thread(extension_jobs.seed_background_work_after_recovery)
+
+        _fire_and_forget(_seed_background_work())
 
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.
@@ -575,17 +586,11 @@ async def on_startup():
     extension_ui_manager.manager.start()
     extension_ui_manager.manager.bind(asyncio.get_running_loop())
 
-    # Bind + reset the startup-task registry. `reset()` broadcasts a
-    # `{cleared: true}` ping so any tab connected through a uvicorn
-    # --reload drops its stale local map before we register fresh
-    # entries for this process.
-    from startup_tasks import startup_task_registry, run_task, run_composite_task
-    startup_task_registry.bind(_coordinator_ref, loop)
-    startup_task_registry.reset()
-
-    # Same bind/reset contract for the background work registry: re-epoch so
-    # a tab held open across a --reload discards its map instead of merging
-    # this process's items into the previous process's state.
+    # Bind + reset the background work registry before any startup step
+    # reports into it. `reset()` re-epochs, so a tab held open across a
+    # uvicorn --reload discards its map instead of merging this process's
+    # items into the previous process's state.
+    from startup_tasks import run_task, run_composite_task
     from background_work import background_work_registry
     background_work_registry.bind(_coordinator_ref, loop)
     background_work_registry.reset()

@@ -361,12 +361,12 @@ def _write_user_transcript(path: Path, content: str) -> None:
 
 def _test_in_root_symlink_escape_not_indexed() -> int:
     """Headline: a symlink planted inside a native root must never let the
-    index walk reach a foreign file outside that root. ``rglob`` yields in-root
-    symlinked files on every CPython (and recurses into in-root dir symlinks
-    on 3.10-3.12); the walk's resolve()-under-root guard must skip both."""
+    full-scan discovery walk (``_scan_full_batch``'s ``os.scandir`` traversal)
+    reach a foreign file outside that root. A directory symlink is never
+    descended into (``entry.is_dir(follow_symlinks=False)`` is False for it);
+    a FILE symlink is caught by the walk's own resolve()-under-root guard."""
     home = _test_home.TestHome.acquire("ba-test-root-symlink-escape-")
     state_root = Path(os.environ["BETTER_AGENT_HOME"]).resolve()
-    leaks: list[str] = []
     try:
         search, index = _acquire_index()
         transcript_root = state_root / "transcripts"
@@ -387,28 +387,20 @@ def _test_in_root_symlink_escape_not_indexed() -> int:
                 search._is_native_transcript_path,
             ))
             try:
-                walked = index._stat_walk()
+                index.refresh_once(full=True)
+                escaped_hits = index.search_rows(["escaped-needle"], limit=10)
+                good_hits = index.search_rows(["good-needle"], limit=10)
             finally:
                 index.set_roots_resolver(None)
-
-            root_resolved = transcript_root.resolve()
-            for path, _tag, _mtime, _size in walked:
-                try:
-                    resolved = path.resolve()
-                except OSError:
-                    resolved = path
-                if resolved != root_resolved and root_resolved not in resolved.parents:
-                    leaks.append(str(resolved))
-            saw_good = any(p.resolve().name == "good.jsonl" for p, *_ in walked)
         finally:
             shutil.rmtree(outside, ignore_errors=True)
     finally:
         home.release()
-    if not leaks and saw_good:
+    if not escaped_hits and good_hits:
         print("in_root_symlink_escape_not_indexed: PASS")
         return 0
     print(f"in_root_symlink_escape_not_indexed: FAIL "
-          f"(leaks={leaks}, saw_good={saw_good})")
+          f"(escaped_hits={escaped_hits}, good_hits={good_hits})")
     return 1
 
 

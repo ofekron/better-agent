@@ -220,7 +220,7 @@ vi.mock("../src/lib/sessionSurfaceRegistry", () => ({
 // ADR 0011 (Package C, system & host surface): `lib/systemFeedRegistry.ts`
 // is the same class of always-on, module-level `/ws/v2/surface` singleton
 // as `sessionSurfaceRegistry`/`interactionResolveSocket` above — every
-// consumer (`StartupTasksBanner.tsx`, `HarnessProfileSelector.tsx`,
+// consumer (`HarnessProfileSelector.tsx`,
 // `HarnessSettingsEditor.tsx`, `ExtensionUiHooks.tsx`, `ExtensionSlots.tsx`,
 // `MarketplaceBridgeCenter.tsx`, `SchedulesPage.tsx`,
 // `SessionBackgroundStrip.tsx`, `SettingsPage.tsx`'s extension-catalog

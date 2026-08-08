@@ -75,7 +75,7 @@ def _agent_data(uid: str, text: str) -> dict:
     }
 
 
-def test_streaming_appends_produce_correct_precomputed_revision_via_real_path() -> bool:
+def test_streaming_appends_produce_correct_precomputed_revision_via_real_path() -> None:
     sid = _make_session("omitted-rev-correctness")
     fired: list[dict] = []
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
@@ -88,22 +88,21 @@ def test_streaming_appends_produce_correct_precomputed_revision_via_real_path() 
         )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
-    ok = len(projected) == 30
+    assert len(projected) == 30, (
+        f"expected 30 journal_event_projected changes, got {len(projected)}"
+    )
     for change in projected:
         payload = change["delta"]
         revisions.append(payload["omitted_payloads"]["events"]["revision"])
-        ok = ok and PRECOMPUTED_REVISION_KEY not in payload and "events" not in payload
-
-    ok = ok and len(set(revisions)) == len(revisions)
-    print(
-        f"{PASS if ok else FAIL} streaming appends via the real "
-        "apply_written_journal_event path produce correct, distinct, "
-        "non-leaking revisions",
+        assert PRECOMPUTED_REVISION_KEY not in payload and "events" not in payload, (
+            "projected delta leaked the precomputed key or the events payload"
+        )
+    assert len(set(revisions)) == len(revisions), (
+        f"streaming appends produced non-distinct revisions: {revisions}"
     )
-    return ok
 
 
-def test_same_uuid_mutation_falls_back_to_correct_full_baseline() -> bool:
+def test_same_uuid_mutation_falls_back_to_correct_full_baseline() -> None:
     sid = _make_session("omitted-rev-replace")
     fired: list[dict] = []
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
@@ -125,19 +124,16 @@ def test_same_uuid_mutation_falls_back_to_correct_full_baseline() -> bool:
     second_rev = projected[1]["delta"]["omitted_payloads"]["events"]["revision"]
     events_after = session_manager.get_ref(sid)["messages"][-1]["events"]
 
-    ok = (
-        len(projected) == 2
-        and first_rev != second_rev
-        and second_rev == full_revision(events_after)
+    assert len(projected) == 2, f"expected 2 projected changes, got {len(projected)}"
+    assert first_rev != second_rev, (
+        "same-uuid mutation did not produce a distinct revision"
     )
-    print(
-        f"{PASS if ok else FAIL} same-uuid mutation (replace) re-establishes "
-        "a correct full-hash baseline, not a stale incremental fold",
+    assert second_rev == full_revision(events_after), (
+        "same-uuid mutation did not re-establish a correct full-hash baseline"
     )
-    return ok
 
 
-def test_append_after_replace_resumes_incremental_folding_correctly() -> bool:
+def test_append_after_replace_resumes_incremental_folding_correctly() -> None:
     sid = _make_session("omitted-rev-resume")
     fired: list[dict] = []
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
@@ -162,12 +158,10 @@ def test_append_after_replace_resumes_incremental_folding_correctly() -> bool:
     from messages_delta_compaction import fold_revision
     expected = fold_revision(expected, events_after[-1])
 
-    ok = len(projected) == 3 and third_rev == expected
-    print(
-        f"{PASS if ok else FAIL} a pure append immediately after a replace "
-        "correctly folds from the freshly re-established baseline",
+    assert len(projected) == 3, f"expected 3 projected changes, got {len(projected)}"
+    assert third_rev == expected, (
+        "append after a replace did not fold from the freshly re-established baseline"
     )
-    return ok
 
 
 def test_append_after_revision_cache_loss_rebuilds_full_revision() -> None:
@@ -233,7 +227,7 @@ def test_revision_cache_is_not_persisted() -> None:
     assert PRECOMPUTED_REVISION_KEY in msg
 
 
-def test_real_path_is_faster_than_naive_full_recompute_per_event() -> bool:
+def test_real_path_is_faster_than_naive_full_recompute_per_event() -> None:
     sid = _make_session("omitted-rev-perf")
     fired: list[dict] = []
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
@@ -256,16 +250,14 @@ def test_real_path_is_faster_than_naive_full_recompute_per_event() -> bool:
         full_revision(naive_events)
     naive_elapsed = time.perf_counter() - start
 
-    ok = real_elapsed < naive_elapsed * 0.5
-    print(
-        f"{PASS if ok else FAIL} real apply_written_journal_event path is "
-        f"faster than naive full recompute per event "
-        f"(real={real_elapsed:.4f}s naive={naive_elapsed:.4f}s, n={n})",
+    assert real_elapsed < naive_elapsed * 0.5, (
+        f"real apply_written_journal_event path was not >2x faster than naive "
+        f"full recompute per event "
+        f"(real={real_elapsed:.4f}s naive={naive_elapsed:.4f}s, n={n})"
     )
-    return ok
 
 
-def test_ownership_resolution_invalidates_stale_precomputed_revision() -> bool:
+def test_ownership_resolution_invalidates_stale_precomputed_revision() -> None:
     """apply_journal_ownership_resolution reorders msg.events in place
     (same length, so apply_written_journal_event's before_len+1 append
     check on its NEXT call cannot detect the mutation on its own) --
@@ -278,20 +270,21 @@ def test_ownership_resolution_invalidates_stale_precomputed_revision() -> bool:
     end = source.index("    def apply_written_journal_event(", start)
     body = source[start:end]
 
-    ok = (
-        'events_list.sort(' in body
-        and "messages_delta_compaction.PRECOMPUTED_REVISION_KEY" in body
-        and body.index("events_list.sort(")
-        < body.index("messages_delta_compaction.PRECOMPUTED_REVISION_KEY")
+    assert 'events_list.sort(' in body, (
+        "apply_journal_ownership_resolution does not sort events in place"
     )
-    print(
-        f"{PASS if ok else FAIL} apply_journal_ownership_resolution "
-        "invalidates the precomputed revision after reordering events",
+    assert "messages_delta_compaction.PRECOMPUTED_REVISION_KEY" in body, (
+        "apply_journal_ownership_resolution does not invalidate the precomputed revision"
     )
-    return ok
+    assert body.index("events_list.sort(") < body.index(
+        "messages_delta_compaction.PRECOMPUTED_REVISION_KEY",
+    ), (
+        "apply_journal_ownership_resolution invalidates the precomputed revision "
+        "before reordering events"
+    )
 
 
-def test_reconcile_from_jsonl_invalidates_stale_precomputed_revision() -> bool:
+def test_reconcile_from_jsonl_invalidates_stale_precomputed_revision() -> None:
     """render_tree_hydrate's cold-load/reconcile path also mutates a
     live msg's events (bulk merge, worker replay, orphan catch-up)
     outside apply_written_journal_event's bookkeeping -- locks that it
@@ -301,21 +294,21 @@ def test_reconcile_from_jsonl_invalidates_stale_precomputed_revision() -> bool:
         "render_tree_hydrate.py",
     ).read_text(encoding="utf-8")
 
-    ok = (
-        "if changed_for_stub:" in source
-        and "messages_delta_compaction.PRECOMPUTED_REVISION_KEY" in source
-        and source.index("if changed_for_stub:")
-        < source.index("messages_delta_compaction.PRECOMPUTED_REVISION_KEY")
-        < source.index("if watch_change and changed_for_stub:")
+    assert "if changed_for_stub:" in source, (
+        "reconcile path lacks a changed_for_stub change gate"
     )
-    print(
-        f"{PASS if ok else FAIL} reconcile_msg_events_from_jsonl invalidates "
-        "the precomputed revision whenever it changes a message's events",
+    assert "messages_delta_compaction.PRECOMPUTED_REVISION_KEY" in source, (
+        "reconcile path does not invalidate the precomputed revision"
     )
-    return ok
+    assert source.index("if changed_for_stub:") < source.index(
+        "messages_delta_compaction.PRECOMPUTED_REVISION_KEY",
+    ) < source.index("if watch_change and changed_for_stub:"), (
+        "reconcile path invalidates the precomputed revision in the wrong "
+        "position relative to its change gates"
+    )
 
 
-def test_precomputed_key_excluded_from_snapshot_stub_filters() -> bool:
+def test_precomputed_key_excluded_from_snapshot_stub_filters() -> None:
     """The internal bookkeeping key must never leak into REST/disk
     snapshots -- both _copy_assistant_for_snapshot-style stub filters
     must exclude it alongside the existing "_uid_idx" exclusion."""
@@ -326,12 +319,10 @@ def test_precomputed_key_excluded_from_snapshot_stub_filters() -> bool:
         'k not in ("events", "_uid_idx", "_has_final", '
         "messages_delta_compaction.PRECOMPUTED_REVISION_KEY)",
     )
-    ok = occurrences >= 2
-    print(
-        f"{PASS if ok else FAIL} precomputed revision key is excluded from "
-        f"both snapshot stub filters (found {occurrences})",
+    assert occurrences >= 2, (
+        f"precomputed revision key is excluded from only {occurrences} "
+        "snapshot stub filter(s), expected >= 2"
     )
-    return ok
 
 
 def main() -> int:
@@ -344,7 +335,20 @@ def main() -> int:
         test_precomputed_key_excluded_from_snapshot_stub_filters,
         test_real_path_is_faster_than_naive_full_recompute_per_event,
     ]
-    return 0 if all(test() for test in tests) else 1
+    passed = 0
+    for test in tests:
+        try:
+            test()
+        except AssertionError as exc:
+            print(f"{FAIL} {test.__name__}: {exc}")
+        except Exception:
+            import traceback
+            print(f"{FAIL} {test.__name__}: unexpected error")
+            traceback.print_exc()
+        else:
+            print(f"{PASS} {test.__name__}")
+            passed += 1
+    return 0 if passed == len(tests) else 1
 
 
 if __name__ == "__main__":

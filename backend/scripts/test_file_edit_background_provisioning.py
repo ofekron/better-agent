@@ -103,22 +103,6 @@ def _fake_get_provider(provider_id):
     return dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None
 
 
-# Scoped to this module's tests so the global callables are not poisoned for
-# later script-style modules collected in the same pytest session.
-_MODULE_PATCHES = [
-    (file_editor, "_ensure_file_edit_base", _blocking_warm),
-    (config_store, "get_provider", _fake_get_provider),
-    (models, "available_models", _fake_available_models),
-    (models, "available_models_including_retired", _fake_available_models),
-]
-
-
-@pytest.fixture(autouse=True, scope="module")
-def _scoped_bg_provision_patches():
-    with scoped_patches(_MODULE_PATCHES):
-        yield
-
-
 def _fake_file_edit_config(*, project_cwd: str, node_id: str = "primary", **_ignored):
     """Bypass provider/runner resolution — this test exercises the
     provisioning lifecycle, not config resolution."""
@@ -140,7 +124,21 @@ def _fake_file_edit_config(*, project_cwd: str, node_id: str = "primary", **_ign
     )
 
 
-file_editor._file_edit_config = _fake_file_edit_config  # type: ignore[assignment]
+# Scoped to this module's tests so the global callables are not poisoned for
+# later script-style modules collected in the same pytest session.
+_MODULE_PATCHES = [
+    (file_editor, "_ensure_file_edit_base", _blocking_warm),
+    (file_editor, "_file_edit_config", _fake_file_edit_config),
+    (config_store, "get_provider", _fake_get_provider),
+    (models, "available_models", _fake_available_models),
+    (models, "available_models_including_retired", _fake_available_models),
+]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _scoped_bg_provision_patches():
+    with scoped_patches(_MODULE_PATCHES):
+        yield
 
 
 def check(cond: bool, label: str) -> None:

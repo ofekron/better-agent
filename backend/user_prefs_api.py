@@ -136,6 +136,11 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("sessions_tabs_visible must be a boolean")
             user_prefs.set_session_tabs_visible(val)
+        if "background_work_visible" in body:
+            val = body["background_work_visible"]
+            if not isinstance(val, bool):
+                raise ValueError("background_work_visible must be a boolean")
+            user_prefs.set_background_work_visible(val)
         if "voice_close_on_background" in body:
             val = body["voice_close_on_background"]
             if not isinstance(val, bool):

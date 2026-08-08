@@ -14,7 +14,6 @@ from event_bus import BusEvent, bus
 from marketplace_bridge_store import MarketplaceStateStore
 from marketplace_device_identity import MarketplaceDeviceIdentity
 from marketplace_protocol import (
-    ALLOWED_ACTIONS,
     PATTERNS,
     PROTOCOL,
     PROTOCOL_HASH,

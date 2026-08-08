@@ -12,17 +12,6 @@ const THREAD_COLORS = [
   "#e3b341", // gold
 ] as const;
 
-const threadColorCache = new Map<string, string>();
-
-/** Get a stable color for a thread id. Same id always returns the same color. */
-export function getThreadColor(threadId: string): string {
-  if (threadColorCache.has(threadId)) return threadColorCache.get(threadId)!;
-  const idx = threadColorCache.size % THREAD_COLORS.length;
-  const color = THREAD_COLORS[idx];
-  threadColorCache.set(threadId, color);
-  return color;
-}
-
 /** Build a map of threadId -> color from a list of thread ids (stable ordering) */
 export function buildThreadColorMap(threadIds: string[]): Map<string, string> {
   const map = new Map<string, string>();

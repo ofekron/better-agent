@@ -8,6 +8,9 @@ Covers:
     with events applied through the shared apply_event funnel.
   - idempotency: re-importing the same native session is a no-op that
     returns the existing root_id and creates no extra session.
+  - continuation wiring: the imported session carries the native sid in
+    agent_session_id (the field turn dispatch resolves resume_sid from),
+    and the stamped native session drops out of re-enumeration.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_native_import.py
@@ -15,11 +18,9 @@ Run with:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
-import threading
 import uuid
 from pathlib import Path
 
@@ -33,25 +34,11 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import config_store  # noqa: E402
-import event_bus_subscribers  # noqa: E402
 import native_import  # noqa: E402
-from event_journal import bind_event_journal_loop  # noqa: E402
+from _projection_fold import start_projection_fold  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
-# native_import journals replayed events and relies on the
-# SessionProjectionDrainer fold (bound to the default event bus by
-# `register_default_subscribers`, which only runs from main.py's real
-# startup) to project them into `msg.events` — mirror that startup step
-# here so import_session's render tree is populated like it is in the
-# running backend. `EventJournalWriter._schedule_written` schedules its
-# ack coroutine onto the bound loop via `run_coroutine_threadsafe`, so
-# that loop must actually be running (main.py's is, via uvicorn) — spin
-# a dedicated background loop thread for the lifetime of this process,
-# same pattern as `scripts/test_event_journal_sync_publish.py`.
-_BUS_LOOP = asyncio.new_event_loop()
-threading.Thread(target=_BUS_LOOP.run_forever, daemon=True).start()
-bind_event_journal_loop(_BUS_LOOP)
-event_bus_subscribers.register_default_subscribers()
+start_projection_fold()
 
 CLAUDE_CONFIG_DIR = Path(_TMP_HOME) / "claude-home"
 
@@ -139,6 +126,23 @@ def test_claude_enumerate_and_import():
 
     # Registry recorded the import.
     assert sess.registry_key in native_import.already_imported_keys()
+
+    # Continuation wiring: agent_session_id is exactly the field turn
+    # dispatch resolves resume_sid from for orchestration_mode="native",
+    # so the next BA turn resumes the native provider conversation.
+    import session_store
+    assert session_store._agent_sid_field_for_mode("native") == "agent_session_id"
+    assert loaded.get("agent_session_id") == sid, (
+        f"imported session must carry the native sid, got {loaded.get('agent_session_id')!r}"
+    )
+    assert loaded.get("last_active_runner") == "native"
+
+    # The stamp marks the native session BA-managed, so it must drop out
+    # of subsequent enumeration instead of being re-offered for import.
+    again = native_import.enumerate_native_sessions([PROVIDER_ID])
+    assert not any(s.native_id == sid for s in again), (
+        "stamped native session re-enumerated as importable"
+    )
     return sess, root_id
 
 

@@ -46,6 +46,18 @@ def test_connection_projection_rejects_unknown_state(
         node_connection_status.publish(state, generation=0, state_root=tmp_path)
 
 
+def test_read_returns_empty_for_invalid_or_missing_projection(tmp_path: Path) -> None:
+    # no file written yet -> read_json yields the default {}
+    assert node_connection_status.read(tmp_path) == {}
+    path = node_connection_status.status_path(tmp_path)
+    # unknown schema version
+    path.write_text('{"schema_version": 2, "state": "connected", "generation": 1}')
+    assert node_connection_status.read(tmp_path) == {}
+    # known schema version but unrecognized state
+    path.write_text('{"schema_version": 1, "state": "bogus", "generation": 1}')
+    assert node_connection_status.read(tmp_path) == {}
+
+
 def test_connection_projection_rejects_negative_generation(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         node_connection_status.publish(

@@ -28,14 +28,57 @@ STATE="$TEST_ROOT/state"
 mkdir -p "$FAKE_BIN" "$STATE"
 : > "$STATE/builds"
 
+# Fake docker models the push -> pull -> tag handoff: a build+push writes the
+# image content keyed by its registry-relative path (registry-image-<key>,
+# simulating the registry's store); a pull reads that same key regardless of
+# which host:port addressed it (container-name push ref vs localhost pull
+# ref) and materializes it into the engine's local store (image-<tag>,
+# read by `docker image inspect`).
 cat > "$FAKE_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 safe_tag() { printf '%s' "$1" | tr '/:' '__'; }
+registry_path() { printf '%s' "$1" | sed 's#^[^/]*/##'; }
+
+case "${1:-}" in
+  pull)
+    ref="${2:-}"
+    [ -z "${DOCKER_TEST_FAKE_PULL_FAIL:-}" ] || exit 1
+    key="$DOCKER_TEST_FAKE_STATE/registry-image-$(safe_tag "$(registry_path "$ref")")"
+    [ -f "$key" ] || exit 1
+    content="$(cat "$key")"
+    if [ -n "${DOCKER_TEST_FAKE_PULL_CORRUPT:-}" ]; then
+      content="corrupted-$content"
+    fi
+    printf '%s\n' "$content" > "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$ref")"
+    exit 0
+    ;;
+  tag)
+    src="${2:-}"
+    dst="${3:-}"
+    cp "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$src")" "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$dst")"
+    exit 0
+    ;;
+  rmi)
+    rm -f "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "${2:-}")"
+    exit 0
+    ;;
+esac
+
 case "${1:-} ${2:-}" in
   "context inspect") printf '%s\n' unix:///tmp/fake-docker.sock ;;
   "version --format") printf '%s\n' linux/amd64 ;;
   "buildx inspect") exit 0 ;;
+  "inspect --format")
+    # Builder-network-attachment probe: report the builder as already on the
+    # expected registry network so these scenarios don't exercise migration.
+    printf '%s\n' "${DOCKER_TEST_FAKE_BUILDER_NETWORK:-better-agent-test-net}"
+    ;;
+  "ps -q")
+    # Registry-running probe: report already running unless a scenario
+    # explicitly simulates the registry being down.
+    [ -n "${DOCKER_TEST_FAKE_REGISTRY_DOWN:-}" ] || printf 'fake-registry-container-id\n'
+    ;;
   "image inspect")
     tag="${@: -1}"
     file="$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$tag")"
@@ -43,17 +86,23 @@ case "${1:-} ${2:-}" in
     cat "$file"
     ;;
   "buildx build")
-    tag=""
+    output_spec=""
     fingerprint=""
     previous=""
     for arg in "$@"; do
-      if [ "$previous" = "-t" ]; then tag="$arg"; fi
+      if [ "$previous" = "--output" ]; then output_spec="$arg"; fi
       case "$arg" in
         com.better-agent.test.fingerprint=*) fingerprint="${arg#*=}" ;;
       esac
       previous="$arg"
     done
-    printf 'build %s %s\n' "$tag" "$fingerprint" >> "$DOCKER_TEST_FAKE_STATE/builds"
+    push_ref="${output_spec#*name=}"
+    push_ref="${push_ref%%,*}"
+    printf 'build %s %s\n' "$push_ref" "$fingerprint" >> "$DOCKER_TEST_FAKE_STATE/builds"
+    if [ -n "${DOCKER_TEST_FAKE_STALL_BUILD:-}" ]; then
+      printf 'one line of progress, then silence\n'
+      exec sleep 6317
+    fi
     if [ -n "${DOCKER_TEST_FAKE_BUILD_FIFO:-}" ]; then
       printf 'build-started\n' > "$DOCKER_TEST_FAKE_BUILD_FIFO"
     fi
@@ -61,12 +110,35 @@ case "${1:-} ${2:-}" in
       IFS= read -r _ < "$DOCKER_TEST_FAKE_RELEASE_FIFO"
     fi
     [ -z "${DOCKER_TEST_FAKE_FAIL_BUILD:-}" ] || exit 17
-    printf '%s\n' "$fingerprint" > "$DOCKER_TEST_FAKE_STATE/image-$(safe_tag "$tag")"
+    if [ -n "${DOCKER_TEST_FAKE_ERROR_THEN_STALL_BUILD:-}" ]; then
+      # buildx printed its failure line, then the client wedges (observed
+      # during a cancelled export) instead of exiting promptly.
+      printf 'ERROR: failed to build: failed to solve: DeadlineExceeded: context deadline exceeded\n'
+      exec sleep 6317
+    fi
+    if [ -n "${DOCKER_TEST_FAKE_LIE_SUCCESS_BUILD:-}" ]; then
+      # Reproduces a real buildx/buildkit exit-code/output desync observed on
+      # this host: a cancelled export prints buildx's own top-level failure
+      # line but the CLIENT process still exits 0. The pushed ref STILL gets
+      # its config (and fingerprint label) committed despite the export being
+      # cancelled — the fingerprint-label check alone cannot tell this apart
+      # from a real success.
+      printf 'ERROR: failed to build: failed to solve: Canceled: context canceled\n'
+      printf '%s\n' "$fingerprint" > "$DOCKER_TEST_FAKE_STATE/registry-image-$(safe_tag "$(registry_path "$push_ref")")"
+      exit 0
+    fi
+    printf '%s\n' "$fingerprint" > "$DOCKER_TEST_FAKE_STATE/registry-image-$(safe_tag "$(registry_path "$push_ref")")"
     ;;
   *) exit 0 ;;
 esac
 EOF
 chmod +x "$FAKE_BIN/docker"
+
+cat > "$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+[ -z "${DOCKER_TEST_FAKE_REGISTRY_DOWN:-}" ]
+EOF
+chmod +x "$FAKE_BIN/curl"
 
 cat > "$FAKE_BIN/flock" <<'EOF'
 #!/usr/bin/env bash
@@ -105,6 +177,14 @@ fail() {
   exit 1
 }
 
+# The shell's own `< fifo` redirection (blocking open, waiting for a writer)
+# can be interrupted by SIGCHLD from the extra concurrent flock/lockf
+# subprocesses these scenarios now spawn; retry the open+read on EINTR
+# rather than treating a spurious signal as end-of-data.
+drain_fifo() {
+  until IFS= read -r _ < "$1"; do :; done
+}
+
 rm -rf "$TEST_LOCK_ROOT"
 mkdir() {
   local target="${@: -1}"
@@ -137,15 +217,21 @@ export DOCKER_TEST_FAKE_BUILD_FIFO="$BUILD_FIFO"
 
 docker_test_materialize_image "$FINGERPRINT" "$IMAGE" -t "$IMAGE" . &
 first_pid=$!
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$BUILD_FIFO"
+drain_fifo "$LOCK_FIFO"   # state-check lock
+drain_fifo "$LOCK_FIFO"   # ensure_infra builder lock (registry + builder-network)
+drain_fifo "$LOCK_FIFO"   # materialize builder lock
+drain_fifo "$BUILD_FIFO"
 docker_test_materialize_image "$FINGERPRINT" "$IMAGE" -t "$IMAGE" . &
 second_pid=$!
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$LOCK_FIFO"
+drain_fifo "$LOCK_FIFO"   # follower state-check
+drain_fifo "$LOCK_FIFO"   # follower ensure_infra builder-lock attempt (blocks on leader's held materialize lock)
 [ "$(wc -l < "$STATE/builds")" -eq 1 ] || fail "same-key follower started a duplicate export"
 printf 'release\n' > "$FIFO"
+# Once unblocked, the follower's ensure_infra completes and it makes its own
+# materialize builder-lock attempt (a distinct flock call from ensure_infra's);
+# that attempt still signals the lock-fifo even though the fingerprint now
+# matches and it short-circuits without rebuilding.
+drain_fifo "$LOCK_FIFO"
 wait "$first_pid"
 wait "$second_pid"
 [ "$(wc -l < "$STATE/builds")" -eq 1 ] || fail "same-key materialization was not single-flight"
@@ -162,17 +248,22 @@ FIRST_DIFFERENT="better-agent-backend-tests:deps-first-different"
 SECOND_DIFFERENT="better-agent-backend-tests:deps-second-different"
 docker_test_materialize_image first-different "$FIRST_DIFFERENT" -t "$FIRST_DIFFERENT" . &
 first_different_pid=$!
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$BUILD_FIFO"
+drain_fifo "$LOCK_FIFO"
+drain_fifo "$LOCK_FIFO"
+drain_fifo "$LOCK_FIFO"
+drain_fifo "$BUILD_FIFO"
 docker_test_materialize_image second-different "$SECOND_DIFFERENT" -t "$SECOND_DIFFERENT" . &
 second_different_pid=$!
-IFS= read -r _ < "$LOCK_FIFO"
-IFS= read -r _ < "$LOCK_FIFO"
+drain_fifo "$LOCK_FIFO"   # state-check
+drain_fifo "$LOCK_FIFO"   # ensure_infra builder-lock attempt (blocks on first_different's held materialize lock)
 [ "$(wc -l < "$STATE/builds")" -eq 2 ] || fail "shared exporter admitted concurrent imports"
 printf 'release\n' > "$STATE/release-different"
 wait "$first_different_pid"
-IFS= read -r _ < "$BUILD_FIFO"
+# Once unblocked, second_different's ensure_infra completes and it makes its
+# own materialize builder-lock attempt (a distinct flock call), then genuinely
+# rebuilds (different fingerprint => no cache-hit short-circuit).
+drain_fifo "$LOCK_FIFO"
+drain_fifo "$BUILD_FIFO"
 printf 'release\n' > "$STATE/release-different"
 wait "$second_different_pid"
 unset DOCKER_TEST_FAKE_RELEASE_FIFO DOCKER_TEST_FAKE_LOCK_FIFO DOCKER_TEST_FAKE_BUILD_FIFO
@@ -211,6 +302,111 @@ if DOCKER_TEST_FAKE_FAIL_BUILD=1 \
 fi
 docker_test_materialize_image failed "$FAILED_IMAGE" -t "$FAILED_IMAGE" .
 [ "$(wc -l < "$STATE/builds")" -eq 5 ] || fail "failed leader did not release ownership for retry"
+
+STALLED_IMAGE="better-agent-backend-tests:deps-stalled"
+STALL_STDERR="$STATE/stall-stderr"
+STALL_START="$(date +%s)"
+if DOCKER_TEST_FAKE_STALL_BUILD=1 BETTER_AGENT_DOCKER_BUILD_STALL_SECONDS=1 \
+  docker_test_materialize_image stalled "$STALLED_IMAGE" -t "$STALLED_IMAGE" . \
+  2> "$STALL_STDERR"; then
+  fail "stalled build was reported as success"
+fi
+STALL_ELAPSED=$(( $(date +%s) - STALL_START ))
+[ "$STALL_ELAPSED" -lt 30 ] || fail "stall watchdog did not bound a hung build (took ${STALL_ELAPSED}s)"
+[ "$(wc -l < "$STATE/builds")" -eq 7 ] || fail "stalled build was not retried exactly once"
+grep -q 'retrying (attempt 2/2)' "$STALL_STDERR" || fail "stall retry was not announced"
+grep -q 'build stalled twice' "$STALL_STDERR" || fail "double stall did not fail loudly"
+! pgrep -f 'sleep 6317' >/dev/null 2>&1 || fail "stall watchdog leaked a hung build process"
+
+docker_test_materialize_image healthy-after-stall \
+  "better-agent-backend-tests:deps-healthy-after-stall" \
+  -t "better-agent-backend-tests:deps-healthy-after-stall" .
+[ "$(wc -l < "$STATE/builds")" -eq 8 ] || fail "healthy build after stall did not run"
+
+# No silent fallback to --load: a registry that never becomes reachable must
+# fail loudly, without ever attempting a build.
+UNREACHABLE_IMAGE="better-agent-backend-tests:deps-unreachable"
+UNREACHABLE_STDERR="$STATE/unreachable-stderr"
+BUILDS_BEFORE_UNREACHABLE="$(wc -l < "$STATE/builds")"
+if DOCKER_TEST_FAKE_REGISTRY_DOWN=1 BETTER_AGENT_DOCKER_REGISTRY_READY_ATTEMPTS=2 \
+  docker_test_materialize_image unreachable "$UNREACHABLE_IMAGE" -t "$UNREACHABLE_IMAGE" . \
+  2> "$UNREACHABLE_STDERR"; then
+  fail "materialize succeeded despite an unreachable registry"
+fi
+[ "$(wc -l < "$STATE/builds")" -eq "$BUILDS_BEFORE_UNREACHABLE" ] \
+  || fail "unreachable registry still attempted a build instead of failing loudly up front"
+grep -q 'test registry did not become ready' "$UNREACHABLE_STDERR" \
+  || fail "registry-unreachable did not fail loudly with a recovery hint"
+grep -q 'docker rm -f' "$UNREACHABLE_STDERR" \
+  || fail "registry-unreachable failure omitted a nuke-and-recreate recovery hint"
+
+# A pull that returns content not matching the fingerprint that was pushed
+# must be rejected, not silently accepted as the canonical image.
+CORRUPT_IMAGE="better-agent-backend-tests:deps-corrupt"
+CORRUPT_STDERR="$STATE/corrupt-stderr"
+if DOCKER_TEST_FAKE_PULL_CORRUPT=1 \
+  docker_test_materialize_image corrupt "$CORRUPT_IMAGE" -t "$CORRUPT_IMAGE" . \
+  2> "$CORRUPT_STDERR"; then
+  fail "materialize succeeded despite a fingerprint-mismatched pull"
+fi
+grep -q 'pulled image failed fingerprint validation' "$CORRUPT_STDERR" \
+  || fail "corrupt pull was not fingerprint-validated"
+
+# A pull that fails right after a successful push is a genuine error (wrong
+# ref, registry down, network) — not a propagation-delay timing window.
+# Single attempt, fail loud immediately, no sleep-retry.
+PULL_FAIL_IMAGE="better-agent-backend-tests:deps-pull-fail"
+PULL_FAIL_STDERR="$STATE/pull-fail-stderr"
+BUILDS_BEFORE_PULL_FAIL="$(wc -l < "$STATE/builds")"
+PULL_FAIL_START="$(date +%s)"
+if DOCKER_TEST_FAKE_PULL_FAIL=1 \
+  docker_test_materialize_image pull-fail "$PULL_FAIL_IMAGE" -t "$PULL_FAIL_IMAGE" . \
+  2> "$PULL_FAIL_STDERR"; then
+  fail "materialize succeeded despite a failed pull"
+fi
+PULL_FAIL_ELAPSED=$(( $(date +%s) - PULL_FAIL_START ))
+[ "$PULL_FAIL_ELAPSED" -lt 5 ] || fail "pull failure was not immediate (took ${PULL_FAIL_ELAPSED}s, suggests a retry-sleep crept back in)"
+[ "$(wc -l < "$STATE/builds")" -eq $((BUILDS_BEFORE_PULL_FAIL + 1)) ] \
+  || fail "pull-fail scenario did not push exactly once before failing"
+grep -q 'engine pull failed' "$PULL_FAIL_STDERR" || fail "pull failure did not fail loudly"
+grep -q 'docker rm -f' "$PULL_FAIL_STDERR" || fail "pull failure omitted a recovery hint"
+
+# Regression: a real buildx/buildkit desync where a cancelled export prints
+# buildx's own "ERROR: failed to build:" summary but the client process
+# still exits 0, AND the pushed ref's config (fingerprint label included)
+# still gets committed despite the export being cancelled (observed on this
+# host: daemon-side "Canceled: context canceled" / "DeadlineExceeded" during
+# export; matching label alone cannot tell this apart from a real success).
+# Without cross-checking the build's own output against its exit code, this
+# made a failed build materialize as a reported success with no test ever run.
+LYING_IMAGE="better-agent-backend-tests:deps-lying-success"
+LYING_STDERR="$STATE/lying-stderr"
+if DOCKER_TEST_FAKE_LIE_SUCCESS_BUILD=1 \
+  docker_test_materialize_image lying-success "$LYING_IMAGE" -t "$LYING_IMAGE" . \
+  2> "$LYING_STDERR"; then
+  fail "buildx exit-0/error-output desync was reported as a successful materialization"
+fi
+grep -q 'Canceled: context canceled' "$LYING_STDERR" || fail "build failure text was not surfaced on stderr"
+
+# Regression: buildx prints its failure line, then wedges instead of exiting
+# promptly (observed during a cancelled export). The watchdog must not
+# blindly retry a build it already knows failed, and must surface the real
+# reason instead of a generic "stalled twice" message.
+ERROR_STALL_IMAGE="better-agent-backend-tests:deps-error-then-stall"
+ERROR_STALL_STDERR="$STATE/error-then-stall-stderr"
+BUILDS_BEFORE_ERROR_STALL="$(wc -l < "$STATE/builds")"
+if DOCKER_TEST_FAKE_ERROR_THEN_STALL_BUILD=1 BETTER_AGENT_DOCKER_BUILD_STALL_SECONDS=1 \
+  docker_test_materialize_image error-then-stall "$ERROR_STALL_IMAGE" -t "$ERROR_STALL_IMAGE" . \
+  2> "$ERROR_STALL_STDERR"; then
+  fail "a build that reported failure before stalling was reported as success"
+fi
+grep -q 'DeadlineExceeded: context deadline exceeded' "$ERROR_STALL_STDERR" \
+  || fail "build failure text was not surfaced before the stall watchdog gave up"
+grep -q 'not retrying' "$ERROR_STALL_STDERR" \
+  || fail "a build that already reported failure was retried anyway"
+[ "$(wc -l < "$STATE/builds")" -eq "$((BUILDS_BEFORE_ERROR_STALL + 1))" ] \
+  || fail "a build that already reported failure should not be retried"
+! pgrep -f 'sleep 6317' >/dev/null 2>&1 || fail "error-then-stall watchdog leaked a hung build process"
 
 docker_test_prepare_lock_root
 rm -f "$DOCKER_TEST_LEASE_DIR/$DOCKER_TEST_RUN_ID"

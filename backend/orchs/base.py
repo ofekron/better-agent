@@ -33,7 +33,7 @@ already in the msg's events list is a no-op. This makes replay safe.
 
 from abc import ABC, abstractmethod
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 import loop_affinity

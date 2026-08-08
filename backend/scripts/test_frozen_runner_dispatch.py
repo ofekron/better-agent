@@ -35,25 +35,22 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_runner_argv_dev() -> bool:
+def test_runner_argv_dev() -> None:
     """Dev (not frozen): argv is `<python> <script> --run-dir <dir>` —
     byte-identical to the pre-change spawn."""
     argv = runner_argv(
         Path("/runs/x"), dev_script=Path("/b/runner.py"), kind="claude",
     )
-    if argv != [sys.executable, "/b/runner.py", "--run-dir", "/runs/x"]:
-        print(f"  dev claude: got {argv}")
-        return False
+    assert argv == [sys.executable, "/b/runner.py", "--run-dir", "/runs/x"], \
+        f"dev claude: got {argv}"
     argv_g = runner_argv(
         Path("/runs/y"), dev_script=Path("/b/runner_agy.py"), kind="agy",
     )
-    if argv_g != [sys.executable, "/b/runner_agy.py", "--run-dir", "/runs/y"]:
-        print(f"  dev agy: got {argv_g}")
-        return False
-    return True
+    assert argv_g == [sys.executable, "/b/runner_agy.py", "--run-dir", "/runs/y"], \
+        f"dev agy: got {argv_g}"
 
 
-def test_runner_argv_frozen() -> bool:
+def test_runner_argv_frozen() -> None:
     """Frozen: argv re-execs the app binary; agy carries --runner-kind,
     claude (the default) does not."""
     sys.frozen = True  # simulate PyInstaller
@@ -61,71 +58,48 @@ def test_runner_argv_frozen() -> bool:
         argv = runner_argv(
             Path("/runs/x"), dev_script=Path("/b/runner.py"), kind="claude",
         )
-        if argv != [sys.executable, "--run-dir", "/runs/x"]:
-            print(f"  frozen claude: got {argv}")
-            return False
+        assert argv == [sys.executable, "--run-dir", "/runs/x"], f"frozen claude: got {argv}"
         argv_g = runner_argv(
             Path("/runs/y"), dev_script=Path("/b/runner_agy.py"),
             kind="agy",
         )
-        if argv_g != [
+        assert argv_g == [
             sys.executable, "--run-dir", "/runs/y", "--runner-kind", "agy",
-        ]:
-            print(f"  frozen agy: got {argv_g}")
-            return False
-        return True
+        ], f"frozen agy: got {argv_g}"
     finally:
         del sys.frozen
 
 
-def test_dispatch() -> bool:
+def test_dispatch() -> None:
     """`_dispatch` routes --run-dir to a runner (claude default / agy
     explicit) and bare argv to the server."""
-    if _dispatch([]) != ("server", None, None, None):
-        print(f"  bare argv: got {_dispatch([])}")
-        return False
-    if _dispatch(["--serve"]) != ("server", None, None, None):
-        print(f"  --serve argv: got {_dispatch(['--serve'])}")
-        return False
-    if _dispatch(["--serve-node"]) != ("node_server", None, None, None):
-        print(f"  --serve-node argv: got {_dispatch(['--serve-node'])}")
-        return False
-    if _dispatch(["--communicate-mcp"]) != ("communicate_mcp", None, None, None):
-        print(f"  --communicate-mcp: got {_dispatch(['--communicate-mcp'])}")
-        return False
-    if _dispatch(["--open-file-panel-mcp"]) != ("open_file_panel_mcp", None, None, None):
-        print(f"  --open-file-panel-mcp: got {_dispatch(['--open-file-panel-mcp'])}")
-        return False
-    if _dispatch(["--frozen-artifact-smoke"]) != (
+    assert _dispatch([]) == ("server", None, None, None), f"bare argv: got {_dispatch([])}"
+    assert _dispatch(["--serve"]) == ("server", None, None, None), \
+        f"--serve argv: got {_dispatch(['--serve'])}"
+    assert _dispatch(["--serve-node"]) == ("node_server", None, None, None), \
+        f"--serve-node argv: got {_dispatch(['--serve-node'])}"
+    assert _dispatch(["--communicate-mcp"]) == ("communicate_mcp", None, None, None), \
+        f"--communicate-mcp: got {_dispatch(['--communicate-mcp'])}"
+    assert _dispatch(["--open-file-panel-mcp"]) == ("open_file_panel_mcp", None, None, None), \
+        f"--open-file-panel-mcp: got {_dispatch(['--open-file-panel-mcp'])}"
+    assert _dispatch(["--frozen-artifact-smoke"]) == (
         "frozen_artifact_smoke", None, None, None,
-    ):
-        print(
-            "  --frozen-artifact-smoke: got "
-            f"{_dispatch(['--frozen-artifact-smoke'])}"
-        )
-        return False
-    if _dispatch(["--run-dir", "/runs/x"]) != (
+    ), f"--frozen-artifact-smoke: got {_dispatch(['--frozen-artifact-smoke'])}"
+    assert _dispatch(["--run-dir", "/runs/x"]) == (
         "runner", "claude", Path("/runs/x"), "",
-    ):
-        print(f"  --run-dir: got {_dispatch(['--run-dir', '/runs/x'])}")
-        return False
+    ), f"--run-dir: got {_dispatch(['--run-dir', '/runs/x'])}"
     got = _dispatch(["--run-dir", "/runs/y", "--runner-kind", "agy"])
-    if got != ("runner", "agy", Path("/runs/y"), ""):
-        print(f"  --run-dir agy: got {got}")
-        return False
+    assert got == ("runner", "agy", Path("/runs/y"), ""), f"--run-dir agy: got {got}"
     got_claude_ba = _dispatch([
         "--run-dir", "/runs/z", "--runner-kind", "claude",
         "--runner-module", "runner_better_agent",
     ])
-    if got_claude_ba != (
+    assert got_claude_ba == (
         "runner", "claude", Path("/runs/z"), "runner_better_agent",
-    ):
-        print(f"  --run-dir claude better_agent_runner: got {got_claude_ba}")
-        return False
-    return True
+    ), f"--run-dir claude better_agent_runner: got {got_claude_ba}"
 
 
-def test_env_port() -> bool:
+def test_env_port() -> None:
     legacy_name = "BETTER_CLAUDE_TEST_PORT"
     canonical_name = agent_env_name(legacy_name)
     original = {
@@ -149,20 +123,16 @@ def test_env_port() -> bool:
         os.environ.pop(canonical_name, None)
         os.environ.pop(legacy_name, None)
         default, legacy_port, canonical_port = available_ports(3)
-        if _env_port(legacy_name, default) != default:
-            print("  missing env should use default")
-            return False
+        assert _env_port(legacy_name, default) == default, "missing env should use default"
 
         os.environ[legacy_name] = str(legacy_port)
         os.environ[canonical_name] = str(canonical_port)
-        if _env_port(legacy_name, default) != canonical_port:
-            print("  canonical env override was not used")
-            return False
+        assert _env_port(legacy_name, default) == canonical_port, \
+            "canonical env override was not used"
 
         os.environ.pop(canonical_name, None)
-        if _env_port(legacy_name, default) != legacy_port:
-            print("  legacy env fallback was not used")
-            return False
+        assert _env_port(legacy_name, default) == legacy_port, \
+            "legacy env fallback was not used"
 
         os.environ.pop(legacy_name, None)
         for value in ("0", "70000", "abc"):
@@ -171,9 +141,7 @@ def test_env_port() -> bool:
                 _env_port(legacy_name, default)
             except (RuntimeError, ValueError):
                 continue
-            print(f"  expected invalid port to fail: {value}")
-            return False
-        return True
+            raise AssertionError(f"expected invalid port to fail: {value}")
     finally:
         for name, value in original.items():
             if value is None:
@@ -195,15 +163,14 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as e:
-                ok = False
+                fn()
+            except Exception:
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"{FAIL}  {name}")
                 failed += 1
+                continue
+            print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()

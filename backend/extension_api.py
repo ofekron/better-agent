@@ -1059,6 +1059,24 @@ async def update_extension(extension_id: str):
     return result
 
 
+def _reap_background_work(extension_id: str) -> None:
+    """Finalize an extension's open background work the moment it becomes
+    observably gone. Liveness is an event here, never a heartbeat deadline: a
+    disabled or uninstalled extension will never report its own terminal
+    transition, and its rows must not spin forever."""
+    import background_work
+    import background_work_capability
+    from background_work import background_work_registry
+
+    background_work_registry.finish_owner(
+        background_work.OWNER_EXTENSION,
+        extension_id,
+        status=background_work.STATUS_CANCELLED,
+        error="extension is no longer active",
+    )
+    background_work_capability.forget_extension(extension_id)
+
+
 @router.patch("/{extension_id}/enabled")
 async def set_extension_enabled(extension_id: str, req: SetEnabledRequest):
     try:
@@ -1076,6 +1094,8 @@ async def set_extension_enabled(extension_id: str, req: SetEnabledRequest):
         ) from exc
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
+    if not req.enabled:
+        _reap_background_work(extension_id)
     await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
@@ -1310,6 +1330,7 @@ async def uninstall_extension(extension_id: str):
         extension_store.uninstall(extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
+    _reap_background_work(extension_id)
     await _broadcast_extension_changed(
         *EXTENSION_CATALOG_TOPICS, extension_id=extension_id
     )

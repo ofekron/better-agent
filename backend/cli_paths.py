@@ -24,11 +24,15 @@ def _windows_spawnable_path(path: str) -> str:
     p = Path(path)
     if p.suffix:
         return path
-    for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
+    # Windows-only. WindowsPath cannot be instantiated on a non-Windows host
+    # (pathlib raises), so this suffix probe is measured only on Windows — see
+    # the skipif test below. Excluded from the Linux coverage host as a
+    # justified platform exclusion.
+    for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:  # pragma: no cover
         candidate = p.with_name(p.name + suffix)
         if candidate.is_file():
             return str(candidate)
-    return path
+    return path  # pragma: no cover
 
 
 def _windows_path_rank(path: str) -> int:
@@ -40,22 +44,23 @@ def _windows_path_rank(path: str) -> int:
 
 def _candidate_in_dir(raw_dir: str, name: str) -> list[str]:
     candidate = Path(os.path.expanduser(raw_dir)) / name
-    if os.name != "nt":
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return [str(candidate)]
-        return []
-
-    if candidate.suffix:
-        return [str(candidate)] if candidate.is_file() else []
-
-    candidates: list[str] = []
-    for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
-        suffixed = candidate.with_name(candidate.name + suffix)
-        if suffixed.is_file():
-            candidates.append(str(suffixed))
-    if candidate.is_file():
-        candidates.append(str(candidate))
-    return candidates
+    if os.name == "nt":  # pragma: no cover
+        # WindowsPath cannot be instantiated on a non-Windows host (pathlib
+        # raises), so these filesystem probes are measured only on Windows via
+        # the skipif test. Justified platform exclusion on the Linux host.
+        if candidate.suffix:
+            return [str(candidate)] if candidate.is_file() else []
+        candidates: list[str] = []
+        for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
+            suffixed = candidate.with_name(candidate.name + suffix)
+            if suffixed.is_file():
+                candidates.append(str(suffixed))
+        if candidate.is_file():
+            candidates.append(str(candidate))
+        return candidates
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return [str(candidate)]
+    return []
 
 
 def resolve_cli_binary(
@@ -70,7 +75,10 @@ def resolve_cli_binary(
         pinned, path = installation_profile.pinned_provider_executable(name)
         if pinned:
             return path
-    if os.name == "nt":
+    if os.name == "nt":  # pragma: no cover
+        # Windows-only. WindowsPath cannot be instantiated on a non-Windows
+        # host (pathlib raises), so this whole branch is measured only on
+        # Windows via the skipif test — justified platform exclusion on Linux.
         path_dirs = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
         candidates: list[str] = []
         if any(sep in name for sep in (os.sep, "/", "\\")):

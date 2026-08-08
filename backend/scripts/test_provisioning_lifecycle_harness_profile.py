@@ -80,6 +80,9 @@ class _FakeWorkerStore:
         pass
 
 
+_MISSING = object()
+
+
 def _install_fakes():
     fake_session_manager_module = type(sys)("session_manager")
     fake_session_manager_module.manager = _FakeSessionManager()
@@ -90,28 +93,43 @@ def _install_fakes():
 
     fake_worker_store_module = type(sys)("stores.worker_store")
     fake_worker_store_module.upsert_worker = _FakeWorkerStore.upsert_worker
-    fake_stores_pkg = sys.modules.get("stores") or type(sys)("stores")
-    fake_stores_pkg.worker_store = fake_worker_store_module
+    real_stores_pkg = sys.modules.get("stores")
+    stores_pkg = real_stores_pkg if real_stores_pkg is not None else type(sys)("stores")
+    # `stores_pkg` is the REAL package object whenever "stores" was already
+    # imported elsewhere in this pytest process (the common case once other
+    # test files have run) — mutating its `.worker_store` attribute mutates
+    # the shared singleton in place. Save that attribute's prior value
+    # explicitly so `_restore` can put it back; restoring only
+    # `sys.modules["stores"]` is a no-op here since it's the same object.
+    saved_worker_store_attr = getattr(stores_pkg, "worker_store", _MISSING)
+    stores_pkg.worker_store = fake_worker_store_module
 
     saved = {
         "session_manager": sys.modules.get("session_manager"),
         "working_mode": sys.modules.get("working_mode"),
-        "stores": sys.modules.get("stores"),
+        "stores": real_stores_pkg,
         "stores.worker_store": sys.modules.get("stores.worker_store"),
     }
     sys.modules["session_manager"] = fake_session_manager_module
     sys.modules["working_mode"] = fake_working_mode_module
-    sys.modules["stores"] = fake_stores_pkg
+    sys.modules["stores"] = stores_pkg
     sys.modules["stores.worker_store"] = fake_worker_store_module
-    return fake_session_manager_module.manager, saved
+    return fake_session_manager_module.manager, saved, (stores_pkg, saved_worker_store_attr)
 
 
-def _restore(saved: dict) -> None:
+def _restore(saved: dict, stores_attr: tuple | None = None) -> None:
     for name, module in saved.items():
         if module is None:
             sys.modules.pop(name, None)
         else:
             sys.modules[name] = module
+    if stores_attr is not None:
+        stores_pkg, saved_worker_store_attr = stores_attr
+        if saved_worker_store_attr is _MISSING:
+            if hasattr(stores_pkg, "worker_store"):
+                delattr(stores_pkg, "worker_store")
+        else:
+            stores_pkg.worker_store = saved_worker_store_attr
 
 
 def test_spec_has_harness_profile_id_field():
@@ -120,7 +138,7 @@ def test_spec_has_harness_profile_id_field():
 
 
 def test_create_session_threads_harness_profile_id():
-    fake_manager, saved = _install_fakes()
+    fake_manager, saved, stores_attr = _install_fakes()
     try:
         spec = _Spec()
         cfg = _cfg()
@@ -129,11 +147,11 @@ def test_create_session_threads_harness_profile_id():
         assert len(fake_manager.create_calls) == 1
         assert fake_manager.create_calls[0]["harness_profile_id"] == "ofek-dev.requirements.processor"
     finally:
-        _restore(saved)
+        _restore(saved, stores_attr)
 
 
 def test_ensure_caller_threads_harness_profile_id():
-    fake_manager, saved = _install_fakes()
+    fake_manager, saved, stores_attr = _install_fakes()
     try:
         spec = _Spec()
         cfg = _cfg()
@@ -142,11 +160,11 @@ def test_ensure_caller_threads_harness_profile_id():
         assert len(fake_manager.create_calls) == 1
         assert fake_manager.create_calls[0]["harness_profile_id"] == "ofek-dev.requirements.processor"
     finally:
-        _restore(saved)
+        _restore(saved, stores_attr)
 
 
 def test_default_spec_threads_none_harness_profile_id():
-    fake_manager, saved = _install_fakes()
+    fake_manager, saved, stores_attr = _install_fakes()
     try:
         class _DefaultSpec(ProvisionedSessionSpec):
             key = "harness_profile_thread_default_test"
@@ -159,7 +177,45 @@ def test_default_spec_threads_none_harness_profile_id():
         _create_session(spec, cfg)
         assert fake_manager.create_calls[0]["harness_profile_id"] is None
     finally:
-        _restore(saved)
+        _restore(saved, stores_attr)
+
+
+def test_install_fakes_does_not_leak_fake_worker_store_onto_real_package() -> None:
+    """Regression: `_install_fakes` used to mutate the real `stores` package's
+    `.worker_store` attribute in place (when `stores` was already imported
+    elsewhere in the process) and `_restore` never put it back — every test
+    in later files that did `from stores import worker_store` in the same
+    pytest process then got the tiny fake (only `upsert_worker`), not the
+    real module, and blew up with AttributeError on any other attribute
+    (e.g. `worker_count`)."""
+    import types as _types
+    import stores as _real_stores_pkg  # noqa: F401  (ensures "stores" is a real, already-imported package)
+
+    probe_worker_store = _types.ModuleType("stores.worker_store")
+    probe_worker_store.worker_count = lambda cwd="": 0
+    real_stores_pkg = sys.modules["stores"]
+    original_pkg_attr = getattr(real_stores_pkg, "worker_store", _MISSING)
+    original_sys_modules_entry = sys.modules.get("stores.worker_store")
+    real_stores_pkg.worker_store = probe_worker_store
+    sys.modules["stores.worker_store"] = probe_worker_store
+    try:
+        _fake_manager, saved, stores_attr = _install_fakes()
+        _restore(saved, stores_attr)
+
+        from stores import worker_store as post_restore_worker_store
+
+        assert post_restore_worker_store is probe_worker_store
+        assert hasattr(post_restore_worker_store, "worker_count")
+    finally:
+        if original_pkg_attr is _MISSING:
+            if hasattr(real_stores_pkg, "worker_store"):
+                delattr(real_stores_pkg, "worker_store")
+        else:
+            real_stores_pkg.worker_store = original_pkg_attr
+        if original_sys_modules_entry is None:
+            sys.modules.pop("stores.worker_store", None)
+        else:
+            sys.modules["stores.worker_store"] = original_sys_modules_entry
 
 
 if __name__ == "__main__":
@@ -168,6 +224,7 @@ if __name__ == "__main__":
         test_create_session_threads_harness_profile_id()
         test_ensure_caller_threads_harness_profile_id()
         test_default_spec_threads_none_harness_profile_id()
+        test_install_fakes_does_not_leak_fake_worker_store_onto_real_package()
         print("OK")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

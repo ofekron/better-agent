@@ -45,7 +45,6 @@ from runs_dir import (  # noqa: E402
 )
 
 PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _mk_provider():
@@ -53,26 +52,20 @@ def _mk_provider():
     return ClaudeProvider({"id": "test-no-bg"})
 
 
-def test_build_env_disables_background() -> bool:
+def test_build_env_disables_background() -> None:
     provider = _mk_provider()
     os.environ[AUTO_BACKGROUND_ENV] = "1"  # hostile ambient opt-in
     try:
         env = provider.build_env()
     finally:
         os.environ.pop(AUTO_BACKGROUND_ENV, None)
-    ok = True
-    if env.get(BACKGROUND_TASKS_DISABLE_ENV) != "1":
-        print(f"{FAIL} build_env must set {BACKGROUND_TASKS_DISABLE_ENV}=1")
-        ok = False
-    if env.get(BG_EXIT_HANDOFF_DISABLE_ENV) != "1":
-        print(f"{FAIL} build_env must set {BG_EXIT_HANDOFF_DISABLE_ENV}=1")
-        ok = False
-    if AUTO_BACKGROUND_ENV in env:
-        print(f"{FAIL} build_env must strip ambient {AUTO_BACKGROUND_ENV}")
-        ok = False
-    if ok:
-        print(f"{PASS} build_env disables background execution natively")
-    return ok
+    assert env.get(BACKGROUND_TASKS_DISABLE_ENV) == "1", (
+        f"build_env must set {BACKGROUND_TASKS_DISABLE_ENV}=1")
+    assert env.get(BG_EXIT_HANDOFF_DISABLE_ENV) == "1", (
+        f"build_env must set {BG_EXIT_HANDOFF_DISABLE_ENV}=1")
+    assert AUTO_BACKGROUND_ENV not in env, (
+        f"build_env must strip ambient {AUTO_BACKGROUND_ENV}")
+    print(f"{PASS} build_env disables background execution natively")
 
 
 def _payload_disallowed(provider, disallowed_tools) -> list[str]:
@@ -93,9 +86,8 @@ def _payload_disallowed(provider, disallowed_tools) -> list[str]:
     return payload["disallowed_tools"]
 
 
-def test_payload_always_strips_bg_tools() -> bool:
+def test_payload_always_strips_bg_tools() -> None:
     provider = _mk_provider()
-    ok = True
     for label, override in (
         ("default", None),
         ("session-override", ["SomeCustomTool"]),
@@ -105,35 +97,26 @@ def test_payload_always_strips_bg_tools() -> bool:
             n for n in (*BACKGROUND_WORK_TOOLS, *TIMER_TOOLS)
             if n not in tools
         ]
-        if missing:
-            print(f"{FAIL} {label} payload missing strips: {missing}")
-            ok = False
-    if ok:
-        print(f"{PASS} input.json always strips background + timer tools")
-    return ok
+        assert not missing, f"{label} payload missing strips: {missing}"
+    print(f"{PASS} input.json always strips background + timer tools")
 
 
-def test_payload_keeps_task_interaction_tools() -> bool:
+def test_payload_keeps_task_interaction_tools() -> None:
     """Workflow support: the model must keep TaskOutput/TaskStop so it
     can read and stop the CLI's background Workflow tasks. The provider
     must never strip them on its own — under any override."""
     provider = _mk_provider()
-    ok = True
     for label, override in (
         ("default", None),
         ("session-override", ["SomeCustomTool"]),
     ):
         tools = _payload_disallowed(provider, override)
         stripped = [n for n in TASK_INTERACTION_TOOLS if n in tools]
-        if stripped:
-            print(f"{FAIL} {label} payload must not strip {stripped}")
-            ok = False
-    if ok:
-        print(f"{PASS} input.json keeps task-interaction tools available")
-    return ok
+        assert not stripped, f"{label} payload must not strip {stripped}"
+    print(f"{PASS} input.json keeps task-interaction tools available")
 
 
-def test_hook_denies_background_input() -> bool:
+def test_hook_denies_background_input() -> None:
     from runner import _deny_background_tool_use
 
     def run(tool_input):
@@ -141,7 +124,6 @@ def test_hook_denies_background_input() -> bool:
             {"tool_name": "Bash", "tool_input": tool_input}, None, None,
         ))
 
-    ok = True
     for label, tool_input in (
         ("Bash run_in_background", {"command": "sleep 99", "run_in_background": True}),
         ("Task run_in_background", {"prompt": "x", "run_in_background": True}),
@@ -149,9 +131,7 @@ def test_hook_denies_background_input() -> bool:
     ):
         out = run(tool_input)
         decision = (out.get("hookSpecificOutput") or {}).get("permissionDecision")
-        if decision != "deny":
-            print(f"{FAIL} hook must deny {label}, got {out!r}")
-            ok = False
+        assert decision == "deny", f"hook must deny {label}, got {out!r}"
 
     for label, benign in (
         ("foreground bash", {"command": "ls"}),
@@ -160,37 +140,26 @@ def test_hook_denies_background_input() -> bool:
         ("empty input", {}),
     ):
         out = run(benign)
-        if out != {}:
-            print(f"{FAIL} hook must not touch {label}, got {out!r}")
-            ok = False
-    if ok:
-        print(f"{PASS} PreToolUse hook denies bg/remote, passes foreground")
-    return ok
+        assert out == {}, f"hook must not touch {label}, got {out!r}"
+    print(f"{PASS} PreToolUse hook denies bg/remote, passes foreground")
 
 
-def test_hooks_wired_into_options() -> bool:
+def test_hooks_wired_into_options() -> None:
     from runner import _background_policy_hooks
     hooks = _background_policy_hooks()
     matchers = hooks.get("PreToolUse") or []
-    if not matchers or not matchers[0].hooks:
-        print(f"{FAIL} PreToolUse policy hook not built")
-        return False
-    if matchers[0].matcher is not None:
-        print(f"{FAIL} policy hook must match ALL tools (matcher=None)")
-        return False
+    assert matchers and matchers[0].hooks, "PreToolUse policy hook not built"
+    assert matchers[0].matcher is None, "policy hook must match ALL tools (matcher=None)"
     print(f"{PASS} policy hook covers all tools via PreToolUse")
-    return True
 
 
 def main() -> int:
-    results = [
-        test_build_env_disables_background(),
-        test_payload_always_strips_bg_tools(),
-        test_payload_keeps_task_interaction_tools(),
-        test_hook_denies_background_input(),
-        test_hooks_wired_into_options(),
-    ]
-    return 0 if all(results) else 1
+    test_build_env_disables_background()
+    test_payload_always_strips_bg_tools()
+    test_payload_keeps_task_interaction_tools()
+    test_hook_denies_background_input()
+    test_hooks_wired_into_options()
+    return 0
 
 
 if __name__ == "__main__":

@@ -6854,6 +6854,83 @@ button.run-badge-clickable:focus-visible {
   color: var(--error);
   opacity: 1;
 }
+.a2a-agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.a2a-agent-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition:
+    opacity 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+.a2a-agent-row.is-disabled {
+  opacity: 0.68;
+  background: color-mix(in srgb, var(--bg-tertiary) 68%, transparent);
+}
+.a2a-agent-row-main {
+  min-width: 0;
+  flex: 1 1 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.a2a-agent-row-name {
+  font-weight: 600;
+}
+.a2a-agent-row-url {
+  font-size: calc(12px * var(--app-font-scale));
+  opacity: 0.7;
+  word-break: break-all;
+}
+.a2a-agent-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: calc(12px * var(--app-font-scale));
+}
+.a2a-agent-secret-badge {
+  opacity: 0.7;
+}
+.a2a-agent-status-ok {
+  color: var(--success, #2e9e5b);
+}
+.a2a-agent-status-fail {
+  color: var(--error);
+}
+.a2a-agent-status-unknown {
+  opacity: 0.6;
+}
+.a2a-agent-delegate-result {
+  font-size: calc(12px * var(--app-font-scale));
+  opacity: 0.8;
+  animation: extension-app-settings-status-in 200ms ease;
+}
+.a2a-agent-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+.a2a-agent-delegate-form,
+.a2a-agent-add-form {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  animation: extension-app-settings-status-in 200ms ease;
+}
 .extension-ui-settings-row {
   display: grid;
   grid-template-columns: minmax(190px, 0.45fr) minmax(0, 1fr);
@@ -17787,219 +17864,6 @@ html[dir="rtl"] .user-request-toast::before {
 }
 .extension-toast-close:hover { opacity: 1; }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Startup-tasks banner — non-blocking indicator for backend background
- * work (migrations, recovery, jsonl replay). Floats above the prompt
- * area; auto-clears `done` rows, running/failed rows can be dismissed.
- * Authoritative state in the backend's
- * `startup_task_registry`; live deltas via `startup_task_changed` WS.
- * ───────────────────────────────────────────────────────────────────── */
-.startup-tasks-banner {
-  position: fixed;
-  right: 24px;
-  bottom: calc(100px + env(safe-area-inset-bottom, 0px));
-  z-index: 90;
-  width: min(360px, calc(100vw - 48px));
-  max-height: min(42vh, 320px);
-  overflow: auto;
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: #1f262a;
-  border: 1px solid #2f4d5b;
-  color: #cce6f0;
-  font-size: calc(12px * var(--app-font-scale));
-}
-.startup-tasks-banner-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  opacity: 0.8;
-}
-.startup-tasks-banner-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.startup-tasks-banner-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  line-height: 1.4;
-}
-.startup-tasks-banner-row-failed {
-  color: #f4d4cd;
-}
-.startup-tasks-banner-spinner {
-  display: inline-block;
-  width: 14px;
-  text-align: center;
-}
-.startup-tasks-banner-row-running .startup-tasks-banner-spinner {
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-@keyframes startup-tasks-spin {
-  to { transform: rotate(360deg); }
-}
-.startup-tasks-banner-text { flex: 1; }
-.startup-tasks-banner-error { opacity: 0.85; }
-.startup-tasks-banner-close {
-  background: transparent;
-  border: none;
-  color: inherit;
-  font-size: calc(16px * var(--app-font-scale));
-  cursor: pointer;
-  padding: 0 4px;
-  opacity: 0.7;
-  line-height: 1;
-  flex-shrink: 0;
-}
-.startup-tasks-banner-close:hover { opacity: 1; }
-:dir(rtl) .startup-tasks-banner {
-  right: auto;
-  left: 24px;
-}
-
-.model-catalog-activity {
-  position: fixed;
-  inset-inline-end: 24px;
-  bottom: calc(156px + env(safe-area-inset-bottom, 0px));
-  z-index: 91;
-  width: min(360px, calc(100vw - 48px));
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
-  animation: model-catalog-activity-in 180ms ease-out;
-}
-.model-catalog-activity header,
-.model-catalog-activity li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.model-catalog-activity li {
-  align-items: flex-start;
-  animation: model-catalog-activity-in 180ms ease-out;
-}
-.model-catalog-activity li svg {
-  margin-top: 3px;
-  flex: none;
-}
-.model-catalog-activity-text {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-.model-catalog-activity-provider {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.model-catalog-activity-detail {
-  color: var(--text-secondary);
-  font-size: calc(12px * var(--app-font-scale));
-  overflow-wrap: anywhere;
-  transition: color 180ms ease-out;
-}
-.model-catalog-activity header {
-  justify-content: space-between;
-  font-weight: 600;
-}
-.model-catalog-activity header button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
-}
-.model-catalog-activity ul {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.model-catalog-activity-refreshing svg,
-.model-catalog-activity-pending svg {
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-.node-provider-credential-status {
-  position: fixed;
-  inset-inline-end: 24px;
-  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-  z-index: 92;
-  width: min(380px, calc(100vw - 48px));
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
-  animation: node-provider-credential-status-in 180ms ease-out;
-}
-body:has(.model-catalog-activity) .node-provider-credential-status {
-  bottom: calc(250px + env(safe-area-inset-bottom, 0px));
-}
-.node-provider-credential-status ul {
-  display: grid;
-  gap: 1px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.node-provider-credential-status li {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 9px;
-  min-height: 42px;
-  padding: 9px 11px;
-  font-size: calc(12px * var(--app-font-scale));
-}
-.node-provider-credential-status li + li {
-  border-top: 1px solid var(--border-color);
-}
-.node-provider-credential-status-indicator {
-  width: 10px;
-  height: 10px;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: startup-tasks-spin 1.2s linear infinite;
-}
-.node-provider-credential-status-failed {
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
-}
-.node-provider-credential-status-failed .node-provider-credential-status-indicator {
-  border: 0;
-  border-radius: 50%;
-  background: var(--danger);
-  animation: none;
-}
-.node-provider-credential-status button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
-  line-height: 1;
-  opacity: 0.72;
-  transition: opacity 180ms ease;
-}
-.node-provider-credential-status button:hover {
-  opacity: 1;
-}
-@keyframes node-provider-credential-status-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 .model-catalog-status {
   display: flex;
   align-items: center;
@@ -18040,40 +17904,20 @@ body:has(.model-catalog-activity) .node-provider-credential-status {
   border-inline-start-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 9%, transparent);
 }
-@keyframes model-catalog-activity-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+
 @media (prefers-reduced-motion: reduce) {
-  .model-catalog-activity,
-  .node-provider-credential-status,
-  .node-provider-credential-status-indicator,
-  .node-provider-credential-status button,
-  .model-catalog-status,
-  .model-catalog-activity li,
-  .model-catalog-activity-detail,
-  .model-catalog-activity svg {
+  .model-catalog-status {
     animation: none;
     transition: none;
   }
 }
 @media (max-width: 640px) {
-  .startup-tasks-banner {
-    right: 12px;
-    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
-    width: min(360px, calc(100vw - 24px));
-  }
-  :dir(rtl) .startup-tasks-banner {
-    right: auto;
-    left: 12px;
-  }
-  .model-catalog-activity {
-    inset-inline-end: 12px;
-    width: min(360px, calc(100vw - 24px));
-  }
-  .node-provider-credential-status {
+  .background-work-manager {
     inset-inline-end: 12px;
     width: min(380px, calc(100vw - 24px));
+  }
+  .background-work-chip {
+    inset-inline-end: 12px;
   }
 }
 
@@ -24087,4 +23931,243 @@ button.progress-inflight {
 
 .ns-modal-new-profile:hover {
   opacity: 0.8;
+}
+
+/* Background work manager — the single corner surface for background work.
+   One fixed-position owner replaces the per-subsystem popups that each
+   carried their own offset and stacked via a `body:has()` selector. */
+.background-work-manager {
+  position: fixed;
+  inset-inline-end: 24px;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  z-index: 95;
+  width: min(380px, calc(100vw - 48px));
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.background-work-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.background-work-hide {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: calc(14px * var(--app-font-scale));
+  line-height: 1;
+  padding: 0 2px;
+  margin-inline-start: auto;
+  opacity: 0.65;
+  transition: opacity 160ms ease;
+}
+
+.background-work-hide:hover { opacity: 1; }
+
+/* Collapsed form. Hiding must not make in-flight work unreachable, so the
+   chip keeps the counts and restores the panel. */
+.background-work-chip {
+  position: fixed;
+  inset-inline-end: 24px;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  z-index: 95;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  font-size: calc(10.5px * var(--app-font-scale));
+  animation: background-work-chip-in 180ms ease-out;
+}
+
+@keyframes background-work-chip-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.background-work-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  opacity: 0.45;
+}
+
+.background-work-chip-dot.is-active {
+  background: var(--accent);
+  opacity: 1;
+  animation: background-work-chip-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes background-work-chip-pulse {
+  50% { opacity: 0.35; }
+}
+
+.background-work-title {
+  font-size: calc(11.5px * var(--app-font-scale));
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.background-work-offline {
+  font-size: calc(10.5px * var(--app-font-scale));
+  color: var(--danger);
+  opacity: 0.9;
+}
+
+.background-work-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.background-work-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.background-work-row + .background-work-row {
+  border-top: 1px solid var(--border-color);
+}
+
+.background-work-row-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  opacity: 0.8;
+}
+
+@keyframes background-work-spin {
+  to { transform: rotate(360deg); }
+}
+
+.background-work-row-running .background-work-row-icon {
+  display: inline-flex;
+  animation: background-work-spin 1.2s linear infinite;
+}
+
+.background-work-row-failed .background-work-row-icon { color: var(--danger); }
+.background-work-row-succeeded .background-work-row-icon { color: var(--success, var(--accent)); }
+
+.background-work-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Provenance chrome: extension-supplied text can never occupy the core
+   heading slot, so the owning extension is always named above it. */
+.background-work-row-origin {
+  font-size: calc(10px * var(--app-font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.background-work-row-label {
+  font-size: calc(11.5px * var(--app-font-scale));
+  overflow-wrap: anywhere;
+}
+
+.background-work-row-phase,
+.background-work-row-detail,
+.background-work-row-count,
+.background-work-row-note {
+  font-size: calc(10.5px * var(--app-font-scale));
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+
+.background-work-row-error {
+  font-size: calc(10.5px * var(--app-font-scale));
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.background-work-progress {
+  height: 3px;
+  margin-top: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  overflow: hidden;
+}
+
+.background-work-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 220ms ease-out;
+}
+
+/* No total means no percentage — the bar sweeps instead of claiming a
+   fraction the backend never reported. */
+.background-work-progress-indeterminate .background-work-progress-fill {
+  width: 35%;
+  animation: background-work-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes background-work-sweep {
+  0% { margin-inline-start: -35%; }
+  100% { margin-inline-start: 100%; }
+}
+
+.background-work-row-close,
+.background-work-toggle {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1;
+  opacity: 0.7;
+  transition: opacity 160ms ease;
+}
+
+.background-work-row-close {
+  font-size: calc(16px * var(--app-font-scale));
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.background-work-toggle {
+  align-self: flex-start;
+  font-size: calc(10.5px * var(--app-font-scale));
+  color: var(--accent);
+  padding: 0;
+}
+
+.background-work-row-close:hover,
+.background-work-toggle:hover { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .background-work-row-running .background-work-row-icon,
+  .background-work-progress-indeterminate .background-work-progress-fill,
+  .background-work-chip-dot.is-active,
+  .background-work-chip {
+    animation: none;
+  }
+  .background-work-progress-fill { transition: none; }
 }

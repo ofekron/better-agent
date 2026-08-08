@@ -652,8 +652,12 @@ class SessionWSBroadcaster:
             if "sidebar_minimized" in change:
                 patch["sidebar_minimized"] = bool(change["sidebar_minimized"])
         elif kind == "queued_prompts_updated":
+            # Monotonic seq mirrors `selectors_seq`: lets every tab drop a
+            # stale/out-of-order queue snapshot. Forwarded verbatim (default
+            # 0) so the patch always carries the field the contract promises.
             patch = {
-                "queued_prompts": list(change.get("queued_prompts") or [])
+                "queued_prompts": list(change.get("queued_prompts") or []),
+                "queued_prompts_seq": change.get("queued_prompts_seq") or 0,
             }
         elif kind == "fork_provisioning_changed":
             # Explicit null on clear: a patch that simply omitted the key

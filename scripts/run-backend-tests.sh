@@ -45,6 +45,48 @@
 # though only the pytest run itself needed the fresh code. The --ref path
 # still builds the `full` target (deps + COPY) from a `git archive` of the
 # pinned commit, since that path must test a frozen tree, not a live mount.
+#
+# Resource caps on the test container itself (docker_test_resource_cap_args
+# in lib/docker-test-lifecycle.sh): BETTER_AGENT_TEST_CPUS (default 2, same
+# as always), BETTER_AGENT_TEST_MEMORY (+ matching --memory-swap; default
+# unset/uncapped, same as always), BETTER_AGENT_TEST_CPU_SHARES (default
+# unset — docker's normal 1024 weight). All are no-ops for local dev unless
+# set; CI sets them per self-hosted runner in
+# .github/workflows/backend-tests-selfhosted.yml.
+#
+# Bind-mount ownership on native Linux Docker hosts (docker_test_chown_env_args
+# in lib/docker-test-lifecycle.sh): the working-tree path's /repo bind mount
+# shares host filesystem ownership 1:1 with the container's UID, and the test
+# image runs as root — so a native-Linux run forwards this host's uid:gid as
+# BETTER_AGENT_TEST_CHOWN, and docker/entrypoint-test.sh chowns /repo back
+# after the test run so root-owned junit/cache files don't break the next CI
+# job's checkout. Automatic (uname -s = Linux), not opt-in; a no-op on
+# macOS/Docker Desktop, whose VM already remaps bind-mount ownership.
+#
+# Per-test-file timing telemetry: pass `-- --junitxml=<path>` (plain pytest
+# passthrough, no dedicated flag). For the default working-tree path above,
+# /repo is a live bind-mount of this repo, so a relative --junitxml path
+# lands directly on the host under backend/ once the container exits — no
+# extra mount needed. The --ref path's `full` image has no such bind mount
+# (its /repo is a frozen `git archive` snapshot baked into the image), so
+# --junitxml there would be written inside the --rm container and lost;
+# nothing in this repo currently combines --ref with --junitxml.
+#
+# Per-test timeout (BETTER_AGENT_TEST_TIMEOUT, seconds): forwarded as
+# `--timeout=<value> --timeout-method=signal` (pytest-timeout, see
+# backend/requirements-test.txt) ahead of any user-supplied pytest args, so
+# an explicit `-- --timeout=...` still wins. Unset by default — local runs
+# keep today's no-timeout behavior; CI sets it to 120s via
+# .github/workflows/backend-tests-selfhosted.yml's job env, not hardcoded
+# here, so this script's own default never changes for local dev. signal
+# over thread: the test image is always Linux, and pytest-timeout's thread
+# method can't safely interrupt a hung test at all (its own docs: on
+# timeout it dumps thread stacks and hard-kills the whole pytest process,
+# losing every remaining test in the run) — signal fails just the one
+# hung test via SIGALRM and lets the suite continue, which is what we
+# want. This was the exact gap in the 2026-08-07 incident: a single hung
+# test burned the full ~100-minute runner budget with zero diagnostic
+# because nothing bounded it.
 
 set -euo pipefail
 
@@ -141,6 +183,7 @@ else
   docker_test_snapshot_context "$REPO_ROOT" "$SNAPSHOT_PATH" \
     "$REPO_ROOT/.dockerignore" \
     "$DOCKERFILE" \
+    "$REPO_ROOT/docker/entrypoint-test.sh" \
     "$REPO_ROOT/sdk/runtime-requirements.txt" \
     "$REPO_ROOT/vendor" \
     "$REPO_ROOT/backend/requirements.txt" \
@@ -149,6 +192,7 @@ else
   IMAGE_FINGERPRINT="$(docker_test_fingerprint "$SNAPSHOT_PATH" \
     "$SNAPSHOT_PATH/.dockerignore" \
     "$SNAPSHOT_PATH/docker/Dockerfile.test" \
+    "$SNAPSHOT_PATH/docker/entrypoint-test.sh" \
     "$SNAPSHOT_PATH/sdk/runtime-requirements.txt" \
     "$SNAPSHOT_PATH/vendor" \
     "$SNAPSHOT_PATH/backend/requirements.txt" \
@@ -162,10 +206,23 @@ else
     -f "$SNAPSHOT_PATH/docker/Dockerfile.test" --target deps -t "$IMAGE_TAG" "$SNAPSHOT_PATH"
 fi
 
-RUN_ARGS=(--rm --cpus=2)
+RUN_ARGS=(--rm)
+# BETTER_AGENT_TEST_CPUS / _MEMORY / _CPU_SHARES (see
+# docker_test_resource_cap_args in lib/docker-test-lifecycle.sh) — unset
+# leaves this identical to the long-standing --cpus=2 default.
+while IFS= read -r resource_cap_arg; do
+  RUN_ARGS+=("$resource_cap_arg")
+done < <(docker_test_resource_cap_args)
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
+# BETTER_AGENT_TEST_CHOWN (see docker_test_chown_env_args in
+# lib/docker-test-lifecycle.sh): only emitted on native Linux Docker hosts,
+# where entrypoint-test.sh needs it to hand bind-mounted /repo ownership
+# back to the invoking user; a no-op on macOS/Docker Desktop.
+while IFS= read -r chown_env_arg; do
+  RUN_ARGS+=("$chown_env_arg")
+done < <(docker_test_chown_env_args)
 
 if [ "$BIND_MOUNT_REPO" = "1" ]; then
   # Working-tree path: the `deps` image has no source baked in. Bind-mount
@@ -182,6 +239,20 @@ else
   PYTEST_CACHE_DIR="$REPO_ROOT/backend/.pytest_cache"
   mkdir -p "$PYTEST_CACHE_DIR"
   RUN_ARGS+=(-v "$PYTEST_CACHE_DIR:/repo/backend/.pytest_cache")
+fi
+
+# Per-test timeout: kept in its own array (populated only via +=, never by
+# reading PYTEST_ARGS — empty-array reads trip set -u on bash 3.2, see the
+# coverage block below) and placed ahead of PYTEST_ARGS at the docker_test_run
+# call so an explicit `-- --timeout=...` from the caller still wins (pytest
+# keeps the last occurrence of a repeated flag). See the header comment for
+# the signal-vs-thread method rationale.
+TIMEOUT_PYTEST_ARGS=()
+if [ -n "${BETTER_AGENT_TEST_TIMEOUT:-}" ]; then
+  TIMEOUT_PYTEST_ARGS+=(
+    "--timeout=${BETTER_AGENT_TEST_TIMEOUT}"
+    --timeout-method=signal
+  )
 fi
 
 # Coverage: mount the output dir (the container runs --rm, so reports written
@@ -214,6 +285,10 @@ fi
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 TEST_STATUS=0
-docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" "${PYTEST_ARGS[@]}" || TEST_STATUS=$?
+# ${arr[@]+"${arr[@]}"} guards against bash 3.2 (macOS), where reading an
+# empty array under `set -u` raises "unbound variable". TIMEOUT_PYTEST_ARGS is
+# empty without BETTER_AGENT_TEST_TIMEOUT and PYTEST_ARGS is empty on a bare
+# invocation, so both must be conditionally expanded.
+docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" ${TIMEOUT_PYTEST_ARGS[@]+"${TIMEOUT_PYTEST_ARGS[@]}"} ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"} || TEST_STATUS=$?
 docker_test_cleanup
 exit "$TEST_STATUS"

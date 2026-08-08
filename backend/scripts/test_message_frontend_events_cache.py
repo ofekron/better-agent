@@ -31,7 +31,7 @@ def _data(uid: str, text: str) -> dict:
     }
 
 
-def test_message_frontend_events_cache() -> bool:
+def test_message_frontend_events_cache() -> None:
     root = "root-message-frontend-cache"
     sid = root
     msg_id = "msg-message-frontend-cache"
@@ -56,12 +56,10 @@ def test_message_frontend_events_cache() -> bool:
     with patch.object(EventJournalReader, "_to_frontend_events", side_effect=counted):
         first = reader.read_frontend_events(root, message_id=msg_id)
         second = reader.read_frontend_events(root, message_id=msg_id)
-        if calls != 1:
-            print(f"conversion calls before append: {calls}")
-            return False
-        if first != second or len(first) != 1:
-            print(f"unexpected cached frontend events: first={first!r} second={second!r}")
-            return False
+        assert calls == 1, f"conversion calls before append: {calls}"
+        assert first == second and len(first) == 1, (
+            f"unexpected cached frontend events: first={first!r} second={second!r}"
+        )
         event_ingester.ingest(
             root,
             sid=sid,
@@ -71,16 +69,11 @@ def test_message_frontend_events_cache() -> bool:
             msg_id=msg_id,
         )
         third = reader.read_frontend_events(root, message_id=msg_id)
-        if calls != 2:
-            print(f"conversion calls after append: {calls}")
-            return False
-        if len(third) != 2:
-            print(f"appended frontend events missing: {third!r}")
-            return False
-    return True
+        assert calls == 2, f"conversion calls after append: {calls}"
+        assert len(third) == 2, f"appended frontend events missing: {third!r}"
 
 
-def test_current_message_cache_skips_summary_recompute() -> bool:
+def test_current_message_cache_skips_summary_recompute() -> None:
     root = "root-message-summary-fast-hit"
     sid = root
     msg_id = "msg-message-summary-fast-hit"
@@ -105,16 +98,13 @@ def test_current_message_cache_skips_summary_recompute() -> bool:
 
     reader.message_event_summaries = counted  # type: ignore[method-assign]
     second = reader.read_frontend_events(root, message_id=msg_id)
-    if calls != 0:
-        print(f"summary recompute calls on current cache hit: {calls}")
-        return False
-    if second != first:
-        print(f"current cache hit changed events: first={first!r} second={second!r}")
-        return False
-    return True
+    assert calls == 0, f"summary recompute calls on current cache hit: {calls}"
+    assert second == first, (
+        f"current cache hit changed events: first={first!r} second={second!r}"
+    )
 
 
-def test_cold_reader_reuses_persisted_frontend_projection() -> bool:
+def test_cold_reader_reuses_persisted_frontend_projection() -> None:
     root = "root-message-frontend-projection"
     sid = root
     msg_id = "msg-message-frontend-projection"
@@ -148,25 +138,34 @@ def test_cold_reader_reuses_persisted_frontend_projection() -> bool:
 
     with patch.object(EventJournalReader, "_to_frontend_events", side_effect=counted):
         second = cold_reader.read_frontend_events(root, message_id=msg_id)
-        if calls != 0:
-            print(f"cold projection conversion calls: {calls}")
-            return False
-        if second != first:
-            print(f"cold projection changed events: first={first!r} second={second!r}")
-            return False
-    return True
+        assert calls == 0, f"cold projection conversion calls: {calls}"
+        assert second == first, (
+            f"cold projection changed events: first={first!r} second={second!r}"
+        )
 
 
 def main() -> int:
+    tests = [
+        ("message frontend events cache", test_message_frontend_events_cache),
+        ("current message cache skips summary recompute", test_current_message_cache_skips_summary_recompute),
+        ("cold reader reuses persisted frontend projection", test_cold_reader_reuses_persisted_frontend_projection),
+    ]
+    failed = 0
     try:
-        ok = test_message_frontend_events_cache()
-        print(f"{PASS if ok else FAIL} message frontend events cache")
-        fast_ok = test_current_message_cache_skips_summary_recompute()
-        print(f"{PASS if fast_ok else FAIL} current message cache skips summary recompute")
-        projection_ok = test_cold_reader_reuses_persisted_frontend_projection()
-        print(f"{PASS if projection_ok else FAIL} cold reader reuses persisted frontend projection")
-        ok = ok and fast_ok and projection_ok
-        return 0 if ok else 1
+        for label, runner in tests:
+            try:
+                runner()
+            except AssertionError as exc:
+                failed += 1
+                print(f"{FAIL} {label}: {exc}")
+            except Exception:
+                failed += 1
+                import traceback
+                traceback.print_exc()
+            else:
+                print(f"{PASS} {label}")
+        print(f"{len(tests) - failed}/{len(tests)} subtests passed")
+        return 1 if failed else 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 

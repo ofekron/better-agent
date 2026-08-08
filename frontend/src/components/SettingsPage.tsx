@@ -18,6 +18,7 @@ import { InstallationCapabilities } from "./InstallationCapabilities";
 import { SessionAutoDeleteSetting } from "./SessionAutoDeleteSetting";
 import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
+import { A2AAgentsSettings } from "./A2AAgentsSettings";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { SearchInput } from "./SearchInput";
 import { eventBus } from "src/lib/eventBus";
@@ -141,6 +142,7 @@ type SettingsSection =
   | "recovery"
   | "shortcuts"
   | "delegation"
+  | "a2aAgents"
   | "context"
   | "internalLlm"
   | "sessions"
@@ -159,7 +161,7 @@ type SettingsSection =
  * adding a second nav entry with the same meaning. */
 const CORE_SETTINGS_SECTION_IDS: ReadonlySet<string> = new Set([
   "providers", "runtimeProfiles", "account", "language", "appearance", "desktop",
-  "recovery", "shortcuts", "delegation", "context", "internalLlm", "sessions",
+  "recovery", "shortcuts", "delegation", "a2aAgents", "context", "internalLlm", "sessions",
   "voice", "extensions", "capabilities", "harnessProfiles", "passwords", "server",
   "notifications",
 ]);
@@ -1208,6 +1210,7 @@ function ProvidersList({
     { id: "recovery", label: t("settings.recoveryTitle"), group: "general" },
     { id: "shortcuts", label: t("settings.shortcutsTitle"), group: "general" },
     ...(teamEnabled ? [{ id: "delegation" as const, label: t("settings.delegationTitle"), group: "general" as const }] : []),
+    { id: "a2aAgents", label: t("settings.a2aAgentsTitle"), group: "general" },
     { id: "context", label: t("settings.contextTitle"), group: "general" },
     { id: "internalLlm", label: t("settings.internalLlmTitle"), group: "general" },
     { id: "sessions", label: t("settings.sessionsTitle"), group: "general" },
@@ -1326,6 +1329,7 @@ function ProvidersList({
           <DelegateTaskPolicySetting />
         </>
       )}
+      {section === "a2aAgents" && <A2AAgentsSettings />}
       {section === "context" && <ContextStrategySetting />}
       {section === "internalLlm" && <InternalLLMSetting />}
       {section === "sessions" && (

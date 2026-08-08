@@ -117,13 +117,11 @@ def _fresh_session(n_finalized_assistant: int = 3) -> str:
     return sid
 
 
-def test_non_render_orphans_do_not_invalidate_snapshot() -> bool:
+def test_non_render_orphans_do_not_invalidate_snapshot() -> None:
     sid = _fresh_session()
     _ = session_manager.get_root_tree_stubbed(sid)
     cached = session_manager._since_cache.get(sid)
-    if cached is None:
-        print("  expected warm _since_cache entry")
-        return False
+    assert not (cached is None), "  expected warm _since_cache entry"
     before_key, before_snapshot = cached
 
     cases = [
@@ -143,35 +141,25 @@ def test_non_render_orphans_do_not_invalidate_snapshot() -> bool:
             source="test", msg_id=None,
         )
 
-    if event_ingester.render_seq_for_sid(sid, sid) != 0:
-        print("  non-render orphan advanced render_seq_for_sid")
-        return False
+    assert not (event_ingester.render_seq_for_sid(sid, sid) != 0), "  non-render orphan advanced render_seq_for_sid"
 
     _ = session_manager.get_root_tree_stubbed(sid)
     after_key, after_snapshot = session_manager._since_cache.get(sid)
-    if after_key != before_key:
-        print(f"  cache key changed for audit row: {before_key} -> {after_key}")
-        return False
-    if after_snapshot is not before_snapshot:
-        print("  snapshot rebuilt for audit row")
-        return False
-    return True
+    assert not (after_key != before_key), f"  cache key changed for audit row: {before_key} -> {after_key}"
+    assert not (after_snapshot is not before_snapshot), "  snapshot rebuilt for audit row"
 
 
-def test_worker_event_advances_render_watermark() -> bool:
+def test_worker_event_advances_render_watermark() -> None:
     sid = _fresh_session()
     event_ingester.ingest(
         sid, sid=sid, event_type="worker_event",
         data={"event": {"type": "agent_message", "data": {"uuid": str(uuid.uuid4())}}},
         source="test", msg_id=None,
     )
-    if event_ingester.render_seq_for_sid(sid, sid) <= 0:
-        print("  worker_event did not advance render_seq_for_sid")
-        return False
-    return True
+    assert not (event_ingester.render_seq_for_sid(sid, sid) <= 0), "  worker_event did not advance render_seq_for_sid"
 
 
-def test_non_render_orphan_does_not_rebuild_root_events_projection() -> bool:
+def test_non_render_orphan_does_not_rebuild_root_events_projection() -> None:
     sid = _fresh_session()
     event_ingester.ingest(
         sid, sid=sid, event_type="agent_message",
@@ -186,9 +174,7 @@ def test_non_render_orphan_does_not_rebuild_root_events_projection() -> bool:
         source="test", msg_id=None,
     )
     before = event_ingester.root_events_by_sid(sid)
-    if not before.get(sid):
-        print("  expected cached root event projection")
-        return False
+    assert not (not before.get(sid)), "  expected cached root event projection"
     cache_before = event_ingester._root_events_cache.get(sid)
     version_before = event_ingester._root_events_version.get(sid)
 
@@ -201,19 +187,12 @@ def test_non_render_orphan_does_not_rebuild_root_events_projection() -> bool:
     cache_after = event_ingester._root_events_cache.get(sid)
     version_after = event_ingester._root_events_version.get(sid)
 
-    if version_after != version_before:
-        print(f"  root event version changed: {version_before} -> {version_after}")
-        return False
-    if cache_after is not cache_before:
-        print("  root event projection cache rebuilt for audit row")
-        return False
-    if after != before:
-        print("  root event projection changed for audit row")
-        return False
-    return True
+    assert not (version_after != version_before), f"  root event version changed: {version_before} -> {version_after}"
+    assert not (cache_after is not cache_before), "  root event projection cache rebuilt for audit row"
+    assert not (after != before), "  root event projection changed for audit row"
 
 
-def test_render_orphan_updates_warm_root_events_projection() -> bool:
+def test_render_orphan_updates_warm_root_events_projection() -> None:
     sid = _fresh_session()
     first_uid = str(uuid.uuid4())
     event_ingester.ingest(
@@ -256,17 +235,14 @@ def test_render_orphan_updates_warm_root_events_projection() -> bool:
         after = event_ingester.root_events_by_sid(sid)
     finally:
         event_ingester._read_all_events_locked = original_read_all
-    if uid not in {
+    assert uid in {
         ((event.get("data") or {}).get("uuid"))
         for event in after.get(sid, [])
         if isinstance(event, dict)
-    }:
-        print("  warm root event projection did not include appended orphan")
-        return False
-    return True
+    }, "  warm root event projection did not include appended orphan"
 
 
-def test_stamped_event_updates_warm_root_events_projection() -> bool:
+def test_stamped_event_updates_warm_root_events_projection() -> None:
     sid = _fresh_session()
     uid = str(uuid.uuid4())
     event_ingester.ingest(
@@ -285,9 +261,7 @@ def test_stamped_event_updates_warm_root_events_projection() -> bool:
         msg_id=None,
     )
     before = event_ingester.root_events_by_sid(sid)
-    if not before.get(sid):
-        print("  expected orphan before stamped event")
-        return False
+    assert not (not before.get(sid)), "  expected orphan before stamped event"
     original_read_all = event_ingester._read_all_events_locked
     try:
         event_ingester._read_all_events_locked = lambda *a, **k: (_ for _ in ()).throw(
@@ -311,20 +285,17 @@ def test_stamped_event_updates_warm_root_events_projection() -> bool:
         after = event_ingester.root_events_by_sid(sid)
     finally:
         event_ingester._read_all_events_locked = original_read_all
-    if any(
+    assert not any(
         ((event.get("data") or {}).get("uuid")) == uid
         for event in after.get(sid, [])
         if isinstance(event, dict)
-    ):
-        print("  stamped event did not remove matching root orphan")
-        return False
-    return True
+    ), "  stamped event did not remove matching root orphan"
 
 
 # ─── 9. WS replay cap (mirror handler's bounded build) ─────────────
 
 
-def test_ws_replay_cap_at_msg_limit() -> bool:
+def test_ws_replay_cap_at_msg_limit() -> None:
     """Mirror of the WS subscribe handler's replay-build logic. Cold
     replay may include one extra turn initiator when the raw cap cuts
     through a user→assistant boundary, but it must stay bounded
@@ -351,17 +322,12 @@ def test_ws_replay_cap_at_msg_limit() -> bool:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     delta = _build_messages_replay_delta(sid, 0, limit=50, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     replay = delta["messages"]
-    if len(replay) > 51:
-        print(f"  replay payload {len(replay)} > 51 bounded cap")
-        return False
-    return True
+    assert not (len(replay) > 51), f"  replay payload {len(replay)} > 51 bounded cap"
 
 
-def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
+def test_cold_ws_replay_keeps_turn_header_initiator() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
@@ -379,17 +345,12 @@ def test_cold_ws_replay_keeps_turn_header_initiator() -> bool:
             "events": [], "isStreaming": False,
         })
     delta = _build_messages_replay_delta(sid, 0, limit=1, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     roles = [m.get("role") for m in delta["messages"]]
-    if roles != ["user", "assistant"]:
-        print(f"  cold replay split the turn boundary: {roles}")
-        return False
-    return True
+    assert not (roles != ["user", "assistant"]), f"  cold replay split the turn boundary: {roles}"
 
 
-def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
+def test_cold_ws_replay_does_not_invent_orphan_header() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
@@ -410,17 +371,12 @@ def test_cold_ws_replay_does_not_invent_orphan_header() -> bool:
         "events": [], "isStreaming": False,
     })
     delta = _build_messages_replay_delta(sid, 0, limit=1, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     roles = [m.get("role") for m in delta["messages"]]
-    if roles != ["assistant"]:
-        print(f"  orphan assistant got an invented header: {roles}")
-        return False
-    return True
+    assert not (roles != ["assistant"]), f"  orphan assistant got an invented header: {roles}"
 
 
-def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
+def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
@@ -445,17 +401,12 @@ def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
         "events": [], "isStreaming": False,
     })
     delta = _build_messages_replay_delta(sid, int(user["seq"]), limit=1, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     roles = [m.get("role") for m in delta["messages"]]
-    if roles != ["assistant"]:
-        print(f"  incremental replay prepended seen initiator: {roles}")
-        return False
-    return True
+    assert not (roles != ["assistant"]), f"  incremental replay prepended seen initiator: {roles}"
 
 
-def test_incremental_ws_replay_reuses_identical_window() -> bool:
+def test_incremental_ws_replay_reuses_identical_window() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sess = session_manager.create(
@@ -496,17 +447,11 @@ def test_incremental_ws_replay_reuses_identical_window() -> bool:
     try:
         first = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
         second = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
-        if calls != 1:
-            print(f"  identical replay rebuilt {calls} windows")
-            return False
-        if not first or not second:
-            print("  replay delta unexpectedly None")
-            return False
+        assert not (calls != 1), f"  identical replay rebuilt {calls} windows"
+        assert not (not first or not second), "  replay delta unexpectedly None"
         first["messages"][0]["content"] = "mutated"
         third = _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
-        if not third or third["messages"][0].get("content") == "mutated":
-            print("  cached replay returned shared mutable data")
-            return False
+        assert not (not third or third["messages"][0].get("content") == "mutated"), "  cached replay returned shared mutable data"
         event_ingester.ingest(
             sid,
             sid=sid,
@@ -516,12 +461,9 @@ def test_incremental_ws_replay_reuses_identical_window() -> bool:
             msg_id=assistant_id,
         )
         _build_messages_replay_delta(sid, int(user["seq"]), limit=50, get_in_flight=_no_in_flight)
-        if calls != 2:
-            print(f"  render event did not invalidate window cache, calls={calls}")
-            return False
+        assert not (calls != 2), f"  render event did not invalidate window cache, calls={calls}"
     finally:
         session_manager._compute_messages_window = original
-    return True
 
 
 def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, str, int]:
@@ -552,7 +494,7 @@ def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, s
     return sid, msg_id, int(msg.get("seq") or 0)
 
 
-def test_ws_replay_survives_stale_historical_projection() -> bool:
+def test_ws_replay_survives_stale_historical_projection() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     projection = types.ModuleType("historical_children_projection")
@@ -566,43 +508,27 @@ def test_ws_replay_survives_stale_historical_projection() -> bool:
     sid, msg_id, _seen_seq = _session_with_completed_replay_target(event_count=2)
     with patch.dict(sys.modules, {"historical_children_projection": projection}):
         delta = _build_messages_replay_delta(sid, 0, limit=50, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     replay = [m for m in delta["messages"] if m.get("id") == msg_id]
-    if len(replay) != 1:
-        print(f"  completed message missing/duplicated under stale projection: {len(replay)}")
-        return False
+    assert not (len(replay) != 1), f"  completed message missing/duplicated under stale projection: {len(replay)}"
     msg = replay[0]
-    if msg.get("events"):
-        print(f"  completed replay should stay stubbed, got events={msg.get('events')}")
-        return False
-    if not isinstance(msg.get("stub"), dict):
-        print(f"  completed replay missing fallback stub: {msg}")
-        return False
-    return True
+    assert not (msg.get("events")), f"  completed replay should stay stubbed, got events={msg.get('events')}"
+    assert not (not isinstance(msg.get("stub"), dict)), f"  completed replay missing fallback stub: {msg}"
 
 
-def test_ws_replay_excludes_completed_seen_message() -> bool:
+def test_ws_replay_excludes_completed_seen_message() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sid, msg_id, seen_seq = _session_with_completed_replay_target()
     delta = _build_messages_replay_delta(sid, seen_seq, limit=50, get_in_flight=_no_in_flight)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     replay_ids = {m.get("id") for m in delta["messages"]}
-    if msg_id in replay_ids:
-        print("  replay resent completed seq N message")
-        return False
+    assert not (msg_id in replay_ids), "  replay resent completed seq N message"
     payload_size = len(json.dumps(delta["messages"]))
-    if payload_size > 1000:
-        print(f"  completed/no-in-flight replay serialized huge payload: {payload_size} bytes")
-        return False
-    return True
+    assert not (payload_size > 1000), f"  completed/no-in-flight replay serialized huge payload: {payload_size} bytes"
 
 
-def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
+def test_ws_replay_keeps_preexisting_in_flight_message() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
     from turn_manager import TurnManager  # noqa: E402
 
@@ -624,21 +550,14 @@ def test_ws_replay_keeps_preexisting_in_flight_message() -> bool:
         limit=50,
         get_in_flight=tm.get_in_flight_assistant_msg,
     )
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
+    assert not (delta is None), "  replay delta unexpectedly None"
     replay = [m for m in delta["messages"] if m.get("id") == msg_id]
-    if len(replay) != 1:
-        print(f"  in-flight message missing/duplicated: {len(replay)}")
-        return False
+    assert not (len(replay) != 1), f"  in-flight message missing/duplicated: {len(replay)}"
     msg = replay[0]
-    if msg.get("content") != "streaming" or len(msg.get("events") or []) != 2:
-        print(f"  in-flight replacement failed: {msg}")
-        return False
-    return True
+    assert not (msg.get("content") != "streaming" or len(msg.get("events") or []) != 2), f"  in-flight replacement failed: {msg}"
 
 
-def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
+def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> None:
     from session_detail_api import _build_messages_replay_delta  # noqa: E402
 
     sid = "sid-race"
@@ -673,20 +592,13 @@ def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
         get_messages_since=_get_messages_since,
         get_in_flight=_get_in_flight,
     )
-    if calls != [8, 7]:
-        print(f"  expected exclusive then inclusive calls, got {calls}")
-        return False
+    assert not (calls != [8, 7]), f"  expected exclusive then inclusive calls, got {calls}"
     replay = delta["messages"] if delta else []
-    if len(replay) != 1 or replay[0].get("id") != msg_id:
-        print(f"  in-flight race replay wrong: {replay}")
-        return False
-    if not replay[0].get("isStreaming"):
-        print("  in-flight race did not preserve streaming state")
-        return False
-    return True
+    assert not (len(replay) != 1 or replay[0].get("id") != msg_id), f"  in-flight race replay wrong: {replay}"
+    assert not (not replay[0].get("isStreaming")), "  in-flight race did not preserve streaming state"
 
 
-def test_ws_event_cursor_uses_server_floor() -> bool:
+def test_ws_event_cursor_uses_server_floor() -> None:
     sid = _fresh_session()
     event_ingester.ingest(
         sid, sid=sid, event_type="agent_message",
@@ -699,35 +611,22 @@ def test_ws_event_cursor_uses_server_floor() -> bool:
         source="test", msg_id="historical-msg",
     )
     floor = event_ingester.max_seq_by_sid(sid).get(sid, 0)
-    if floor <= 0:
-        print(f"  expected positive event floor, got {floor}")
-        return False
+    assert not (floor <= 0), f"  expected positive event floor, got {floor}"
     from session_detail_api import _floor_events_from_seq  # noqa: E402
 
     cold_open = _floor_events_from_seq(sid, 0, cursor_known=False)
-    if cold_open != floor:
-        print(f"  cold open floor {cold_open} != server floor {floor}")
-        return False
+    assert not (cold_open != floor), f"  cold open floor {cold_open} != server floor {floor}"
     known_zero = _floor_events_from_seq(sid, 0, cursor_known=True)
-    if known_zero != 0:
-        print(f"  known zero cursor should survive, got {known_zero}")
-        return False
+    assert not (known_zero != 0), f"  known zero cursor should survive, got {known_zero}"
     stale_cached_cursor = _floor_events_from_seq(sid, floor - 1, cursor_known=True)
-    if stale_cached_cursor != floor - 1:
-        print(f"  positive client cursor behind floor should survive, got {stale_cached_cursor}")
-        return False
+    assert not (stale_cached_cursor != floor - 1), f"  positive client cursor behind floor should survive, got {stale_cached_cursor}"
     ahead = _floor_events_from_seq(sid, floor + 5, cursor_known=True)
-    if ahead != floor + 5:
-        print(f"  positive client cursor ahead should survive, got {ahead}")
-        return False
+    assert not (ahead != floor + 5), f"  positive client cursor ahead should survive, got {ahead}"
     negative = _floor_events_from_seq("missing-session", -10, cursor_known=False)
-    if negative != 0:
-        print(f"  missing session negative cursor should clamp to 0, got {negative}")
-        return False
-    return True
+    assert not (negative != 0), f"  missing session negative cursor should clamp to 0, got {negative}"
 
 
-def test_ws_replay_stale_debug_is_debug_gated() -> bool:
+def test_ws_replay_stale_debug_is_debug_gated() -> None:
     """The replay debug probes (which used to include a reconcile-dirty
     peek — `session_manager.is_reconcile_dirty`/`_reconcile_gen`, retired
     with the async dirty-flag reconcile subsystem) stay behind the DEBUG
@@ -737,28 +636,19 @@ def test_ws_replay_stale_debug_is_debug_gated() -> bool:
     end = source.index('                    except Exception:\n                        logger.exception("messages_replay on subscribe failed")', start)
     replay_tail = source[start:end]
     debug_gate = "if logger.isEnabledFor(logging.DEBUG):"
-    if debug_gate not in replay_tail:
-        print("  missing DEBUG gate around stale replay probes")
-        return False
+    assert not (debug_gate not in replay_tail), "  missing DEBUG gate around stale replay probes"
     gated = replay_tail[replay_tail.index(debug_gate):]
-    if "logger.debug(" not in gated:
-        print("  logger.debug( is not behind DEBUG gate")
-        return False
+    assert not ("logger.debug(" not in gated), "  logger.debug( is not behind DEBUG gate"
     normal_path = replay_tail[:replay_tail.index(debug_gate)]
     for needle in (
         "session_manager.is_reconcile_dirty",
         "session_manager._reconcile_gen",
     ):
-        if needle in replay_tail:
-            print(f"  {needle} should no longer exist (reconcile subsystem retired)")
-            return False
-    if 'logger.info(\n                                    "WS replay' in normal_path:
-        print("  WS replay timing log still runs on normal replay path")
-        return False
-    return True
+        assert not (needle in replay_tail), f"  {needle} should no longer exist (reconcile subsystem retired)"
+    assert not ('logger.info(\n                                    "WS replay' in normal_path), "  WS replay timing log still runs on normal replay path"
 
 
-async def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
+async def test_stubbed_team_tree_skips_full_event_hydration() -> None:
     register_default_subscribers()
     sess = session_manager.create(
         name="team-stub", model="glm-5.1", cwd="/tmp",
@@ -822,9 +712,7 @@ async def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
         len(projected_old.get("events") or []),
         len(projected_latest.get("events") or []),
     )
-    if projected_counts != (5, 3):
-        print(f"  projected event counts={projected_counts}")
-        return False
+    assert not (projected_counts != (5, 3)), f"  projected event counts={projected_counts}"
 
     calls = 0
     original = session_manager._hydrate_cached_root_events
@@ -837,21 +725,14 @@ async def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
     with patch.object(session_manager, "_hydrate_cached_root_events", counted_hydrate):
         tree = session_manager.get_root_tree_stubbed(sid, msg_limit=20)
 
-    if calls:
-        print(f"  stubbed team tree hydrated full events {calls} time(s)")
-        return False
+    assert not (calls), f"  stubbed team tree hydrated full events {calls} time(s)"
     messages = tree.get("messages") if tree else []
     old_msg = next((m for m in messages if m.get("id") == old_id), {})
     latest_msg = next((m for m in messages if m.get("id") == latest_id), {})
     old_stub = old_msg.get("stub") or {}
     latest_events = latest_msg.get("events") or []
-    if old_stub.get("event_count") != 5:
-        print(f"  old stub event_count={old_stub.get('event_count')}")
-        return False
-    if len(latest_events) != 3:
-        print(f"  latest events={len(latest_events)}")
-        return False
-    return True
+    assert not (old_stub.get("event_count") != 5), f"  old stub event_count={old_stub.get('event_count')}"
+    assert not (len(latest_events) != 3), f"  latest events={len(latest_events)}"
 
 
 # ─── Runner ────────────────────────────────────────────────────────
@@ -883,24 +764,25 @@ async def _amain() -> int:
     fails = 0
     for name, fn in sync_tests:
         try:
-            ok = fn()
-        except Exception as e:
-            ok = False
-            print(f"  exception: {e!r}")
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
+            fn()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL}  {name}")
             fails += 1
+        else:
+            print(f"{PASS}  {name}")
 
     for name, fn in async_tests:
         try:
-            ok = await fn()
-        except Exception as e:
-            ok = False
+            await fn()
+        except Exception:
             import traceback
             traceback.print_exc()
-        print(f"{PASS if ok else FAIL}  {name}")
-        if not ok:
+            print(f"{FAIL}  {name}")
             fails += 1
+        else:
+            print(f"{PASS}  {name}")
 
     return fails
 

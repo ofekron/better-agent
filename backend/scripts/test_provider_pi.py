@@ -36,7 +36,7 @@ import runner_pi  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
 
 
-def test_capability_matrix() -> bool:
+def test_capability_matrix() -> None:
     cls = provider_pi.PiProvider
     expected = {
         "supports_fork": True,
@@ -48,65 +48,59 @@ def test_capability_matrix() -> bool:
         "supports_reasoning_effort": True,
         "supports_headless_no_tools": True,
     }
-    return (
-        cls.KIND == "pi"
-        and all(getattr(cls, k) is v for k, v in expected.items())
-        and cls.reasoning_effort_options == ("off", "minimal", "low", "medium", "high", "xhigh")
-    )
+    assert cls.KIND == "pi"
+    assert all(getattr(cls, k) is v for k, v in expected.items())
+    assert cls.reasoning_effort_options == ("off", "minimal", "low", "medium", "high", "xhigh")
 
 
-def test_build_env_clears_claude_harness() -> bool:
+def test_build_env_clears_claude_harness() -> None:
     inst = provider_pi.PiProvider({"id": "p1", "kind": "pi", "mode": "api_key"})
     env = inst.build_env()
-    return not any(k in env for k in (
+    assert not any(k in env for k in (
         "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
     ))
 
 
-def test_models_static_seed_shape() -> bool:
+def test_models_static_seed_shape() -> None:
     seed = provider_pi.PI_MODELS
-    return (
-        len(seed) >= 5
-        and all("/" in m for m in seed)
-        and "anthropic/claude-sonnet-4-6" in seed
-        and "openai/gpt-5.5" in seed
-    )
+    assert len(seed) >= 5
+    assert all("/" in m for m in seed)
+    assert "anthropic/claude-sonnet-4-6" in seed
+    assert "openai/gpt-5.5" in seed
 
 
-def test_parses_list_models_table() -> bool:
+def test_parses_list_models_table() -> None:
     sample = (
         "provider   model                 context  max-out  thinking  images\n"
         "anthropic  claude-sonnet-4-6     200K     64K      yes       yes\n"
         "anthropic  claude-haiku-4-5      200K     64K      yes       yes\n"
         "openai     gpt-5.4               400K     128K     yes       yes\n"
     )
-    return provider_pi._parse_pi_list_models(sample) == [
+    assert provider_pi._parse_pi_list_models(sample) == [
         "anthropic/claude-sonnet-4-6",
         "anthropic/claude-haiku-4-5",
         "openai/gpt-5.4",
     ]
 
 
-def test_parses_logged_out_list_models() -> bool:
+def test_parses_logged_out_list_models() -> None:
     sample = (
         "No models available. Use /login to log into a provider via OAuth "
         "or API key. See:\n  /some/path/providers.md\n"
     )
-    return provider_pi._parse_pi_list_models(sample) == []
+    assert provider_pi._parse_pi_list_models(sample) == []
 
 
-def test_model_allowed_semantics() -> bool:
+def test_model_allowed_semantics() -> None:
     available = list(provider_pi.PI_MODELS)
-    return (
-        provider_pi._model_allowed("anthropic/claude-sonnet-4-6", available)
-        # thinking suffix strips before validation
-        and provider_pi._model_allowed("anthropic/claude-sonnet-4-6:high", available)
-        # custom provider/id pairs (user models.json) are spawnable
-        and provider_pi._model_allowed("ollama/qwen2.5-coder:7b", available)
-        # bare non-catalog name without provider prefix is rejected
-        and not provider_pi._model_allowed("sonnet", available)
-    )
+    assert provider_pi._model_allowed("anthropic/claude-sonnet-4-6", available)
+    # thinking suffix strips before validation
+    assert provider_pi._model_allowed("anthropic/claude-sonnet-4-6:high", available)
+    # custom provider/id pairs (user models.json) are spawnable
+    assert provider_pi._model_allowed("ollama/qwen2.5-coder:7b", available)
+    # bare non-catalog name without provider prefix is rejected
+    assert not provider_pi._model_allowed("sonnet", available)
 
 
 def _assistant_message(**overrides) -> dict:
@@ -125,7 +119,7 @@ def _assistant_message(**overrides) -> dict:
     return message
 
 
-def test_normalizes_assistant_text_and_thinking() -> bool:
+def test_normalizes_assistant_text_and_thinking() -> None:
     message = _assistant_message(content=[
         {"type": "thinking", "thinking": "pondering"},
         {"type": "text", "text": "hello"},
@@ -133,19 +127,17 @@ def test_normalizes_assistant_text_and_thinking() -> bool:
     out = runner_pi.normalize_assistant_message(
         message, parent_uuid="root", msg_uuid="u1", fallback_model="pi",
     )
-    if out is None or out["type"] != "assistant" or out["uuid"] != "u1":
-        return False
-    if out["parentUuid"] != "root":
-        return False
+    assert out is not None
+    assert out["type"] == "assistant"
+    assert out["uuid"] == "u1"
+    assert out["parentUuid"] == "root"
     blocks = out["message"]["content"]
-    return (
-        blocks[0] == {"type": "thinking", "thinking": "pondering"}
-        and blocks[1] == {"type": "text", "text": "hello"}
-        and out["message"]["model"] == "anthropic/claude-sonnet-4-6"
-    )
+    assert blocks[0] == {"type": "thinking", "thinking": "pondering"}
+    assert blocks[1] == {"type": "text", "text": "hello"}
+    assert out["message"]["model"] == "anthropic/claude-sonnet-4-6"
 
 
-def test_normalizes_tool_calls_with_key_mapping() -> bool:
+def test_normalizes_tool_calls_with_key_mapping() -> None:
     message = _assistant_message(content=[
         {"type": "toolCall", "id": "call_1", "name": "edit",
          "arguments": {"path": "/tmp/f.py", "oldText": "a", "newText": "b"}},
@@ -157,19 +149,19 @@ def test_normalizes_tool_calls_with_key_mapping() -> bool:
     out = runner_pi.normalize_assistant_message(
         message, parent_uuid="root", msg_uuid="u2", fallback_model="pi",
     )
-    if out is None:
-        return False
+    assert out is not None
     edit, bash, find = out["message"]["content"]
-    return (
-        edit["type"] == "tool_use" and edit["name"] == "Edit"
-        and edit["input"] == {"file_path": "/tmp/f.py", "old_string": "a", "new_string": "b"}
-        and bash["name"] == "Bash" and bash["input"] == {"command": "ls -la"}
-        and find["name"] == "Glob" and find["input"] == {"pattern": "*.py", "path": "."}
-        and edit["id"] == "call_1"
-    )
+    assert edit["type"] == "tool_use"
+    assert edit["name"] == "Edit"
+    assert edit["input"] == {"file_path": "/tmp/f.py", "old_string": "a", "new_string": "b"}
+    assert bash["name"] == "Bash"
+    assert bash["input"] == {"command": "ls -la"}
+    assert find["name"] == "Glob"
+    assert find["input"] == {"pattern": "*.py", "path": "."}
+    assert edit["id"] == "call_1"
 
 
-def test_normalizes_tool_result() -> bool:
+def test_normalizes_tool_result() -> None:
     message = {
         "role": "toolResult",
         "toolCallId": "call_1",
@@ -181,18 +173,16 @@ def test_normalizes_tool_result() -> bool:
     out = runner_pi.normalize_tool_result_message(
         message, parent_uuid="p", session_id="sid-1",
     )
-    if out is None or out["type"] != "user":
-        return False
+    assert out is not None
+    assert out["type"] == "user"
     block = out["message"]["content"][0]
-    return (
-        block["type"] == "tool_result"
-        and block["tool_use_id"] == "call_1"
-        and block["content"] == "file contents"
-        and block["is_error"] is False
-    )
+    assert block["type"] == "tool_result"
+    assert block["tool_use_id"] == "call_1"
+    assert block["content"] == "file contents"
+    assert block["is_error"] is False
 
 
-def test_tool_result_uuid_is_deterministic() -> bool:
+def test_tool_result_uuid_is_deterministic() -> None:
     message = {
         "role": "toolResult", "toolCallId": "call_9", "toolName": "bash",
         "content": [{"type": "text", "text": "ok"}], "isError": False,
@@ -200,64 +190,62 @@ def test_tool_result_uuid_is_deterministic() -> bool:
     a = runner_pi.normalize_tool_result_message(message, parent_uuid="p", session_id="s")
     b = runner_pi.normalize_tool_result_message(message, parent_uuid="p", session_id="s")
     c = runner_pi.normalize_tool_result_message(message, parent_uuid="p", session_id="OTHER")
-    return a["uuid"] == b["uuid"] and a["uuid"] != c["uuid"]
+    assert a["uuid"] == b["uuid"]
+    assert a["uuid"] != c["uuid"]
 
 
-def test_error_stop_reason_detection() -> bool:
-    ok = runner_pi.error_from_assistant_message(_assistant_message()) is None
+def test_error_stop_reason_detection() -> None:
+    assert runner_pi.error_from_assistant_message(_assistant_message()) is None
     err = runner_pi.error_from_assistant_message(
         _assistant_message(stopReason="error", errorMessage="rate limited")
     )
     aborted = runner_pi.error_from_assistant_message(
         _assistant_message(stopReason="aborted", errorMessage=None)
     )
-    return ok and err == "rate limited" and aborted == "Request aborted"
+    assert err == "rate limited"
+    assert aborted == "Request aborted"
 
 
-def test_usage_extraction_and_sum() -> bool:
+def test_usage_extraction_and_sum() -> None:
     usage = runner_pi._usage_from_message(_assistant_message())
-    if usage != {"input_tokens": 10, "output_tokens": 5,
-                 "cache_read_input_tokens": 2, "total_tokens": 17}:
-        return False
+    assert usage == {"input_tokens": 10, "output_tokens": 5,
+                     "cache_read_input_tokens": 2, "total_tokens": 17}
     summed = runner_pi._sum_usage(usage, usage)
-    return summed["total_tokens"] == 34 and summed["input_tokens"] == 20
+    assert summed["total_tokens"] == 34
+    assert summed["input_tokens"] == 20
 
 
-def test_empty_assistant_message_skipped() -> bool:
+def test_empty_assistant_message_skipped() -> None:
     out = runner_pi.normalize_assistant_message(
         _assistant_message(content=[]),
         parent_uuid="root", msg_uuid="u3", fallback_model="pi",
     )
-    return out is None
+    assert out is None
 
 
-def test_unknown_event_surfaces_as_diagnostic() -> bool:
+def test_unknown_event_surfaces_as_diagnostic() -> None:
     out = runner_pi.normalize_unknown_event(
         {"type": "brand_new_event", "payload": 1}, parent_uuid="p",
     )
-    return (
-        out["type"] == "unknown_event"
-        and out["raw_type"] == "brand_new_event"
-        and out["raw"] == {"type": "brand_new_event", "payload": 1}
-    )
+    assert out["type"] == "unknown_event"
+    assert out["raw_type"] == "brand_new_event"
+    assert out["raw"] == {"type": "brand_new_event", "payload": 1}
 
 
-def test_auth_failure_detection() -> bool:
+def test_auth_failure_detection() -> None:
     import runner_errors
     hit = runner_errors.classify(
         "pi",
         "No API key found for the selected model.\n\nUse /login to log into "
         "a provider via OAuth or API key.",
     )
-    return (
-        hit is not None
-        and hit.category == runner_errors.CATEGORY_AUTH
-        and "credentials" in hit.message
-        and runner_errors.classify("pi", "boom") is None
-    )
+    assert hit is not None
+    assert hit.category == runner_errors.CATEGORY_AUTH
+    assert "credentials" in hit.message
+    assert runner_errors.classify("pi", "boom") is None
 
 
-def test_find_session_file_for_sid() -> bool:
+def test_find_session_file_for_sid() -> None:
     sid = "019f486c-b3c1-712a-acf3-02a47e358514"
     root = runs_root()
     old = root / "run-old" / runner_pi.PI_SESSION_DIR_NAME / "--tmp--"
@@ -271,25 +259,25 @@ def test_find_session_file_for_sid() -> bool:
     new_file.write_text("{}\n", encoding="utf-8")
     found = runner_pi.find_session_file_for_sid(sid)
     missing = runner_pi.find_session_file_for_sid("no-such-sid")
-    return found == new_file and missing is None
+    assert found == new_file
+    assert missing is None
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message() -> None:
     from capability_contexts import prompt_heading_for_source
 
-    return (
-        prompt_heading_for_source("mssg") == "Message"
-        and prompt_heading_for_source("team_ask") == "Ask"
-    )
+    assert prompt_heading_for_source("mssg") == "Message"
+    assert prompt_heading_for_source("team_ask") == "Ask"
 
 
-def test_models_fetch_handles_missing_or_real_cli() -> bool:
+def test_models_fetch_handles_missing_or_real_cli() -> None:
     # Never asserts on the developer's login state: parses only when the CLI
     # is installed AND authenticated; [] is a valid (logged-out) result.
     parsed = provider_pi.fetch_pi_models()
     if not parsed:
-        return True
-    return all("/" in m for m in parsed) and len(parsed) >= 3
+        return
+    assert all("/" in m for m in parsed)
+    assert len(parsed) >= 3
 
 
 TESTS = [
@@ -314,21 +302,29 @@ TESTS = [
 ]
 
 
-def main() -> int:
+def main() -> None:
+    import traceback
+
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError:
+                print(f"FAIL: {name}")
                 failures.append(name)
+            except Exception:
+                print(f"FAIL: {name} (unexpected)")
+                traceback.print_exc()
+                failures.append(name)
+            else:
+                print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
         print("Failures:", ", ".join(failures))
-        return 1
-    return 0
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

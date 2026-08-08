@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-mssg-")
+# Several tests here create sessions with orchestration_mode="manager"
+# (team mode), which — since "Add selective installation runtime profiles" —
+# requires an active, bootstrap-ready installation profile with integrations
+# enabled. `isolate_installed()` seeds one; bare `isolate()` would make every
+# such create() raise IncompatibleOrchestrationMode.
+_TMP_HOME = _test_home.isolate_installed("bc-test-mssg-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -644,6 +649,14 @@ def test_promotion_requeue_preserves_team_message_collapse_metadata():
 def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch):
     import main
     import recovery
+    import lifecycle_command_store
+
+    # `_re_enqueue_queued_prompts` reconciles delivery attempts through the
+    # real lifecycle command store (`_reconcile_queued_delivery_attempt`);
+    # unlike `test_reenqueue_queued_prompt_lifecycle.py`'s fully-mocked
+    # unit test, this test drives the real path, so the sqlite store must be
+    # initialized first (idempotent — safe even if already initialized).
+    lifecycle_command_store.initialize()
 
     assistant = session_manager.create(
         name="Assistant startup collapse",
@@ -662,10 +675,23 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
         collapse_key="assistant-waker",
         collapse_policy=team_messaging.COLLAPSE_POLICY_TAKE_LATEST,
     )
-    session_manager.add_queued_prompt(assistant["id"], queue_item)
+    # Startup re-enqueue scans the on-disk queue projection, not in-memory
+    # state — the prompt must be durably flushed before the scan, same as
+    # a real crash-recovery boundary.
+    session_manager.admit_queued_prompt_durable(assistant["id"], queue_item)
     captured: list[tuple[str, dict]] = []
 
+    from types import SimpleNamespace
+
     class FakeCoordinator:
+        # `_reconcile_queued_delivery_attempt` reads `lifecycle_commands.snapshot`
+        # before deciding whether a queued retry collides with an in-flight
+        # turn; identity=None means "nothing in flight", same as
+        # test_reenqueue_queued_prompt_lifecycle.py's fake coordinator.
+        lifecycle_commands = SimpleNamespace(
+            snapshot=lambda _sid: SimpleNamespace(identity=None),
+        )
+
         async def submit_prompt_async(
             self,
             sid: str,
@@ -696,9 +722,6 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
 
 
 def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
-    import main
-    import recovery
-
     assistant = session_manager.create(
         name="Assistant activity",
         cwd="/repo",
@@ -710,7 +733,11 @@ def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
     coordinator._queued_ids[sid] = ["queued-1"]
     coordinator.turn_manager._cached_running.add(sid)
     coordinator.turn_manager._cached_monitoring[sid] = "active"
-    monkeypatch.setattr(main, "coordinator", coordinator)
+    # `_session_activity_snapshot` reads the module-local `_coordinator_ref`
+    # bound via `internal_session_state_api.configure(...)`, not `main.coordinator`
+    # (that indirection was introduced when main.py was split into per-domain
+    # routers — see d41abd86a).
+    monkeypatch.setattr(internal_session_state_api, "_coordinator_ref", coordinator)
 
     snapshot = internal_session_state_api._session_activity_snapshot(sid, assistant)
 
@@ -766,8 +793,10 @@ def test_detached_team_message_returns_without_waiting_for_panel_save(monkeypatc
     save_started = asyncio.Event()
     release_save = asyncio.Event()
     submit_calls: list[dict] = []
+    saved_events: list[dict] = []
 
-    async def blocked_save(_event: dict) -> None:
+    async def blocked_save(event: dict) -> None:
+        saved_events.append(event)
         save_started.set()
         await release_save.wait()
 
@@ -812,7 +841,8 @@ def test_detached_team_message_returns_without_waiting_for_panel_save(monkeypatc
     assert result["success"] is True
     assert submit_calls[0]["sid"] == target["id"]
     assert session_manager.get(target["id"])["queued_prompts"][0]["content"].startswith("fire and forget")
-    assert coordinator.turn_manager.current_turn_workers[sender["id"]][0]["worker_session_id"] == target["id"]
+    assert saved_events[0]["type"] == "worker_start"
+    assert saved_events[0]["data"]["worker_session_id"] == target["id"]
 
     save_started = asyncio.Event()
     release_save = asyncio.Event()
@@ -1653,7 +1683,7 @@ def test_team_ask_panel_uses_worker_event_path():
     coordinator.turn_manager._turn_save_callbacks[sender["id"]] = save
     coordinator.turn_manager.current_turn_workers[sender["id"]] = []
 
-    async def run() -> None:
+    async def run() -> dict:
         panel = await coordinator._start_team_message_panel(
             sender_session_id=sender["id"],
             target_session_id=target["id"],
@@ -1675,10 +1705,9 @@ def test_team_ask_panel_uses_worker_event_path():
             panel=panel,
             success=True,
         )
+        return panel
 
-    asyncio.run(run())
-
-    panel = coordinator.turn_manager.current_turn_workers[sender["id"]][0]
+    panel = asyncio.run(run())
     assert panel["run_mode"] == team_messaging.ASK_SOURCE
     assert panel["worker_session_id"] == target["id"]
     assert panel["panel_kind"] == "session"
@@ -1739,7 +1768,7 @@ def test_async_mssg_panel_watcher_ignores_other_lifecycle_events():
     coordinator.turn_manager._turn_save_callbacks[sender["id"]] = save
     coordinator.turn_manager.current_turn_workers[sender["id"]] = []
 
-    async def run() -> None:
+    async def run() -> dict:
         panel = await coordinator._start_team_message_panel(
             sender_session_id=sender["id"],
             target_session_id=target["id"],
@@ -1754,6 +1783,26 @@ def test_async_mssg_panel_watcher_ignores_other_lifecycle_events():
             lifecycle_msg_id="life-target",
             panel=panel,
         )
+        # The terminal `user_message_done` below must resolve a real
+        # assistant response (`_team_message_terminal_result` fails closed
+        # otherwise — see 3cda2a6c4), so the target session needs the
+        # user+assistant messages a real turn would have produced.
+        await coordinator._init_turn_messages(
+            session=session_manager.get(target["id"]),
+            app_session_id=target["id"],
+            prompt="please answer",
+            images=None,
+            source=team_messaging.SOURCE,
+            lifecycle_msg_id="life-target",
+        )
+        session_manager.append_assistant_msg(target["id"], {
+            "id": "assistant-life-target",
+            "role": "assistant",
+            "content": "on it",
+            "events": [],
+            "timestamp": "2026-06-16T10:02:00",
+            "isStreaming": False,
+        })
         callback = coordinator.ws_callbacks[target["id"]][0]
         await callback({
             "type": "user_message_persisted",
@@ -1789,13 +1838,13 @@ def test_async_mssg_panel_watcher_ignores_other_lifecycle_events():
         })
         await callback({
             "type": "user_message_done",
-            "data": {"lifecycle_msg_id": "life-target"},
+            "data": {"lifecycle_msg_id": "life-target", "success": True},
         })
         await asyncio.sleep(0)
+        return panel
 
-    asyncio.run(run())
+    panel = asyncio.run(run())
 
-    panel = coordinator.turn_manager.current_turn_workers[sender["id"]][0]
     assert [event["data"]["uuid"] for event in panel["events"]] == [
         "target-event",
         "target-event-2",
@@ -1899,8 +1948,8 @@ def test_sub_session_panel_kind_is_set_on_delegation():
     coordinator.turn_manager._turn_save_callbacks[sender["id"]] = save
     coordinator.turn_manager.current_turn_workers[sender["id"]] = []
 
-    async def run() -> None:
-        await coordinator._start_team_message_panel(
+    async def run() -> dict:
+        return await coordinator._start_team_message_panel(
             sender_session_id=sender["id"],
             target_session_id=sub["id"],
             target=sub,
@@ -1909,9 +1958,8 @@ def test_sub_session_panel_kind_is_set_on_delegation():
             run_mode=team_messaging.SOURCE,
         )
 
-    asyncio.run(run())
+    panel = asyncio.run(run())
 
-    panel = coordinator.turn_manager.current_turn_workers[sender["id"]][0]
     assert panel["panel_kind"] == "sub_session"
     assert panel["started_at"]
     assert panel["provider_id"] == sub.get("provider_id")
@@ -1944,12 +1992,12 @@ def test_session_creation_panel_is_separate_from_message_turn_panel():
     coordinator.turn_manager._turn_save_callbacks[sender["id"]] = save
     coordinator.turn_manager.current_turn_workers[sender["id"]] = []
 
-    async def run() -> None:
-        await coordinator.emit_session_created_panel(
+    async def run() -> list[dict]:
+        created_panel = await coordinator.emit_session_created_panel(
             sender_session_id=sender["id"],
             target_session=sub,
         )
-        await coordinator._start_team_message_panel(
+        message_panel = await coordinator._start_team_message_panel(
             sender_session_id=sender["id"],
             target_session_id=sub["id"],
             target=sub,
@@ -1957,10 +2005,9 @@ def test_session_creation_panel_is_separate_from_message_turn_panel():
             queue_item_id="queue-review",
             run_mode=team_messaging.SOURCE,
         )
+        return [created_panel, message_panel]
 
-    asyncio.run(run())
-
-    panels = coordinator.turn_manager.current_turn_workers[sender["id"]]
+    panels = asyncio.run(run())
     assert [panel["delegation_id"] for panel in panels] == [
         f"created_{sub['id']}",
         f"{team_messaging.SOURCE}_queue-review",

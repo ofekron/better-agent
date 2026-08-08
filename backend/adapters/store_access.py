@@ -79,6 +79,13 @@ _ALLOWED_STORE_NAMES = frozenset(
         "marketplace_bridge", "schedule_store", "startup_tasks",
         "installation_profile", "node_store", "node_link",
         "node_provider_credential_sync",
+        # ADR 0005 (background-work migration) — startup_tasks no longer owns
+        # a registry itself; host-startup-task records are now a filtered
+        # read of the shared background_work_registry (see
+        # list_host_startup_tasks below). "startup_tasks" stays sanctioned
+        # too: it's still the single source of truth for the owner_id
+        # startup items report under (startup_tasks.OWNER).
+        "background_work",
         # Package E (ADR 0009) addition — stateless process-tree inspection
         # for RunsSurfaceAdapter.run_detail()'s on-demand enrichment (see
         # inspect_process_tree above).
@@ -663,11 +670,31 @@ def _schedule_record(raw: dict) -> ScheduleRecord:
     )
 
 
+# ADR 0005: startup work is reported into the shared background_work
+# registry (status: pending/running/succeeded/failed/cancelled/unknown), but
+# HostStartupTaskState (system_surface.py §7) only ever modeled three states
+# — running/done/failed — because the legacy registry never had a fourth.
+# pending collapses onto running (a startup step is always registered the
+# instant it starts, so a caller never observes pending); cancelled/unknown
+# collapse onto failed (both are "this didn't finish successfully", the
+# closest honest fit in a three-state enum that predates them).
+_BACKGROUND_WORK_STATUS_TO_STARTUP_STATE = {
+    "pending": "running",
+    "running": "running",
+    "succeeded": "done",
+    "failed": "failed",
+    "cancelled": "failed",
+    "unknown": "failed",
+}
+
+
 def _startup_task_record(raw: dict) -> HostStartupTaskRecord:
     return HostStartupTaskRecord(
         id=str(raw.get("id", "")),
         label=str(raw.get("label", "")),
-        state=str(raw.get("state", "")),
+        state=_BACKGROUND_WORK_STATUS_TO_STARTUP_STATE.get(
+            str(raw.get("status", "")), "running",
+        ),
         started_at=str(raw.get("started_at", "")),
         finished_at=raw.get("finished_at"),
         error=raw.get("error"),
@@ -1141,8 +1168,19 @@ class StoreAccess:
         return tuple(_schedule_record(r) for r in raws)
 
     def list_host_startup_tasks(self) -> tuple[HostStartupTaskRecord, ...]:
+        """Startup work is one owner among many in the shared
+        `background_work_registry` (ADR 0005) — filter its snapshot down to
+        `startup_tasks.OWNER` (the single source of truth for which owner_id
+        startup steps report under) so this feed keeps showing only startup
+        work, not provider installs or node-credential syncs that share the
+        same registry."""
         startup_tasks = _resolve("startup_tasks")
-        return tuple(_startup_task_record(r) for r in startup_tasks.startup_task_registry.list())
+        background_work = _resolve("background_work")
+        prefix = f"{background_work.OWNER_CORE}:{startup_tasks.OWNER}:"
+        items = background_work.background_work_registry.snapshot()["items"]
+        return tuple(
+            _startup_task_record(item) for item in items if item["id"].startswith(prefix)
+        )
 
     def list_installation_capability_records(self) -> tuple[InstallationCapabilityRecord, ...]:
         installation_profile = _resolve("installation_profile")

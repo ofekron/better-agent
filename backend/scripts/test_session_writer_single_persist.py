@@ -51,20 +51,16 @@ def _mk_root() -> str:
     return rid
 
 
-def test_fork_persists_to_live_and_disk() -> bool:
+def test_fork_persists_to_live_and_disk() -> None:
     rid = _mk_root()
     cid = sm.fork(rid)["id"]
-    if sm._roots[rid]["forks"][0]["id"] != cid:
-        print("  fork missing from live _roots")
-        return False
+    assert sm._roots[rid]["forks"][0]["id"] == cid, "fork missing from live _roots"
     sm.flush_pending_persists()
-    if not any(f["id"] == cid for f in _disk(rid)["forks"]):
-        print("  fork not synchronously persisted to disk")
-        return False
-    return True
+    assert any(f["id"] == cid for f in _disk(rid)["forks"]), \
+        "fork not synchronously persisted to disk"
 
 
-def test_delegate_fork_persists() -> bool:
+def test_delegate_fork_persists() -> None:
     rid = _mk_root()
     did = sm.create_delegate_fork(
         parent_agent_session_id=rid, caller_agent_session_id=rid,
@@ -72,40 +68,27 @@ def test_delegate_fork_persists() -> bool:
         orchestration_mode="native",
     )["id"]
     sm.flush_pending_persists()
-    if not any(f["id"] == did for f in _disk(rid)["forks"]):
-        print("  delegate fork not persisted")
-        return False
-    return True
+    assert any(f["id"] == did for f in _disk(rid)["forks"]), "delegate fork not persisted"
 
 
-def test_fork_delete_splices_live_and_disk() -> bool:
+def test_fork_delete_splices_live_and_disk() -> None:
     rid = _mk_root()
     cid = sm.fork(rid)["id"]
-    if sm.delete(cid) is not True:
-        print("  delete returned non-True")
-        return False
-    if any(f["id"] == cid for f in sm._roots[rid]["forks"]):
-        print("  fork still in live _roots after delete")
-        return False
+    assert sm.delete(cid) is True, "delete returned non-True"
+    assert not any(f["id"] == cid for f in sm._roots[rid]["forks"]), \
+        "fork still in live _roots after delete"
     sm.flush_pending_persists()
-    if any(f["id"] == cid for f in _disk(rid)["forks"]):
-        print("  fork still on disk after delete")
-        return False
-    if sm._root_id_for(cid) is not None:
-        print("  deleted fork still indexed")
-        return False
-    return True
+    assert not any(f["id"] == cid for f in _disk(rid)["forks"]), \
+        "fork still on disk after delete"
+    assert sm._root_id_for(cid) is None, "deleted fork still indexed"
 
 
-def test_root_delete_unlinks_file() -> bool:
+def test_root_delete_unlinks_file() -> None:
     rid = _mk_root()
-    if sm.delete(rid) is not True:
-        print("  root delete returned non-True")
-        return False
-    if (ba_home() / "sessions" / f"{rid}.json").exists():
-        print("  root file still exists after delete")
-        return False
-    return True
+    assert sm.delete(rid) is True, "root delete returned non-True"
+    sm.flush_pending_persists()
+    assert not (ba_home() / "sessions" / f"{rid}.json").exists(), \
+        "root file still exists after delete"
 
 
 TESTS = [
@@ -121,15 +104,14 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as e:
-                ok = False
+                fn()
+            except Exception:
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"{FAIL}  {name}")
                 failed += 1
+                continue
+            print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()

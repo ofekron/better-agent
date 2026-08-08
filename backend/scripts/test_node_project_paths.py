@@ -28,7 +28,7 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def main() -> None:
+def test_node_project_paths_stay_native_and_repair_resumable() -> None:
     _write_json(
         paths.bc_home() / "projects.json",
         {
@@ -165,8 +165,3 @@ def main() -> None:
     assert added["path"] == r"C:\Users\Lenovo\another-project"
     assert added["name"] == "another-project"
     assert not added["path"].startswith("/Users/ofekron")
-
-
-if __name__ == "__main__":
-    main()
-    print("PASS node project paths stay node-native and v2 repair is resumable")

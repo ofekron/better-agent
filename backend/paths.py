@@ -117,7 +117,7 @@ def _install_private_umask() -> None:
         os.umask(tighter)
 
 
-class _WindowsSecurity:
+class _WindowsSecurity:  # pragma: no cover - Win32 ctypes ACL; WinDLL absent on POSIX test platform, faking it gives no real security confidence
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER = 1
     _SECURITY_DESCRIPTOR_REVISION = 1
@@ -464,21 +464,21 @@ class _WindowsSecurity:
             self._local_free(descriptor)
 
 
-def _windows_security() -> _WindowsSecurity:
+def _windows_security() -> _WindowsSecurity:  # pragma: no cover - Windows-only (see _WindowsSecurity)
     global _WINDOWS_SECURITY
     if _WINDOWS_SECURITY is None:
         _WINDOWS_SECURITY = _WindowsSecurity()
     return _WINDOWS_SECURITY
 
 
-def _windows_current_user_sid() -> str:
+def _windows_current_user_sid() -> str:  # pragma: no cover - Windows-only (see _WindowsSecurity)
     global _WINDOWS_CURRENT_USER_SID
     if _WINDOWS_CURRENT_USER_SID is None:
         _WINDOWS_CURRENT_USER_SID = _windows_security().current_user_sid()
     return _WINDOWS_CURRENT_USER_SID
 
 
-def _set_windows_private_acl(path: Path, *, directory: bool) -> None:
+def _set_windows_private_acl(path: Path, *, directory: bool) -> None:  # pragma: no cover - Windows-only (see _WindowsSecurity)
     _windows_security().apply_private_acl(
         path,
         user_sid=_windows_current_user_sid(),

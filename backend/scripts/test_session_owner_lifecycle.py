@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 import sys
-import tempfile
 import threading
 import asyncio
 from unittest import mock
@@ -13,9 +12,14 @@ BACKEND = Path(__file__).parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from paths import engage_test_home
+import _test_home
 
-HOME = engage_test_home(tempfile.mkdtemp(prefix="ba-owner-lifecycle-"))
+# `manager.create()` defaults to orchestration_mode="team", which — since
+# "Add selective installation runtime profiles" — requires an active,
+# bootstrap-ready installation profile with integrations enabled. Plain
+# `isolate()` leaves no profile, so every `create()` call here would raise
+# `IncompatibleOrchestrationMode`; `isolate_installed()` seeds one.
+HOME = _test_home.isolate_installed("ba-owner-lifecycle-")
 
 from ingestion_versions import current_ingestion_version
 from run_recovery import _drain_recovered_live_queue, _mark_reconciled_terminal

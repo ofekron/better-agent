@@ -30,7 +30,15 @@ import sys
 import time
 import uuid
 
+import pytest
+
 from live_llm_test_guard import require_live_llm_tests
+
+# LLM-tier: every test spawns an authenticated `claude` binary and spends real
+# turns. The module's `__main__` runner gates on require_live_llm_tests; this
+# marker makes pytest gate the same way, so the unit suite (gate unset) skips
+# them instead of spawning `claude` and failing with FileNotFoundError.
+pytestmark = pytest.mark.live_llm("real Claude binary process lifecycle tests")
 
 # Exact flags the SDK uses (SubprocessCLITransport._build_command)
 SDK_FLAGS = [

@@ -40,7 +40,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-async def test_cancelled_race_readline_leaks_no_child_task() -> bool:
+async def test_cancelled_race_readline_leaks_no_child_task() -> None:
     """Park `_race_readline` on `asyncio.wait`, cancel its task, and
     assert neither child task (`stream.readline()` / `stop_event.wait()`)
     is left pending. A correctly-cancelled child reaches `done` within a
@@ -63,20 +63,15 @@ async def test_cancelled_race_readline_leaks_no_child_task() -> bool:
     for _ in range(50):
         await asyncio.sleep(0)
 
-    if not t.done():
-        print("  _race_readline task never finished after cancel")
-        return False
+    assert t.done(), "_race_readline task never finished after cancel"
 
     # all_tasks() returns only not-yet-finished tasks — any task created
     # after the `before` snapshot that survives here is a leak.
     leaked = asyncio.all_tasks() - before - {asyncio.current_task()}
-    if leaked:
-        print(
-            f"  leaked {len(leaked)} pending task(s): "
-            f"{sorted(str(x.get_coro()) for x in leaked)}"
-        )
-        return False
-    return True
+    assert not leaked, (
+        f"leaked {len(leaked)} pending task(s): "
+        f"{sorted(str(x.get_coro()) for x in leaked)}"
+    )
 
 
 TESTS = [
@@ -92,15 +87,17 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = asyncio.run(fn())
+                asyncio.run(fn())
+            except AssertionError as e:
+                print(f"{FAIL}  {name}\n  AssertionError: {e}")
+                failed += 1
             except Exception as e:
-                ok = False
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
+                print(f"{FAIL}  {name}\n  exception: {e}")
                 failed += 1
+            else:
+                print(f"{PASS}  {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()

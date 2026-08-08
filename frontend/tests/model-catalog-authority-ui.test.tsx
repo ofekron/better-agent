@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ModelCatalogStatus } from "../src/components/ModelCatalogStatus";
-import { ModelCatalogActivity } from "../src/components/ModelCatalogActivity";
 import { useProviderModelCatalog } from "../src/hooks/useProviderModelCatalog";
 import { eventBus } from "../src/lib/eventBus";
 import type { ModelCatalog } from "../src/types";
@@ -29,11 +28,6 @@ const CATALOG: ModelCatalog = {
   },
   runtime_profiles: [],
 };
-
-
-const ACTIVITY_PROVIDERS = [
-  { id: "codex", name: "Codex", nickname: "work" },
-] as unknown as Parameters<typeof ModelCatalogActivity>[0]["providers"];
 
 
 function response(body: unknown, ok = true): Response {
@@ -130,93 +124,10 @@ describe("authoritative model catalog UI", () => {
     });
   });
 
-  it("shows refreshing background work in a dismissible RTL-safe popup", async () => {
-    const refreshing = { ...CATALOG, status: "refreshing" as const };
-    vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(
-      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
-    );
-    await waitFor(() => {
-      expect(container.querySelector(".model-catalog-activity")).not.toBeNull();
-    });
-    expect(container.querySelector('[role="status"]')).not.toBeNull();
-    fireEvent.click(screen.getByRole("button"));
-    expect(container.querySelector(".model-catalog-activity")).toBeNull();
-  });
 
-  it("refreshes background activity from a catalog bus fact", async () => {
-    const refreshing = { ...CATALOG, status: "refreshing" as const };
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(response({ catalogs: [] }))
-      .mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(
-      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
-    );
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
-    act(() => {
-      eventBus.publish("models_catalog_changed", { provider_id: "codex" });
-    });
 
-    await waitFor(() => {
-      expect(container.querySelector(".model-catalog-activity")).not.toBeNull();
-    });
-  });
 
-  it("names the provider and the specific reason for each activity row", async () => {
-    const refreshing = {
-      ...CATALOG,
-      status: "refreshing" as const,
-      reason: "provider_changed",
-    };
-    vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(
-      <ModelCatalogActivity providers={ACTIVITY_PROVIDERS} />,
-    );
-    await waitFor(() => {
-      expect(
-        container.querySelector(".model-catalog-activity-provider"),
-      ).not.toBeNull();
-    });
-    expect(
-      container.querySelector(".model-catalog-activity-provider")?.textContent,
-    ).toBe("Codex · work");
-    expect(
-      container.querySelector(".model-catalog-activity-detail")?.textContent,
-    ).toBe("Provider settings changed — rediscovering models");
-  });
-
-  it("falls back to the provider id and status when the provider is unknown", async () => {
-    const refreshing = {
-      ...CATALOG,
-      provider_id: "13831e83",
-      status: "refreshing" as const,
-      reason: "",
-    };
-    vi.mocked(fetch).mockResolvedValueOnce(response({ catalogs: [refreshing] }));
-    const { container } = render(<ModelCatalogActivity providers={[]} />);
-    await waitFor(() => {
-      expect(
-        container.querySelector(".model-catalog-activity-provider"),
-      ).not.toBeNull();
-    });
-    expect(
-      container.querySelector(".model-catalog-activity-provider")?.textContent,
-    ).toBe("13831e83");
-    expect(
-      container.querySelector(".model-catalog-activity-detail")?.textContent,
-    ).toBe("Refreshing models…");
-  });
-
-  it("uses logical RTL positioning and disables motion when requested", () => {
-    const css = readFileSync("src/styles/globals.css", "utf8");
-    expect(css).toMatch(
-      /\.model-catalog-activity\s*{[^}]*inset-inline-end:\s*24px;/s,
-    );
-    expect(css).toMatch(
-      /@media \(prefers-reduced-motion: reduce\)\s*{[^}]*\.model-catalog-activity,/s,
-    );
-  });
 
   it("ships every catalog-state key in every locale", () => {
     const required = [

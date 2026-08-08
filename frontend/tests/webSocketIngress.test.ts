@@ -109,11 +109,6 @@ const BASE_CORE_PAYLOAD_CASES = [
     invalid: { app_session_id: "session-a", queued_id: 7 },
   },
   {
-    type: "session_running_changed",
-    valid: { session_id: "session-a", value: false },
-    invalid: { session_id: "session-a", value: 0 },
-  },
-  {
     type: "session_unread_changed",
     valid: { session_id: "session-a", unread_count: 0 },
     invalid: { session_id: "session-a", unread_count: -1 },
@@ -176,18 +171,29 @@ const BASE_CORE_PAYLOAD_CASES = [
     invalid: { provider_id: "" },
   },
   {
-    type: "startup_task_changed",
+    type: "background_work_changed",
     valid: {
-      task: {
-        id: "recover",
+      epoch: "epoch-1",
+      item: {
+        id: "core:startup:recover",
+        kind: "work",
+        owner_kind: "core",
+        owner_id: "startup",
         label: "startup_tasks.recover_in_flight",
-        state: "running",
+        status: "running",
+        seq: 1,
         started_at: "2026-08-04T10:00:00Z",
-        finished_at: null,
+        updated_at: "2026-08-04T10:00:00Z",
+        session_id: null,
+        detail: null,
+        phase: null,
         error: null,
+        finished_at: null,
+        progress: null,
+        actions: [],
       },
     },
-    invalid: { task: { id: "recover", state: "running" } },
+    invalid: { epoch: "epoch-1", item: { id: "core:startup:recover", status: "exploded" } },
   },
   {
     type: "extension_event",
@@ -241,7 +247,6 @@ const NO_FIELD_CORE_TYPES = [
   "projects_changed",
   "workers_changed",
   "session_organization_changed",
-  "project_mappings_changed",
   "user_prefs_changed",
   "credential_consent_changed",
   "provider_changed",
@@ -525,7 +530,11 @@ describe("parseWireEvent", () => {
   });
 
   it("keeps registry proof complete", () => {
-    expect(CORE_PAYLOAD_CASES.map(({ type }) => type).sort()).toEqual(
+    // A wire type may appear more than once here to cover multiple valid
+    // payload shapes (e.g. "background_work_changed" has both a "cleared"
+    // and an "item upsert" case) — dedupe before comparing against the
+    // registry, which has exactly one validator per type.
+    expect([...new Set(CORE_PAYLOAD_CASES.map(({ type }) => type))].sort()).toEqual(
       Object.keys(knownCoreEventValidators).sort(),
     );
   });
@@ -639,8 +648,8 @@ describe("parseWireEvent", () => {
       data: { kind: "codex", phase: "started" },
     })).toMatchObject({ ok: true });
     expect(parseWireEvent({
-      type: "startup_task_changed",
-      data: { cleared: true },
+      type: "background_work_changed",
+      data: { epoch: "epoch-1", cleared: true },
     })).toMatchObject({ ok: true });
   });
 

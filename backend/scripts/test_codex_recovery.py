@@ -28,6 +28,7 @@ import subprocess
 import sys
 import urllib.error
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -51,6 +52,7 @@ from provider import schedule_loop_task  # noqa: E402
 from event_bus import EventBus  # noqa: E402
 from lifecycle_command_engine import LifecycleCommandEngine  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
+from process_identity import process_identity_to_dict  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
 from event_shape import extract_output_text as _extract_output_text  # noqa: E402
 from codex_normalize import _normalize_mcp_tool_completed  # noqa: E402
@@ -70,6 +72,29 @@ from run_recovery import (  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+@contextmanager
+def _stub_backend_dependency_environment():
+    """`runner_codex._run` resolves builtin-extension MCP server configs,
+    which (for a plain-python entrypoint with no extension-scoped
+    environment) falls back to `dependency_plan.active_runtime_python` to
+    find the interpreter for the backend's OWN dependency environment
+    (`.active-venv`, written by `run.sh`/the installer). A dev machine's
+    live checkout carries that pointer as untracked state; a fresh CI
+    checkout never has it — the resolution isn't this test's concern
+    (it fakes every other Codex collaborator the same way), so stub the
+    one public seam `dependency_plan.active_runtime_python` exposes for
+    exactly this: point it at the interpreter already running the test,
+    which is trivially a real, active environment."""
+    import dependency_plan
+
+    original = dependency_plan.active_runtime_python
+    dependency_plan.active_runtime_python = lambda _backend_dir: Path(sys.executable)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        dependency_plan.active_runtime_python = original  # type: ignore[assignment]
 
 
 def _make_assistant_text_event(text: str) -> dict:
@@ -239,6 +264,7 @@ def _seed_codex_run(
         "app_session_id": app_sid,
         "mode": "native",
         "runner_pid": pid,
+        "runner_identity": process_identity_to_dict(pid),
         "session_id": codex_sid,
         "processed_line": 0,
         "processed_byte_offset": events_path.stat().st_size if complete else start_byte,
@@ -320,7 +346,7 @@ def test_live_orphan_is_emitted_not_skipped() -> bool:
             proc.kill()
 
 
-def test_codex_replay_reads_native_rollout_jsonl() -> bool:
+def test_codex_replay_reads_native_rollout_jsonl() -> None:
     """Smoke: _replay_and_apply lands a codex run's native rollout events
     on the assistant message without reading session_events.jsonl."""
     app_sid, asst_id = _seed_session_with_streaming_assistant()
@@ -344,30 +370,23 @@ def test_codex_replay_reads_native_rollout_jsonl() -> bool:
 
     sess = session_manager.get(app_sid)
     asst = next((m for m in sess["messages"] if m["id"] == asst_id), None)
-    if asst is None:
-        print("  assistant message disappeared")
-        return False
+    assert asst is not None, "assistant message disappeared"
     evs = asst.get("events") or []
-    if len(evs) != len(events):
-        print(f"  expected {len(events)} events, got {len(evs)}")
-        return False
+    assert len(evs) == len(events), f"expected {len(events)} events, got {len(evs)}"
     for e in evs:
-        if e.get("type") != "agent_message":
-            print(f"  expected agent_message envelope, got {e.get('type')!r}")
-            return False
+        assert e.get("type") == "agent_message", (
+            f"expected agent_message envelope, got {e.get('type')!r}"
+        )
     content = asst.get("content") or ""
-    if "old turn" in content:
-        print(f"  replay ignored byte offset and included old turn: {content!r}")
-        return False
+    assert "old turn" not in content, (
+        f"replay ignored byte offset and included old turn: {content!r}"
+    )
     # Both events applied. Content reflects the last replayed assistant
     # message — separate complete messages replace rather than concatenate.
-    if "world" not in content:
-        print(f"  expected replayed text in content, got {content!r}")
-        return False
-    return True
+    assert "world" in content, f"expected replayed text in content, got {content!r}"
 
 
-def test_live_recovery_streams_rollout_events_before_complete() -> bool:
+def test_live_recovery_streams_rollout_events_before_complete() -> None:
     class _TurnManager:
         def __init__(self) -> None:
             self.active_run_ids = {}
@@ -397,7 +416,7 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
 
-    async def _run() -> bool:
+    async def _run() -> None:
         import event_bus_subscribers
         from event_journal import bind_event_journal_loop
 
@@ -452,18 +471,18 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
                 if "live after restart" in rendered:
                     break
                 await asyncio.sleep(0.05)
-            if "live after restart" not in rendered:
-                print(f"  recovered live event was not rendered before complete: {rendered!r}")
-                return False
+            assert "live after restart" in rendered, (
+                f"recovered live event was not rendered before complete: {rendered!r}"
+            )
 
             run_dir = runs_root() / run_id
             backend_state = json.loads((run_dir / "backend_state.json").read_text(encoding="utf-8"))
-            if backend_state.get("processed_byte_offset", 0) <= before_offset:
-                print(f"  cursor did not advance: before={before_offset} state={backend_state!r}")
-                return False
-            if "processed_byte" in backend_state:
-                print(f"  codex state wrote wrong cursor key: {backend_state!r}")
-                return False
+            assert backend_state.get("processed_byte_offset", 0) > before_offset, (
+                f"cursor did not advance: before={before_offset} state={backend_state!r}"
+            )
+            assert "processed_byte" not in backend_state, (
+                f"codex state wrote wrong cursor key: {backend_state!r}"
+            )
 
             (run_dir / "complete.json").write_text(json.dumps({
                 "success": True,
@@ -476,10 +495,9 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
                 if run_id not in provider._runs:
                     break
                 await asyncio.sleep(0.05)
-            if run_id in provider._runs:
-                print("  recovered live run did not clean up after complete")
-                return False
-            return True
+            assert run_id not in provider._runs, (
+                "recovered live run did not clean up after complete"
+            )
         finally:
             proc.terminate()
             try:
@@ -487,10 +505,10 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
             except Exception:
                 proc.kill()
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
+def test_live_recovery_waits_for_child_setup_before_complete() -> None:
     class _TurnManager:
         def __init__(self) -> None:
             self.active_run_ids = {}
@@ -520,7 +538,7 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
         def __init__(self) -> None:
             self.turn_manager = _TurnManager()
 
-    async def _run() -> bool:
+    async def _run() -> None:
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
         )
@@ -594,13 +612,12 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
                 if child_offset > child_start and run_id not in provider._runs:
                     break
                 await asyncio.sleep(0.05)
-            if child_offset <= child_start:
-                print(f"  child cursor did not advance before cleanup: {child_offset} <= {child_start}")
-                return False
-            if run_id in provider._runs:
-                print("  recovered live run did not clean up after child setup")
-                return False
-            return True
+            assert child_offset > child_start, (
+                f"child cursor did not advance before cleanup: {child_offset} <= {child_start}"
+            )
+            assert run_id not in provider._runs, (
+                "recovered live run did not clean up after child setup"
+            )
         finally:
             proc.terminate()
             try:
@@ -608,10 +625,10 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
             except Exception:
                 proc.kill()
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_dead_wrapper_uses_rollout_terminal_complete() -> bool:
+def test_dead_wrapper_uses_rollout_terminal_complete() -> None:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
@@ -628,24 +645,19 @@ def test_dead_wrapper_uses_rollout_terminal_complete() -> bool:
 
     recovered = CodexProvider({"id": "codex-test"}).recover_in_flight()
     desc = next((item for item in recovered if item.get("run_id") == run_id), None)
-    if desc is None:
-        print("  recovered descriptor missing")
-        return False
-    if desc.get("recovered_as") != "completed_from_rollout":
-        print(f"  expected completed_from_rollout, got {desc.get('recovered_as')!r}")
-        return False
+    assert desc is not None, "recovered descriptor missing"
+    assert desc.get("recovered_as") == "completed_from_rollout", (
+        f"expected completed_from_rollout, got {desc.get('recovered_as')!r}"
+    )
     complete = json.loads((runs_root() / run_id / "complete.json").read_text(encoding="utf-8"))
-    if complete.get("success") is not True:
-        print(f"  expected success=True, got {complete!r}")
-        return False
+    assert complete.get("success") is True, f"expected success=True, got {complete!r}"
     usage = complete.get("token_usage") or {}
-    if usage.get("total_tokens") != 17 or usage.get("cache_read_input_tokens") != 3:
-        print(f"  unexpected token usage: {usage!r}")
-        return False
-    return True
+    assert usage.get("total_tokens") == 17 and usage.get("cache_read_input_tokens") == 3, (
+        f"unexpected token usage: {usage!r}"
+    )
 
 
-def test_terminal_family_delegated_run_recovers_without_authority_error() -> bool:
+def test_terminal_family_delegated_run_recovers_without_authority_error() -> None:
     """Bug: a `provider_kind="codex"` run whose `provider_contract.type`
     is "openai" (better_agent_runner openai-family delegation — a
     legitimate shape, not corruption; see `family_execution_kind`) used to
@@ -688,10 +700,9 @@ def test_terminal_family_delegated_run_recovers_without_authority_error() -> boo
     assert desc.get("provider_kind") == "codex", (
         f"expected provider_kind=codex, got {desc.get('provider_kind')!r}"
     )
-    return True
 
 
-def test_dead_wrapper_resolves_missing_jsonl_path() -> bool:
+def test_dead_wrapper_resolves_missing_jsonl_path() -> None:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid="sess-resolve",
@@ -713,13 +724,10 @@ def test_dead_wrapper_resolves_missing_jsonl_path() -> bool:
         codex_native.resolve_rollout_path = original_resolve
 
     complete = json.loads((runs_root() / run_id / "complete.json").read_text(encoding="utf-8"))
-    if complete.get("success") is not True:
-        print(f"  expected success=True, got {complete!r}")
-        return False
-    return True
+    assert complete.get("success") is True, f"expected success=True, got {complete!r}"
 
 
-def test_dead_wrapper_ignores_malformed_usage_values() -> bool:
+def test_dead_wrapper_ignores_malformed_usage_values() -> None:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid="sess-malformed-usage",
@@ -742,13 +750,10 @@ def test_dead_wrapper_ignores_malformed_usage_values() -> bool:
         "cache_read_input_tokens": 0,
         "total_tokens": 0,
     }
-    if usage != expected:
-        print(f"  expected malformed usage to zero, got {usage!r}")
-        return False
-    return True
+    assert usage == expected, f"expected malformed usage to zero, got {usage!r}"
 
 
-def test_codex_usage_normalizer_zeros_malformed_live_values() -> bool:
+def test_codex_usage_normalizer_zeros_malformed_live_values() -> None:
     usage = token_usage_from_codex_usage({
         "input_tokens": True,
         "output_tokens": -5,
@@ -760,13 +765,10 @@ def test_codex_usage_normalizer_zeros_malformed_live_values() -> bool:
         "cache_read_input_tokens": 0,
         "total_tokens": 0,
     }
-    if usage != expected:
-        print(f"  expected malformed live usage to zero, got {usage!r}")
-        return False
-    return True
+    assert usage == expected, f"expected malformed live usage to zero, got {usage!r}"
 
 
-def test_dead_wrapper_uses_rollout_terminal_failure() -> bool:
+def test_dead_wrapper_uses_rollout_terminal_failure() -> None:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid="sess-failed",
@@ -788,19 +790,14 @@ def test_dead_wrapper_uses_rollout_terminal_failure() -> bool:
         codex_native.resolve_rollout_path = original_resolve
 
     complete = json.loads((runs_root() / run_id / "complete.json").read_text(encoding="utf-8"))
-    if complete.get("success") is not False:
-        print(f"  expected success=False, got {complete!r}")
-        return False
-    if not complete.get("error"):
-        print(f"  expected preserved failure error, got {complete!r}")
-        return False
-    if complete.get("error") == "runner died before completion (recovered at startup)":
-        print(f"  terminal turn.failed was ignored: {complete!r}")
-        return False
-    return True
+    assert complete.get("success") is False, f"expected success=False, got {complete!r}"
+    assert complete.get("error"), f"expected preserved failure error, got {complete!r}"
+    assert complete.get("error") != "runner died before completion (recovered at startup)", (
+        f"terminal turn.failed was ignored: {complete!r}"
+    )
 
 
-def test_dead_wrapper_without_terminal_still_fails_closed() -> bool:
+def test_dead_wrapper_without_terminal_still_fails_closed() -> None:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid="sess-no-terminal",
@@ -812,21 +809,15 @@ def test_dead_wrapper_without_terminal_still_fails_closed() -> bool:
 
     CodexProvider({"id": "codex-test"}).recover_in_flight()
     complete = json.loads((runs_root() / run_id / "complete.json").read_text(encoding="utf-8"))
-    if complete.get("success") is not False:
-        print(f"  expected success=False, got {complete!r}")
-        return False
-    if (
-        complete.get("outcome") != "recoverable_partial"
-        or complete.get("recoverable") is not True
-        or complete.get("cause")
-        != "runner died before completion (recovered at startup)"
-    ):
-        print(f"  unexpected recoverable partial: {complete!r}")
-        return False
-    return True
+    assert complete.get("success") is False, f"expected success=False, got {complete!r}"
+    assert (
+        complete.get("outcome") == "recoverable_partial"
+        and complete.get("recoverable") is True
+        and complete.get("cause") == "runner died before completion (recovered at startup)"
+    ), f"unexpected recoverable partial: {complete!r}"
 
 
-def test_emit_complete_recovers_missing_complete_from_rollout() -> bool:
+def test_emit_complete_recovers_missing_complete_from_rollout() -> None:
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
         app_sid="sess-emit",
@@ -836,7 +827,7 @@ def test_emit_complete_recovers_missing_complete_from_rollout() -> bool:
         complete=False,
     )
 
-    async def _run() -> bool:
+    async def _run() -> None:
         queue: asyncio.Queue = asyncio.Queue()
         provider = CodexProvider({"id": "codex-test"})
         rs = SimpleNamespace(
@@ -849,15 +840,12 @@ def test_emit_complete_recovers_missing_complete_from_rollout() -> bool:
         await provider._emit_complete_from_file(rs, runs_root() / run_id / "complete.json")
         event = queue.get_nowait()
         payload = event.data
-        if payload.get("success") is not True:
-            print(f"  expected success=True, got {payload!r}")
-            return False
-        return True
+        assert payload.get("success") is True, f"expected success=True, got {payload!r}"
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
+def test_codex_ambient_cancel_preserves_recoverable_app_server() -> None:
     import runner_codex
 
     calls: list[str] = []
@@ -919,7 +907,7 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
             assert group_id == _Proc.process_group_id
             calls.append("kill")
 
-    async def _run() -> bool:
+    async def _run() -> None:
         import codex_native
 
         run_dir = runs_root() / str(uuid.uuid4())
@@ -947,17 +935,18 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
 
             runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "continue",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "session_id": codex_sid,
-                "app_session_id": "app-ambient",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "continue",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "session_id": codex_sid,
+                    "app_session_id": "app-ambient",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
@@ -978,12 +967,12 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
         )
         if not ok:
             print(f"  code={code} calls={calls!r} state={state!r}")
-        return ok
+        assert ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_explicit_cancel_still_stops_app_server() -> bool:
+def test_codex_explicit_cancel_still_stops_app_server() -> None:
     import runner_codex
 
     calls: list[str] = []
@@ -1007,7 +996,7 @@ def test_codex_explicit_cancel_still_stops_app_server() -> bool:
         def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
-    async def _run() -> bool:
+    async def _run() -> None:
         original_control = runner_codex._process_control
         try:
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
@@ -1019,12 +1008,12 @@ def test_codex_explicit_cancel_still_stops_app_server() -> bool:
             )
         finally:
             runner_codex._process_control = original_control  # type: ignore[assignment]
-        return calls == ["signal", "wait", "kill"]
+        assert calls == ["signal", "wait", "kill"], f"calls={calls!r}"
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
+def test_codex_fallback_rollout_completion_settles_app_server() -> None:
     import runner_codex
 
     calls: list[str] = []
@@ -1086,7 +1075,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
         def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
-    async def _run() -> bool:
+    async def _run() -> None:
         import codex_native
 
         run_dir = runs_root() / str(uuid.uuid4())
@@ -1118,17 +1107,18 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "continue",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "session_id": codex_sid,
-                "app_session_id": "app-fallback",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "continue",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "session_id": codex_sid,
+                    "app_session_id": "app-fallback",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
@@ -1141,12 +1131,12 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
         ok = code == 0 and complete.get("success") is True and calls == ["close", "wait", "kill"]
         if not ok:
             print(f"  code={code} calls={calls!r} complete={complete!r}")
-        return ok
+        assert ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bool:
+def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> None:
     import runner_codex
 
     calls: list[str] = []
@@ -1190,7 +1180,7 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
         def force_kill_owned_group(self, _group_id: int) -> None:
             calls.append("kill")
 
-    async def _run() -> bool:
+    async def _run() -> None:
         import codex_native
 
         run_dir = runs_root() / str(uuid.uuid4())
@@ -1206,16 +1196,17 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
             runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: None  # type: ignore[assignment]
             contract, launch = runner_authority(run_dir)
-            code = await runner_codex._run(run_dir, {
-                "prompt": "start",
-                "provider_kind": "codex",
-                "cwd": "/tmp",
-                "mode": "native",
-                "app_session_id": "app-pre-thread",
-                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
-                "bare_config": True,
-                "provider_run_config": {},
-            }, contract, launch)
+            with _stub_backend_dependency_environment():
+                code = await runner_codex._run(run_dir, {
+                    "prompt": "start",
+                    "provider_kind": "codex",
+                    "cwd": "/tmp",
+                    "mode": "native",
+                    "app_session_id": "app-pre-thread",
+                    "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                    "bare_config": True,
+                    "provider_run_config": {},
+                }, contract, launch)
         finally:
             runner_codex._start_app_server = original_start  # type: ignore[assignment]
             runner_codex._process_control = original_control  # type: ignore[assignment]
@@ -1230,12 +1221,12 @@ def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bo
         )
         if not ok:
             print(f"  code={code} calls={calls!r} complete={complete!r}")
-        return ok
+        assert ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_loopback_post_retries_transient_reset() -> bool:
+def test_loopback_post_retries_transient_reset() -> None:
     import runner_codex
 
     calls = 0
@@ -1274,16 +1265,11 @@ def test_loopback_post_retries_transient_reset() -> bool:
         runner_codex.urllib.request.urlopen = original_urlopen
         runner_codex.time.sleep = original_sleep
 
-    if res != {"ok": True}:
-        print(f"  expected ok response, got {res!r}")
-        return False
-    if calls != 2:
-        print(f"  expected retry once, got {calls} calls")
-        return False
-    return True
+    assert res == {"ok": True}, f"expected ok response, got {res!r}"
+    assert calls == 2, f"expected retry once, got {calls} calls"
 
 
-def test_loopback_post_does_not_reread_ambient_token_after_forbidden() -> bool:
+def test_loopback_post_does_not_reread_ambient_token_after_forbidden() -> None:
     import runner_codex
 
     seen_tokens: list[str | None] = []
@@ -1321,10 +1307,9 @@ def test_loopback_post_does_not_reread_ambient_token_after_forbidden() -> bool:
     finally:
         runner_codex.urllib.request.urlopen = original_urlopen
 
-    if seen_tokens != ["spawn-token"]:
-        print(f"  expected only prepared token, got {seen_tokens!r}")
-        return False
-    return True
+    assert seen_tokens == ["spawn-token"], (
+        f"expected only prepared token, got {seen_tokens!r}"
+    )
 
 
 def test_loopback_post_surfaces_http_error_detail() -> bool:
@@ -1362,8 +1347,8 @@ def test_loopback_post_surfaces_http_error_detail() -> bool:
         runner_codex.urllib.request.urlopen = original_urlopen
 
 
-def test_schedule_loop_task_from_worker_thread() -> bool:
-    async def main() -> bool:
+def test_schedule_loop_task_from_worker_thread() -> None:
+    async def main() -> None:
         loop = asyncio.get_running_loop()
         done = asyncio.Event()
 
@@ -1377,12 +1362,11 @@ def test_schedule_loop_task_from_worker_thread() -> bool:
             name="test-schedule-loop-task-worker",
         )
         await done.wait()
-        return True
 
-    return asyncio.run(main())
+    asyncio.run(main())
 
 
-def test_schedule_loop_task_no_block_under_loop_lag() -> bool:
+def test_schedule_loop_task_no_block_under_loop_lag() -> None:
     """Regression: scheduling the bootstrap coro from a worker thread must
     NOT synchronously wait for the event loop. The old create_loop_task did
     future.result(timeout=5) and raised TimeoutError — killing the whole
@@ -1410,37 +1394,31 @@ def test_schedule_loop_task_no_block_under_loop_lag() -> bool:
     original_result = concurrent.futures.Future.result
     concurrent.futures.Future.result = reject_synchronous_wait
     try:
-        try:
-            schedule_loop_task(
-                loop, coro, name="test-schedule-under-lag",
-            )
-        except AssertionError as exc:
-            print(f"  {exc}")
-            return False
+        schedule_loop_task(
+            loop, coro, name="test-schedule-under-lag",
+        )
     finally:
         concurrent.futures.Future.result = original_result
         coro.close()
 
-    if len(callbacks) != 1:
-        print(f"  expected one loop admission callback, got {len(callbacks)}")
-        return False
-    return True
+    assert len(callbacks) == 1, (
+        f"expected one loop admission callback, got {len(callbacks)}"
+    )
 
 
-def test_codex_mcp_string_error_normalizes() -> bool:
+def test_codex_mcp_string_error_normalizes() -> None:
     event = _normalize_mcp_tool_completed(
         {"id": "tool-1", "error": "connection reset"},
         "parent-1",
     )
     content = event.get("message", {}).get("content", [])
     text = ((content[0] or {}).get("content") if content else "")
-    if text != "Error: connection reset":
-        print(f"  expected string error content, got {text!r}")
-        return False
-    return True
+    assert text == "Error: connection reset", (
+        f"expected string error content, got {text!r}"
+    )
 
 
-def test_codex_dead_runner_replay_preserves_tool_result_structure() -> bool:
+def test_codex_dead_runner_replay_preserves_tool_result_structure() -> None:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     codex_sid = str(uuid.uuid4())
     run_id = _seed_codex_run(
@@ -1472,25 +1450,22 @@ def test_codex_dead_runner_replay_preserves_tool_result_structure() -> bool:
     )
 
     events = read_codex_run_rollout_events(runs_root() / run_id)
-    if not any(
+    assert any(
         block.get("type") == "tool_result"
         for event in events
         for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
         if isinstance(block, dict)
-    ):
-        print("  replay did not preserve tool_result blocks")
-        return False
+    ), "replay did not preserve tool_result blocks"
     output = _extract_output_text(events)
-    if "secret-tool-output" in output:
-        print(f"  tool result leaked into assistant output text: {output!r}")
-        return False
-    if "final answer only" not in output:
-        print(f"  assistant text missing from replay output: {output!r}")
-        return False
-    return True
+    assert "secret-tool-output" not in output, (
+        f"tool result leaked into assistant output text: {output!r}"
+    )
+    assert "final answer only" in output, (
+        f"assistant text missing from replay output: {output!r}"
+    )
 
 
-def test_codex_replay_dedup_allows_mutated_same_uuid() -> bool:
+def test_codex_replay_dedup_allows_mutated_same_uuid() -> None:
     partial = {
         "type": "agent_message",
         "data": {
@@ -1510,13 +1485,12 @@ def test_codex_replay_dedup_allows_mutated_same_uuid() -> bool:
     }
 
     missing = _missing_event_dicts([partial], [exact_duplicate, updated])
-    if missing != [updated]:
-        print(f"  expected only mutated same-uuid update, got {missing!r}")
-        return False
-    return True
+    assert missing == [updated], (
+        f"expected only mutated same-uuid update, got {missing!r}"
+    )
 
 
-def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
+def test_turn_manager_dead_runner_replays_codex_rollout_events() -> None:
     class _UserPromptManager:
         def get_in_flight_lifecycle_msg_id(self, _sid):
             return None
@@ -1600,7 +1574,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         async def broadcast_session(self, *_args, **_kwargs) -> None:
             return None
 
-    async def _run() -> bool:
+    async def _run() -> None:
         sess = session_manager.create(
             name="dead-runner-replay",
             model="gpt-5.5",
@@ -1647,30 +1621,25 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
             finally:
                 await lifecycle_commands.close()
         events = result.get("events") or []
-        if result.get("success") is not True:
-            print(f"  expected success result, got {result!r}")
-            return False
-        if not any(
+        assert result.get("success") is True, f"expected success result, got {result!r}"
+        assert any(
             block.get("type") == "tool_result"
             for event in events
             for block in ((event.get("data") or {}).get("message") or {}).get("content", [])
             if isinstance(block, dict)
-        ):
-            print(f"  result events missing structured tool_result: {events!r}")
-            return False
+        ), f"result events missing structured tool_result: {events!r}"
         output = _extract_output_text(events)
-        if "hidden-tool-output" in output or "visible final answer" not in output:
-            print(f"  bad extracted output: {output!r}")
-            return False
-        if not any(event.get("type") == "agent_message" for event in ws_events):
-            print(f"  replayed events were not emitted through ws_callback: {ws_events!r}")
-            return False
-        return True
+        assert "hidden-tool-output" not in output and "visible final answer" in output, (
+            f"bad extracted output: {output!r}"
+        )
+        assert any(event.get("type") == "agent_message" for event in ws_events), (
+            f"replayed events were not emitted through ws_callback: {ws_events!r}"
+        )
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_replay_includes_child_subagent_panel_events() -> bool:
+def test_codex_replay_includes_child_subagent_panel_events() -> None:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = str(uuid.uuid4())
@@ -1768,12 +1737,8 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     backend_state_path.write_text(json.dumps(backend_state), encoding="utf-8")
 
     events, _ = _replay_from_codex_rollout(run_dir)
-    if not any(e.get("type") == "worker_start" for e in events):
-        print("  missing worker_start")
-        return False
-    if not any(e.get("type") == "worker_event" for e in events):
-        print("  missing worker_event")
-        return False
+    assert any(e.get("type") == "worker_start" for e in events), "missing worker_start"
+    assert any(e.get("type") == "worker_event" for e in events), "missing worker_event"
     child_completions = {
         (e.get("data") or {}).get("delegation_id"): (e.get("data") or {}).get("success")
         for e in events
@@ -1812,10 +1777,9 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     if not ok:
         print(f"  panel={panel!r} parent_text={parent_text[:200]} child_text={child_text[:200]}")
     assert ok
-    return ok
 
 
-def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
+def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> None:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = "019eea6e-18bb-74f2-9e6c-2446ec215861"
@@ -1894,17 +1858,13 @@ def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
         if e.get("type") == "worker_start"
         and (e.get("data") or {}).get("delegation_id") == delegation_id
     ]
-    if len(worker_starts) != 1:
-        print(f"  worker_starts={worker_starts!r}")
-        return False
+    assert len(worker_starts) == 1, f"worker_starts={worker_starts!r}"
     worker_events = [
         e for e in events
         if e.get("type") == "worker_event"
         and (e.get("data") or {}).get("delegation_id") == delegation_id
     ]
-    if not worker_events:
-        print("  missing derived worker events")
-        return False
+    assert worker_events, "missing derived worker events"
 
     orig_resolve = codex_native.resolve_rollout_path
     codex_native.resolve_rollout_path = lambda sid: child_path if sid == child_sid else None  # type: ignore
@@ -1941,10 +1901,10 @@ def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
     )
     if not ok:
         print(f"  panels={panels!r} parent_text={parent_text[:200]} child_text={child_text[:200]}")
-    return ok
+    assert ok
 
 
-def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
+def test_codex_replay_splits_reused_child_by_parent_tool_call() -> None:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = str(uuid.uuid4())
@@ -2045,9 +2005,7 @@ def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
     try:
         events, _ = _replay_from_codex_rollout(run_dir)
         worker_starts = [e for e in events if e.get("type") == "worker_start"]
-        if len(worker_starts) != 2:
-            print(f"  worker_starts={worker_starts!r}")
-            return False
+        assert len(worker_starts) == 2, f"worker_starts={worker_starts!r}"
         _replay_and_apply(
             persist_sid=app_sid,
             run_id=run_id,
@@ -2073,11 +2031,11 @@ def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
     )
     if not ok:
         print(f"  panels={panels!r}")
-    return ok
+    assert ok
 
 
-def test_codex_provider_child_setup_persists_source_and_starts_panel() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_child_setup_persists_source_and_starts_panel() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2121,8 +2079,7 @@ def test_codex_provider_child_setup_persists_source_and_starts_panel() -> bool:
         try:
             first = queue.get_nowait()
         except asyncio.QueueEmpty:
-            print("  missing worker_start queue event")
-            return False
+            raise AssertionError("missing worker_start queue event")
         ok = (
             first.type == "worker_start"
             and first.data.get("delegation_id") == delegation_id
@@ -2138,13 +2095,13 @@ def test_codex_provider_child_setup_persists_source_and_starts_panel() -> bool:
         await asyncio.gather(*rs.child_tailer_tasks.values(), return_exceptions=True)
         if not ok:
             print(f"  first={first!r} child_sources={rs.child_sources!r}")
-        return ok
+        assert ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_provider_starts_child_panel_from_v2_activity() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_starts_child_panel_from_v2_activity() -> None:
+    async def _run() -> None:
         parent_sid = str(uuid.uuid4())
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
@@ -2251,13 +2208,13 @@ def test_codex_provider_starts_child_panel_from_v2_activity() -> bool:
         )
         if not ok:
             print(f"  panel={saw_panel} child={saw_child_event} sources={rs.child_sources!r}")
-        return ok
+        assert ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_provider_waits_for_child_terminal_before_complete() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_waits_for_child_terminal_before_complete() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2367,13 +2324,12 @@ def test_codex_provider_waits_for_child_terminal_before_complete() -> bool:
         if not ok:
             print(f"  events={events!r}")
         assert ok
-        return ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_provider_reuses_processed_child_terminal_on_complete() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_reuses_processed_child_terminal_on_complete() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2456,13 +2412,12 @@ def test_codex_provider_reuses_processed_child_terminal_on_complete() -> bool:
             < event_types.index("complete")
         )
         assert ok, events
-        return ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_provider_parent_failure_does_not_wait_for_child_terminal() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_parent_failure_does_not_wait_for_child_terminal() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2541,13 +2496,12 @@ def test_codex_provider_parent_failure_does_not_wait_for_child_terminal() -> boo
             and events.index(child_completions[0]) < events.index(event)
         )
         assert ok, events
-        return ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_provider_cancel_unblocks_child_join() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_cancel_unblocks_child_join() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2619,12 +2573,17 @@ def test_codex_provider_cancel_unblocks_child_join() -> bool:
                 tailer.stop()
             await asyncio.gather(*(rs.child_tailer_tasks.values()), return_exceptions=True)
             provider._cleanup_run(run_dir.name)
-        return event.data.get("success") is False and event.data.get("error") == "cancelled"
+        assert event.data.get("success") is False, (
+            f"expected cancelled failure, got {event.data!r}"
+        )
+        assert event.data.get("error") == "cancelled", (
+            f"expected cancelled error, got {event.data!r}"
+        )
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
-def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
+def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> None:
     # Real Codex rollouts carry the reasoning body under `text`
     # (`delta` while streaming); an unmatched field falls through to the
     # raw native JSON dump instead of a thinking block.
@@ -2636,31 +2595,23 @@ def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
     for payload, expected in cases:
         normalizer = CodexRolloutNormalizer(namespace="test")
         events = normalizer.normalize_event({"type": "event_msg", "payload": payload})
-        if len(events) != 1:
-            print(f"  expected one event for {payload!r}, got {events!r}")
-            return False
+        assert len(events) == 1, f"expected one event for {payload!r}, got {events!r}"
         content = ((events[0].get("message") or {}).get("content") or [])
         block = content[0] if content and isinstance(content[0], dict) else {}
-        ok = (
+        assert (
             events[0].get("type") == "assistant"
             and block.get("type") == "thinking"
             and block.get("thinking") == expected
             and "text" not in block
-        )
-        if not ok:
-            print(f"  bad reasoning event for {payload!r}: {events!r}")
-            return False
+        ), f"bad reasoning event for {payload!r}: {events!r}"
     empty = CodexRolloutNormalizer(namespace="test").normalize_event({
         "type": "event_msg",
         "payload": {"type": "agent_reasoning", "text": ""},
     })
-    if empty:
-        print(f"  empty reasoning should render nothing, got {empty!r}")
-        return False
-    return True
+    assert not empty, f"empty reasoning should render nothing, got {empty!r}"
 
 
-def test_codex_reasoning_streamed_and_finalized_render_once() -> bool:
+def test_codex_reasoning_streamed_and_finalized_render_once() -> None:
     # With reasoning summaries enabled Codex emits the same body twice:
     # streamed as event_msg.agent_reasoning, then re-emitted verbatim as
     # response_item.reasoning's summary. Only the streamed copy renders.
@@ -2680,27 +2631,22 @@ def test_codex_reasoning_streamed_and_finalized_render_once() -> bool:
         for block in ((row.get("message") or {}).get("content") or [])
         if isinstance(block, dict) and block.get("type") == "thinking"
     ]
-    if thinking != [body]:
-        print(f"  expected one thinking card, got {thinking!r} from {rows!r}")
-        return False
+    assert thinking == [body], (
+        f"expected one thinking card, got {thinking!r} from {rows!r}"
+    )
     # A different body in the same turn still renders.
     other = normalizer.normalize_event({
         "type": "event_msg",
         "payload": {"type": "agent_reasoning", "text": "**Second thought**"},
     })
-    if len(other) != 1:
-        print(f"  distinct reasoning should render, got {other!r}")
-        return False
+    assert len(other) == 1, f"distinct reasoning should render, got {other!r}"
     # The claim is per turn: the next turn re-renders identical text.
     normalizer.normalize_event({"type": "turn_context", "payload": {}})
     again = normalizer.normalize_event({
         "type": "event_msg",
         "payload": {"type": "agent_reasoning", "text": body},
     })
-    if len(again) != 1:
-        print(f"  reasoning should re-render in a new turn, got {again!r}")
-        return False
-    return True
+    assert len(again) == 1, f"reasoning should re-render in a new turn, got {again!r}"
 
 
 def test_codex_nonlatest_replay_bound_is_safe() -> bool:
@@ -2746,8 +2692,8 @@ def test_codex_nonlatest_replay_bound_is_safe() -> bool:
         shutil.rmtree(second_dir, ignore_errors=True)
 
 
-def test_codex_provider_recovers_nested_child_sources_from_processed_history() -> bool:
-    async def _run() -> bool:
+def test_codex_provider_recovers_nested_child_sources_from_processed_history() -> None:
+    async def _run() -> None:
         child_sid = str(uuid.uuid4())
         grandchild_sid = str(uuid.uuid4())
         run_dir = runs_root() / str(uuid.uuid4())
@@ -2874,9 +2820,8 @@ def test_codex_provider_recovers_nested_child_sources_from_processed_history() -
         if not ok:
             print(f"  sources={rs.child_sources!r} queued={nested_text[:500]}")
         assert ok
-        return ok
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
 
 
 TESTS = [
@@ -2926,15 +2871,15 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                fn()
             except Exception as e:
-                ok = False
+                failed += 1
                 import traceback
                 traceback.print_exc()
                 print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
-                failed += 1
+                print(f"{FAIL}  {name}")
+                continue
+            print(f"{PASS}  {name}")
     finally:
         session_manager.flush_pending_persists()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

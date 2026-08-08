@@ -42,7 +42,7 @@ from codex_native import (  # noqa: E402
 )
 
 
-def test_web_search_call_preserves_query_and_action() -> bool:
+def test_web_search_call_preserves_query_and_action() -> None:
     item = {
         "id": "ws_1",
         "type": "web_search",
@@ -57,10 +57,9 @@ def test_web_search_call_preserves_query_and_action() -> bool:
     assert block["input"]["query"] == "embedding model leaderboard"
     assert block["input"]["action"] == item["action"]
     assert _normalize_web_search_result(item, event["uuid"]) is None
-    return True
 
 
-def test_web_search_result_list_becomes_tool_result() -> bool:
+def test_web_search_result_list_becomes_tool_result() -> None:
     item = {
         "id": "ws_2",
         "results": [
@@ -88,10 +87,9 @@ def test_web_search_result_list_becomes_tool_result() -> bool:
     assert block["tool_use_id"] == "ws_2"
     assert block["content"] == text
     assert event["parentUuid"] == "tool-use-uuid"
-    return True
 
 
-def test_web_search_events_share_generated_id() -> bool:
+def test_web_search_events_share_generated_id() -> None:
     item = {
         "query": "embedding model leaderboard",
         "results": [
@@ -112,10 +110,9 @@ def test_web_search_events_share_generated_id() -> bool:
     assert tool_use["id"]
     assert tool_result["tool_use_id"] == tool_use["id"]
     assert events[1]["parentUuid"] == events[0]["uuid"]
-    return True
 
 
-def test_web_search_events_without_result_emit_only_call() -> bool:
+def test_web_search_events_without_result_emit_only_call() -> None:
     events = _normalize_web_search_events(
         {
             "id": "ws_empty",
@@ -128,10 +125,9 @@ def test_web_search_events_without_result_emit_only_call() -> bool:
     block = events[0]["message"]["content"][0]
     assert block["type"] == "tool_use"
     assert block["id"] == "ws_empty"
-    return True
 
 
-def test_response_item_function_call_normalizes_exec_command() -> bool:
+def test_response_item_function_call_normalizes_exec_command() -> None:
     event, tool_use_id = _normalize_response_tool_call(
         {
             "type": "function_call",
@@ -151,10 +147,9 @@ def test_response_item_function_call_normalizes_exec_command() -> bool:
     assert block["name"] == "Bash"
     assert block["input"]["cmd"] == 'rg -n "response_item" backend'
     assert block["input"]["command"] == 'rg -n "response_item" backend'
-    return True
 
 
-def test_response_item_function_call_maps_update_plan_to_todowrite() -> bool:
+def test_response_item_function_call_maps_update_plan_to_todowrite() -> None:
     import json as _json
     event, tool_use_id = _normalize_response_tool_call(
         {
@@ -184,10 +179,9 @@ def test_response_item_function_call_maps_update_plan_to_todowrite() -> bool:
     ]
     # Explanation has no TodoWrite slot — dropped, not leaked into input.
     assert "explanation" not in block["input"]
-    return True
 
 
-def test_response_item_function_output_attaches_by_call_id() -> bool:
+def test_response_item_function_output_attaches_by_call_id() -> None:
     event, tool_use_id = _normalize_response_tool_result(
         {
             "type": "function_call_output",
@@ -203,10 +197,9 @@ def test_response_item_function_output_attaches_by_call_id() -> bool:
     assert block["tool_use_id"] == "call_exec"
     assert "matched" in block["content"]
     assert event["parentUuid"] == "tool-use-uuid"
-    return True
 
 
-def test_custom_tool_call_preserves_apply_patch_input() -> bool:
+def test_custom_tool_call_preserves_apply_patch_input() -> None:
     event = _normalize_response_item_event(
         {
             "type": "custom_tool_call",
@@ -222,10 +215,9 @@ def test_custom_tool_call_preserves_apply_patch_input() -> bool:
     assert block["id"] == "call_patch"
     assert block["name"] == "apply_patch"
     assert block["input"]["value"].startswith("*** Begin Patch")
-    return True
 
 
-def test_response_item_assistant_message_becomes_text_event() -> bool:
+def test_response_item_assistant_message_becomes_text_event() -> None:
     event = _normalize_response_item_event(
         {
             "type": "message",
@@ -239,10 +231,9 @@ def test_response_item_assistant_message_becomes_text_event() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "text"
     assert block["text"] == "done"
-    return True
 
 
-def test_response_item_assistant_message_uuid_is_stable() -> bool:
+def test_response_item_assistant_message_uuid_is_stable() -> None:
     payload = {
         "type": "message",
         "id": "msg_stable",
@@ -254,10 +245,9 @@ def test_response_item_assistant_message_uuid_is_stable() -> bool:
     assert first is not None
     assert second is not None
     assert first["uuid"] == second["uuid"]
-    return True
 
 
-def test_response_item_render_branches_keep_stable_uuids() -> bool:
+def test_response_item_render_branches_keep_stable_uuids() -> None:
     payloads = [
         {
             "type": "reasoning",
@@ -293,10 +283,9 @@ def test_response_item_render_branches_keep_stable_uuids() -> bool:
         assert second is not None, payload
         assert first["uuid"] == second["uuid"], payload
         assert first["parentUuid"] == second["parentUuid"], payload
-    return True
 
 
-def test_codex_rollout_item_replay_keeps_stable_uuids() -> bool:
+def test_codex_rollout_item_replay_keeps_stable_uuids() -> None:
     raw_events = [
         {
             "type": "item.started",
@@ -323,10 +312,9 @@ def test_codex_rollout_item_replay_keeps_stable_uuids() -> bool:
     second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
     assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
     assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
-    return True
 
 
-def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> bool:
+def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> None:
     raw_events = [
         {
             "type": "event_msg",
@@ -345,10 +333,9 @@ def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> bool:
     second_rows = [row for raw in raw_events for row in second.normalize_event(raw)]
     assert [row["uuid"] for row in first_rows] == [row["uuid"] for row in second_rows]
     assert [row["parentUuid"] for row in first_rows] == [row["parentUuid"] for row in second_rows]
-    return True
 
 
-def test_response_item_user_message_without_subagent_notification_is_skipped() -> bool:
+def test_response_item_user_message_without_subagent_notification_is_skipped() -> None:
     event = _normalize_response_item_event(
         {
             "type": "message",
@@ -358,10 +345,9 @@ def test_response_item_user_message_without_subagent_notification_is_skipped() -
         "parent",
     )
     assert event is None
-    return True
 
 
-def test_response_item_reasoning_summary_becomes_thinking() -> bool:
+def test_response_item_reasoning_summary_becomes_thinking() -> None:
     event = _normalize_response_item_event(
         {
             "type": "reasoning",
@@ -373,10 +359,9 @@ def test_response_item_reasoning_summary_becomes_thinking() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "thinking"
     assert block["thinking"] == "checked parser"
-    return True
 
 
-def test_empty_encrypted_reasoning_is_skipped() -> bool:
+def test_empty_encrypted_reasoning_is_skipped() -> None:
     # Encrypted-only reasoning has no renderable content; it must not produce
     # a card (no placeholder text, no raw native-payload fallback either).
     event = _normalize_response_item_event(
@@ -388,10 +373,9 @@ def test_empty_encrypted_reasoning_is_skipped() -> bool:
         "parent",
     )
     assert event is None
-    return True
 
 
-def test_codex_rollout_keeps_bookkeeping_envelopes_visible() -> bool:
+def test_codex_rollout_keeps_bookkeeping_envelopes_visible() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     for payload_type in ("turn_diff",):
         rows = normalizer.normalize_event({
@@ -414,10 +398,9 @@ def test_codex_rollout_keeps_bookkeeping_envelopes_visible() -> bool:
     })
     # turn_context is operational metadata, never rendered.
     assert ctx_rows == []
-    return True
 
 
-def test_codex_rollout_digests_known_event_msg_primitives() -> bool:
+def test_codex_rollout_digests_known_event_msg_primitives() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     cases = [
         (
@@ -449,10 +432,9 @@ def test_codex_rollout_digests_known_event_msg_primitives() -> bool:
         "type": "event_msg",
         "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 12}}},
     }) == []
-    return True
 
 
-def test_codex_rollout_context_compacted_renders_readable_notice() -> bool:
+def test_codex_rollout_context_compacted_renders_readable_notice() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "event_msg",
@@ -463,10 +445,9 @@ def test_codex_rollout_context_compacted_renders_readable_notice() -> bool:
     assert rows[0]["data"]["kind"] == "context_compacted"
     assert rows[0]["data"]["message"] == "Context compacted"
     assert "message" not in rows[0]
-    return True
 
 
-def test_codex_rollout_compacted_renders_replacement_history() -> bool:
+def test_codex_rollout_compacted_renders_replacement_history() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "compacted",
@@ -492,10 +473,9 @@ def test_codex_rollout_compacted_renders_replacement_history() -> bool:
         {"role": "user", "text": "original ask"},
         {"role": "assistant", "text": "compact summary"},
     ]
-    return True
 
 
-def test_codex_rollout_compacted_replaces_context_compacted_notice() -> bool:
+def test_codex_rollout_compacted_replaces_context_compacted_notice() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     notice_rows = normalizer.normalize_event({
         "type": "event_msg",
@@ -520,10 +500,9 @@ def test_codex_rollout_compacted_replaces_context_compacted_notice() -> bool:
     assert detail_rows[0]["data"]["replacement_history"] == [
         {"role": "user", "text": "original ask"},
     ]
-    return True
 
 
-def test_codex_rollout_turn_aborted_renders_readable_notice() -> bool:
+def test_codex_rollout_turn_aborted_renders_readable_notice() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "event_msg",
@@ -540,10 +519,9 @@ def test_codex_rollout_turn_aborted_renders_readable_notice() -> bool:
     assert rows[0]["data"]["kind"] == "turn_aborted"
     assert rows[0]["data"]["message"] == "Turn interrupted after 21m 48s"
     assert "message" not in rows[0]
-    return True
 
 
-def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> bool:
+def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "event_msg",
@@ -581,7 +559,6 @@ def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> bool:
     assert rows[1]["parentUuid"] == rows[0]["uuid"]
     assert rows[1]["uuid"] != rows[0]["uuid"]
     assert "Codex native event_msg.mcp_tool_call_end" not in str(rows)
-    return True
 
 
 def _codex_tool_call_event(call_id: str = "call_mcp") -> dict:
@@ -636,7 +613,7 @@ def _tool_result_rows(rows: list[dict]) -> list[dict]:
     ]
 
 
-def test_codex_rollout_mcp_end_suppresses_response_output_duplicate() -> bool:
+def test_codex_rollout_mcp_end_suppresses_response_output_duplicate() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows: list[dict] = []
     rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
@@ -649,10 +626,9 @@ def test_codex_rollout_mcp_end_suppresses_response_output_duplicate() -> bool:
     assert block["tool_use_id"] == "call_mcp"
     assert block["content"] == "{\"success\":false}"
     assert "Wall time" not in str(rows)
-    return True
 
 
-def test_codex_rollout_response_output_without_mcp_end_still_emits() -> bool:
+def test_codex_rollout_response_output_without_mcp_end_still_emits() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows: list[dict] = []
     rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
@@ -663,10 +639,9 @@ def test_codex_rollout_response_output_without_mcp_end_still_emits() -> bool:
     block = result_rows[0]["message"]["content"][0]
     assert block["tool_use_id"] == "call_mcp"
     assert "Wall time" in block["content"]
-    return True
 
 
-def test_codex_rollout_distinct_tool_results_both_emit() -> bool:
+def test_codex_rollout_distinct_tool_results_both_emit() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows: list[dict] = []
     rows.extend(normalizer.normalize_event(_codex_tool_call_event("call_one")))
@@ -679,10 +654,9 @@ def test_codex_rollout_distinct_tool_results_both_emit() -> bool:
         for row in _tool_result_rows(rows)
     ]
     assert ids == ["call_one", "call_two"]
-    return True
 
 
-def test_codex_rollout_response_first_suppresses_late_mcp_end() -> bool:
+def test_codex_rollout_response_first_suppresses_late_mcp_end() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows: list[dict] = []
     rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
@@ -693,10 +667,9 @@ def test_codex_rollout_response_first_suppresses_late_mcp_end() -> bool:
     assert len(result_rows) == 1
     assert result_rows[0]["message"]["content"][0]["content"].startswith("Wall time")
     assert len([row for row in rows if ((row.get("message") or {}).get("content") or [{}])[0].get("type") == "tool_use"]) == 1
-    return True
 
 
-def test_event_msg_task_started_not_rendered() -> bool:
+def test_event_msg_task_started_not_rendered() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "event_msg",
@@ -708,10 +681,9 @@ def test_event_msg_task_started_not_rendered() -> bool:
         },
     })
     assert rows == [], f"task_started should not render: {rows}"
-    return True
 
 
-def test_codex_rollout_token_count_captures_context_window_and_fill() -> bool:
+def test_codex_rollout_token_count_captures_context_window_and_fill() -> None:
     # token_count is not a card; its model_context_window/last_token_usage is
     # surfaced on the normalizer so the caller can route it into the
     # context-window UI channel via the complete envelope.
@@ -737,10 +709,9 @@ def test_codex_rollout_token_count_captures_context_window_and_fill() -> bool:
     })
     assert normalizer.context_window == 200000
     assert normalizer.context_tokens == 170000
-    return True
 
 
-def test_codex_rollout_tailer_emits_context_updates() -> bool:
+def test_codex_rollout_tailer_emits_context_updates() -> None:
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "rollout.jsonl"
         path.write_text(
@@ -769,7 +740,6 @@ def test_codex_rollout_tailer_emits_context_updates() -> bool:
         asyncio.run(_go())
     assert updates == [(200000, 180000)]
     assert rendered == []
-    return True
 
 
 def _rollout_agent_line(text: str) -> str:
@@ -779,7 +749,7 @@ def _rollout_agent_line(text: str) -> str:
     }) + "\n"
 
 
-def test_codex_rollout_tailer_keeps_partial_line_pending() -> bool:
+def test_codex_rollout_tailer_keeps_partial_line_pending() -> None:
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "rollout.jsonl"
         first = _rollout_agent_line("complete")
@@ -822,10 +792,9 @@ def test_codex_rollout_tailer_keeps_partial_line_pending() -> bool:
             "complete",
             "partial",
         ]
-    return True
 
 
-def test_codex_rollout_tailer_advances_cursor_after_dispatch() -> bool:
+def test_codex_rollout_tailer_advances_cursor_after_dispatch() -> None:
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "rollout.jsonl"
         first = _rollout_agent_line("one")
@@ -861,7 +830,6 @@ def test_codex_rollout_tailer_advances_cursor_after_dispatch() -> bool:
             ("dispatch", first_cursor),
             ("cursor", second_cursor),
         ]
-    return True
 
 
 class _BlockingOpenPath:
@@ -874,7 +842,7 @@ class _BlockingOpenPath:
         return self.path.open(*args, **kwargs)
 
 
-def test_codex_rollout_tailer_file_read_does_not_block_loop() -> bool:
+def test_codex_rollout_tailer_file_read_does_not_block_loop() -> None:
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "rollout.jsonl"
         path.write_text(_rollout_agent_line("nonblocking"), encoding="utf-8")
@@ -904,10 +872,9 @@ def test_codex_rollout_tailer_file_read_does_not_block_loop() -> bool:
         elapsed = asyncio.run(_go())
         assert elapsed < 0.22
         assert [ev["message"]["content"][0]["text"] for ev in rendered] == ["nonblocking"]
-    return True
 
 
-def test_codex_rollout_assistant_text_dedup_is_lossless() -> bool:
+def test_codex_rollout_assistant_text_dedup_is_lossless() -> None:
     # Codex streams every assistant utterance via event_msg.agent_message
     # (including intermediate commentary) and re-emits only the finalized
     # answer as response_item.message. The finalized copy that duplicates an
@@ -954,10 +921,9 @@ def test_codex_rollout_assistant_text_dedup_is_lossless() -> bool:
     })
     assert len(unstreamed_rows) == 1
     assert unstreamed_rows[0]["message"]["content"][0]["text"] == "Only in response_item"
-    return True
 
 
-def test_codex_rollout_assistant_text_dedup_scopes_per_turn() -> bool:
+def test_codex_rollout_assistant_text_dedup_scopes_per_turn() -> None:
     # Identical assistant text in different turns must both render; the dedup
     # set resets at each turn_context boundary.
     normalizer = CodexRolloutNormalizer(namespace="thread")
@@ -969,10 +935,9 @@ def test_codex_rollout_assistant_text_dedup_scopes_per_turn() -> bool:
             "payload": {"type": "agent_message", "message": "Compact task completed"},
         })
         assert len(rows) == 1, turn
-    return True
 
 
-def test_codex_rollout_response_item_subagent_notification_passes_through() -> bool:
+def test_codex_rollout_response_item_subagent_notification_passes_through() -> None:
     # A response_item.message that yields a non-assistant event (subagent
     # notification) must NOT be dropped by the assistant-text dedup path.
     import json as _json
@@ -989,10 +954,9 @@ def test_codex_rollout_response_item_subagent_notification_passes_through() -> b
     assert len(rows) == 1
     assert rows[0]["type"] == "user"
     assert rows[0]["timestamp"] == "2026-06-16T11:55:39.000Z"
-    return True
 
 
-def test_codex_rollout_subagent_notification_attaches_to_agent_tool() -> bool:
+def test_codex_rollout_subagent_notification_attaches_to_agent_tool() -> None:
     import json as _json
     normalizer = CodexRolloutNormalizer(namespace="thread")
     tool_rows = normalizer.normalize_event({
@@ -1040,10 +1004,9 @@ def test_codex_rollout_subagent_notification_attaches_to_agent_tool() -> bool:
     assert block["type"] == "tool_result"
     assert block["tool_use_id"] == "call_agent"
     assert rows[0]["parentUuid"] == agent_event_uuid
-    return True
 
 
-def test_codex_subagent_id_from_spawn_result() -> bool:
+def test_codex_subagent_id_from_spawn_result() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     normalizer.normalize_event({
         "type": "response_item",
@@ -1087,10 +1050,9 @@ def test_codex_subagent_id_from_spawn_result() -> bool:
         },
     })
     assert codex_subagent_id_from_event(invalid_rows[0]) is None
-    return True
 
 
-def test_codex_subagent_ids_from_plural_spawn_result() -> bool:
+def test_codex_subagent_ids_from_plural_spawn_result() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     normalizer.normalize_event({
         "type": "response_item",
@@ -1113,10 +1075,9 @@ def test_codex_subagent_ids_from_plural_spawn_result() -> bool:
     })
     assert len(rows) == 1
     assert codex_subagent_ids_from_event(rows[0]) == ["agent-1", "agent-2", "agent-3"]
-    return True
 
 
-def test_codex_subagent_ids_from_wait_agent_result() -> bool:
+def test_codex_subagent_ids_from_wait_agent_result() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     normalizer.normalize_event({
         "type": "response_item",
@@ -1142,10 +1103,9 @@ def test_codex_subagent_ids_from_wait_agent_result() -> bool:
     })
     assert len(rows) == 1
     assert codex_subagent_ids_from_event(rows[0]) == ["agent-1", "agent-2"]
-    return True
 
 
-def test_codex_subagent_sources_include_parent_tool_call() -> bool:
+def test_codex_subagent_sources_include_parent_tool_call() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     normalizer.normalize_event({
         "type": "response_item",
@@ -1173,10 +1133,9 @@ def test_codex_subagent_sources_include_parent_tool_call() -> bool:
         "agent-1",
         parent_tool_use_id="call_wait",
     )
-    return True
 
 
-def test_codex_status_payload_without_wait_agent_is_not_subagent() -> bool:
+def test_codex_status_payload_without_wait_agent_is_not_subagent() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     normalizer.normalize_event({
         "type": "response_item",
@@ -1199,10 +1158,9 @@ def test_codex_status_payload_without_wait_agent_is_not_subagent() -> bool:
     })
     assert len(rows) == 1
     assert codex_subagent_ids_from_event(rows[0]) == []
-    return True
 
 
-def test_codex_subagent_ids_from_notification_metadata() -> bool:
+def test_codex_subagent_ids_from_notification_metadata() -> None:
     notification = (
         "<subagent_notification>\n"
         "{\"agent_path\":\"agent-1\",\"status\":{\"completed\":\"done\"}}\n"
@@ -1219,10 +1177,9 @@ def test_codex_subagent_ids_from_notification_metadata() -> bool:
     })
     assert len(rows) == 1
     assert codex_subagent_ids_from_event(rows[0]) == ["agent-1"]
-    return True
 
 
-def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | None = None) -> bool:
+def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | None = None) -> None:
     import tempfile
     import json as _json
 
@@ -1291,10 +1248,9 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
             encoding="utf-8",
         )
         assert codex_subagent_rollout_start_byte(non_object) == 0
-    return True
 
 
-def test_codex_rollout_stamps_real_rollout_timestamp() -> bool:
+def test_codex_rollout_stamps_real_rollout_timestamp() -> None:
     # Every emitted event must carry the source rollout line's `timestamp`,
     # not `datetime.now()`. Verified at the single `_push` chokepoint across
     # a message, a tool call, and a todo_list (the path that bypasses _push).
@@ -1323,10 +1279,9 @@ def test_codex_rollout_stamps_real_rollout_timestamp() -> bool:
         "item": {"id": "item_0", "type": "todo_list", "items": [{"text": "step", "completed": False}]},
     })[0]
     assert todo["timestamp"] == "2026-06-16T11:55:41.000Z"
-    return True
 
 
-def test_response_item_tool_search_call_and_output() -> bool:
+def test_response_item_tool_search_call_and_output() -> None:
     call = _normalize_response_item_event(
         {
             "type": "tool_search_call",
@@ -1357,10 +1312,9 @@ def test_response_item_tool_search_call_and_output() -> bool:
     assert result_block["tool_use_id"] == "call_search"
     assert "spawn_agent" in result_block["content"]
     assert result["parentUuid"] == call["uuid"]
-    return True
 
 
-def test_codex_spawn_agent_call_becomes_agent_tool() -> bool:
+def test_codex_spawn_agent_call_becomes_agent_tool() -> None:
     event, tool_use_id = _normalize_response_tool_call(
         {
             "type": "function_call",
@@ -1381,10 +1335,9 @@ def test_codex_spawn_agent_call_becomes_agent_tool() -> bool:
     assert block["input"]["subagent_type"] == "explorer"
     assert block["input"]["description"] == "Find Codex subagent event paths."
     assert block["input"]["prompt"] == "Find Codex subagent event paths."
-    return True
 
 
-def test_codex_subagent_child_message_keeps_parent_tool_use_id() -> bool:
+def test_codex_subagent_child_message_keeps_parent_tool_use_id() -> None:
     event = _normalize_agent_message(
         {
             "id": "item_child_msg",
@@ -1398,10 +1351,9 @@ def test_codex_subagent_child_message_keeps_parent_tool_use_id() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "text"
     assert block["text"] == "Subagent found the path."
-    return True
 
 
-def test_codex_child_thread_maps_to_parent_tool_use_id() -> bool:
+def test_codex_child_thread_maps_to_parent_tool_use_id() -> None:
     item = _attach_collab_parent_from_thread(
         {
             "id": "item_child_msg",
@@ -1413,10 +1365,9 @@ def test_codex_child_thread_maps_to_parent_tool_use_id() -> bool:
     )
     event = _normalize_agent_message(item, "parent")
     assert event["parent_tool_use_id"] == "collab_1"
-    return True
 
 
-def test_codex_collab_update_can_seed_child_thread_parent() -> bool:
+def test_codex_collab_update_can_seed_child_thread_parent() -> None:
     parents: dict[str, str] = {}
     _remember_collab_receivers(
         {
@@ -1436,10 +1387,9 @@ def test_codex_collab_update_can_seed_child_thread_parent() -> bool:
         parents,
     )
     assert item["parentToolUseId"] == "collab_1"
-    return True
 
 
-def test_codex_response_child_message_keeps_parent_tool_use_id() -> bool:
+def test_codex_response_child_message_keeps_parent_tool_use_id() -> None:
     event = _normalize_response_item_event(
         {
             "type": "message",
@@ -1454,10 +1404,9 @@ def test_codex_response_child_message_keeps_parent_tool_use_id() -> bool:
     block = event["message"]["content"][0]
     assert block["type"] == "text"
     assert block["text"] == "Nested response"
-    return True
 
 
-def test_codex_spawn_agent_output_becomes_tool_result() -> bool:
+def test_codex_spawn_agent_output_becomes_tool_result() -> None:
     call, tool_use_id = _normalize_response_tool_call(
         {
             "type": "function_call",
@@ -1489,10 +1438,9 @@ def test_codex_spawn_agent_output_becomes_tool_result() -> bool:
     assert result_block["tool_use_id"] == "call_agent"
     assert "Found runner_codex.py" in result_block["content"]
     assert result["parentUuid"] == call["uuid"]
-    return True
 
 
-def test_codex_collab_agent_item_becomes_agent_tool_pair() -> bool:
+def test_codex_collab_agent_item_becomes_agent_tool_pair() -> None:
     item = {
         "id": "collab_1",
         "type": "collab_agent_tool_call",
@@ -1526,10 +1474,9 @@ def test_codex_collab_agent_item_becomes_agent_tool_pair() -> bool:
     assert result_block["tool_use_id"] == "collab_1"
     assert "child-thread: completed Found runner_codex.py" in result_block["content"]
     assert result["parentUuid"] == tool_use["uuid"]
-    return True
 
 
-def test_unknown_response_item_becomes_raw_native_event() -> bool:
+def test_unknown_response_item_becomes_raw_native_event() -> None:
     event = _normalize_response_item_event(
         {
             "type": "future_tool_shape",
@@ -1543,10 +1490,9 @@ def test_unknown_response_item_becomes_raw_native_event() -> bool:
     assert block["type"] == "text"
     assert "Codex native response_item.future_tool_shape" in block["text"]
     assert "call_future" in block["text"]
-    return True
 
 
-def test_event_msg_patch_apply_end_becomes_raw_native_event() -> bool:
+def test_event_msg_patch_apply_end_becomes_raw_native_event() -> None:
     event = _normalize_native_payload(
         "event_msg",
         {
@@ -1561,10 +1507,9 @@ def test_event_msg_patch_apply_end_becomes_raw_native_event() -> bool:
     assert block["type"] == "text"
     assert "Codex native event_msg.patch_apply_end" in block["text"]
     assert "Success. Updated files." in block["text"]
-    return True
 
 
-def test_web_search_event_msg_and_response_item_have_same_dedupe_key() -> bool:
+def test_web_search_event_msg_and_response_item_have_same_dedupe_key() -> None:
     action = {
         "type": "search",
         "query": "nomic-ai CodeRankEmbed model card Hugging Face",
@@ -1591,10 +1536,9 @@ def test_web_search_event_msg_and_response_item_have_same_dedupe_key() -> bool:
     assert event_msg_item["id"] == "ws_1"
     assert response_item["id"]
     assert _web_search_dedupe_key(event_msg_item) == _web_search_dedupe_key(response_item)
-    return True
 
 
-def test_turn_context_not_rendered() -> bool:
+def test_turn_context_not_rendered() -> None:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
         "type": "turn_context",
@@ -1610,7 +1554,6 @@ def test_turn_context_not_rendered() -> bool:
         },
     })
     assert rows == [], f"turn_context should not render: {rows}"
-    return True
 
 
 TESTS = [

@@ -90,7 +90,7 @@ def _is_subscribed(coord: Coordinator, sid: str, cb) -> bool:
     )
 
 
-async def test_disconnect_unregisters_every_subscribed_session() -> bool:
+async def test_disconnect_unregisters_every_subscribed_session() -> None:
     """One socket subscribes to two sessions; the disconnect cleanup must
     drop BOTH. Documents that the old single-id cleanup leaks the other."""
     coord = Coordinator()
@@ -116,14 +116,15 @@ async def test_disconnect_unregisters_every_subscribed_session() -> bool:
         and not _is_subscribed(coord, a_sid, cb)
     )
 
-    ok = both_attached and leaked_before_fix and fully_cleaned
-    print(f"  {PASS if ok else FAIL} disconnect unregisters all sessions "
+    assert both_attached, "both sessions attached after subscribe"
+    assert leaked_before_fix, "old single-id cleanup leaks the non-last session"
+    assert fully_cleaned, "unregister_all_ws drops every session"
+    print(f"  {PASS} disconnect unregisters all sessions "
           f"(attached={both_attached}, leak-without-fix={leaked_before_fix}, "
           f"cleaned={fully_cleaned})")
-    return ok
 
 
-async def test_per_connection_token_isolation() -> bool:
+async def test_per_connection_token_isolation() -> None:
     """Two connections (distinct tokens) subscribe to the SAME session.
     Cleaning up one must not drop the other — the property that, combined
     with full cleanup, makes a reconnect's re-subscribe always take."""
@@ -144,13 +145,14 @@ async def test_per_connection_token_isolation() -> bool:
     coord.unregister_all_ws(cb2)
     await _settle()
 
-    ok = both and cb1_gone and cb2_survives
-    print(f"  {PASS if ok else FAIL} per-connection token isolation "
+    assert both, "both connections subscribed"
+    assert cb1_gone, "unregister_all_ws drops the cleaned-up connection"
+    assert cb2_survives, "unregister_all_ws leaves the other connection intact"
+    print(f"  {PASS} per-connection token isolation "
           f"(both={both}, cb1_gone={cb1_gone}, cb2_survives={cb2_survives})")
-    return ok
 
 
-async def test_active_turn_tailer_survives_demand_churn() -> bool:
+async def test_active_turn_tailer_survives_demand_churn() -> None:
     """An in-flight turn's per-root wire tailer must survive a transient
     WS disconnect (demand dropping to zero, e.g. a reconnect loop) -- a
     stop here starves the events.jsonl journal /ws/v2/surface reads from
@@ -187,11 +189,13 @@ async def test_active_turn_tailer_survives_demand_churn() -> bool:
         await _settle()
         swept_after_run_ends = root_id not in coord._wire_tailers
 
-        ok = open_before and survived_churn and deferred and swept_after_run_ends
-        print(f"  {PASS if ok else FAIL} active-turn tailer survives demand churn "
+        assert open_before, "tailer not open after initial subscribe"
+        assert survived_churn, "tailer must survive demand churn during an active turn"
+        assert deferred, "stop must be deferred while the turn is still active"
+        assert swept_after_run_ends, "deferred stop must sweep once the run ends"
+        print(f"  {PASS} active-turn tailer survives demand churn "
               f"(open_before={open_before}, survived={survived_churn}, "
               f"deferred={deferred}, swept={swept_after_run_ends})")
-        return ok
     finally:
         coord.turn_manager.has_active_runs = original_has_active
         tailer = coord._wire_tailers.pop(root_id, None)
@@ -207,14 +211,27 @@ async def test_active_turn_tailer_survives_demand_churn() -> bool:
 
 
 async def _main() -> int:
-    results = [
-        await test_disconnect_unregisters_every_subscribed_session(),
-        await test_per_connection_token_isolation(),
-        await test_active_turn_tailer_survives_demand_churn(),
+    checks = [
+        ("disconnect unregisters all sessions",
+         test_disconnect_unregisters_every_subscribed_session),
+        ("per-connection token isolation",
+         test_per_connection_token_isolation),
+        ("active-turn tailer survives demand churn",
+         test_active_turn_tailer_survives_demand_churn),
     ]
-    passed = sum(results)
-    print(f"\n{passed}/{len(results)} checks passed")
-    return 0 if passed == len(results) else 1
+    passed = 0
+    for label, fn in checks:
+        try:
+            await fn()
+            passed += 1
+        except AssertionError as exc:
+            print(f"  {FAIL} {label}: {exc}")
+        except Exception:  # noqa: BLE001
+            import traceback
+            print(f"  {FAIL} {label} (unexpected error)")
+            traceback.print_exc()
+    print(f"\n{passed}/{len(checks)} checks passed")
+    return 0 if passed == len(checks) else 1
 
 
 if __name__ == "__main__":

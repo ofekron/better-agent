@@ -19,6 +19,7 @@ from fastapi import Response
 
 import extension_store
 import perf
+from hot_path_executor import HotPathExecutor, session_list_path
 import session_search
 import session_store
 import user_input_store
@@ -234,7 +235,70 @@ def _json_response_maybe_gzip(
     )
 
 
-def _sessions_list_response_maybe_cache(
+def _serialize_response(
+    value: dict,
+    accept_encoding: str,
+    *,
+    perf_prefix: str = "sessions.list",
+) -> tuple[bytes, Response]:
+    with perf.timed(f"{perf_prefix}.response_serialize"):
+        content = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    return content, _json_response_maybe_gzip(
+        content, accept_encoding, perf_prefix=perf_prefix,
+    )
+
+
+async def json_response_off_loop(
+    value: dict,
+    accept_encoding: str,
+    *,
+    executor: HotPathExecutor = session_list_path,
+    perf_prefix: str = "sessions.list",
+) -> Response:
+    """Serialize and gzip-negotiate a JSON payload on a worker thread.
+
+    Response serialization of large payloads is CPU-bound and must never
+    run on the event-loop thread. Serialization overlaps event-loop
+    execution: callers must hand over a payload whose nested values are
+    owned or replaced wholesale, never mutated in place, while this runs.
+    """
+    _content, response = await executor.run(
+        f"{perf_prefix}.response_serialize.worker",
+        _serialize_response,
+        value,
+        accept_encoding,
+        perf_prefix=perf_prefix,
+    )
+    return response
+
+
+async def gzip_response_off_loop(
+    content: bytes,
+    accept_encoding: str,
+    *,
+    executor: HotPathExecutor = session_list_path,
+    perf_prefix: str = "sessions.list",
+) -> Response:
+    """Gzip-negotiate already-serialized JSON bytes on a worker thread."""
+    if len(content) < 1024 or not _accepts_gzip(accept_encoding):
+        return _json_response_maybe_gzip(
+            content, accept_encoding, perf_prefix=perf_prefix,
+        )
+    return await executor.run(
+        f"{perf_prefix}.response_gzip.worker",
+        _json_response_maybe_gzip,
+        content,
+        accept_encoding,
+        perf_prefix=perf_prefix,
+    )
+
+
+async def _sessions_list_response_maybe_cache(
     cache_key: tuple,
     value: dict,
     *,
@@ -242,16 +306,8 @@ def _sessions_list_response_maybe_cache(
     accept_encoding: str,
 ) -> Response:
     if cache_response:
-        return _sessions_list_cache_put(cache_key, value, accept_encoding)
-    return _json_response_maybe_gzip(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8"),
-        accept_encoding,
-    )
+        return await _sessions_list_cache_put(cache_key, value, accept_encoding)
+    return await json_response_off_loop(value, accept_encoding)
 
 
 def _sessions_snapshot_payload(value: dict) -> dict:
@@ -275,7 +331,7 @@ def _sessions_list_transient_state_version() -> tuple[int, int, int]:
     )
 
 
-def _sessions_list_cache_get(key: tuple, accept_encoding: str) -> Response | None:
+async def _sessions_list_cache_get(key: tuple, accept_encoding: str) -> Response | None:
     cached = _sessions_list_response_cache.get(key)
     if cached is None:
         return None
@@ -285,35 +341,39 @@ def _sessions_list_cache_get(key: tuple, accept_encoding: str) -> Response | Non
     if cached[2] != _sessions_list_transient_state_version():
         _sessions_list_response_cache.pop(key, None)
         return None
-    return _json_response_maybe_gzip(cached[1], accept_encoding)
+    return await gzip_response_off_loop(cached[1], accept_encoding)
 
 
-def _sessions_list_cache_put(
+async def _sessions_list_cache_put(
     key: tuple,
     value: dict,
     accept_encoding: str,
 ) -> Response:
+    # Version captured before the worker hop: `value` reflects state from
+    # before the await, so stamping a post-await version could serve stale
+    # data as fresh. The pre-await stamp can only over-invalidate.
+    state_version = _sessions_list_transient_state_version()
+    content, response = await session_list_path.run(
+        "sessions.list.response_serialize.worker",
+        _serialize_response,
+        value,
+        accept_encoding,
+    )
     if len(_sessions_list_response_cache) >= 64:
         oldest = min(
             _sessions_list_response_cache,
             key=lambda item: _sessions_list_response_cache[item][0],
         )
         _sessions_list_response_cache.pop(oldest, None)
-    content = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
     _sessions_list_response_cache[key] = (
         time.monotonic(),
         content,
-        _sessions_list_transient_state_version(),
+        state_version,
     )
-    return _json_response_maybe_gzip(content, accept_encoding)
+    return response
 
 
-def _session_summaries_cache_get(
+async def _session_summaries_cache_get(
     key: tuple,
     accept_encoding: str,
 ) -> Response | None:
@@ -323,32 +383,32 @@ def _session_summaries_cache_get(
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _session_summaries_response_cache.pop(key, None)
         return None
-    return _json_response_maybe_gzip(cached[1], accept_encoding)
+    return await gzip_response_off_loop(cached[1], accept_encoding)
 
 
-def _session_summaries_cache_put(
+async def _session_summaries_cache_put(
     key: tuple,
     value: dict,
     accept_encoding: str,
 ) -> Response:
+    content, response = await session_list_path.run(
+        "sessions.list.response_serialize.worker",
+        _serialize_response,
+        value,
+        accept_encoding,
+    )
     if len(_session_summaries_response_cache) >= 64:
         oldest = min(
             _session_summaries_response_cache,
             key=lambda item: _session_summaries_response_cache[item][0],
         )
         _session_summaries_response_cache.pop(oldest, None)
-    content = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
     _session_summaries_response_cache[key] = (
         time.monotonic(),
         content,
         0,
     )
-    return _json_response_maybe_gzip(content, accept_encoding)
+    return response
 
 
 def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> tuple[int, int | None] | int:

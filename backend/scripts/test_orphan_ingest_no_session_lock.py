@@ -70,7 +70,7 @@ def _enriched(uid: str, text: str) -> dict:
     }
 
 
-async def test_a_orphan_ingest_does_not_call_get_lite() -> bool:
+async def test_a_orphan_ingest_does_not_call_get_lite() -> None:
     sess = session_manager.create(
         name="orphan-nolock", model="claude-fable-5", cwd="/tmp",
         orchestration_mode="native", source="cli",
@@ -94,20 +94,28 @@ async def test_a_orphan_ingest_does_not_call_get_lite() -> bool:
     finally:
         session_manager.get_lite = original  # type: ignore[assignment]
 
-    ok = calls["n"] == 0
-    print(f"{PASS if ok else FAIL} A: orphan ingest skips get_lite "
-          f"(calls={calls['n']})")
-    return ok
+    assert calls["n"] == 0, (
+        f"orphan ingest must not call session_manager.get_lite "
+        f"(calls={calls['n']}) — it takes the per-root lock and freezes "
+        f"the main event loop on startup run-recovery"
+    )
 
 
 async def _run() -> int:
-    results = [
-        await test_a_orphan_ingest_does_not_call_get_lite(),
-    ]
-    total = len(results)
-    passed = sum(1 for r in results if r)
-    print(f"\n{passed}/{total} subtests passed")
-    return 0 if passed == total else 1
+    failed = 0
+    try:
+        await test_a_orphan_ingest_does_not_call_get_lite()
+    except AssertionError as exc:
+        failed += 1
+        print(f"{FAIL} A: orphan ingest skips get_lite — {exc}")
+    except Exception:
+        failed += 1
+        import traceback
+        traceback.print_exc()
+    else:
+        print(f"{PASS} A: orphan ingest skips get_lite (calls=0)")
+    print(f"\n{1 - failed}/1 subtests passed")
+    return 1 if failed else 0
 
 
 def main() -> int:

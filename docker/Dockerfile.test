@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Better Agent — canonical backend Python test-runner image.
 #
 # This is the ONLY sanctioned way to run backend/scripts pytest tests: it
@@ -10,7 +9,9 @@
 #
 # Unlike docker/Dockerfile (the real, runnable app image) this never builds
 # the frontend or installs a provider CLI — backend/scripts tests don't need
-# either (see backend/pyproject.toml's testpaths=["scripts"]).
+# either (see backend/pyproject.toml's testpaths=["scripts"]). It DOES
+# install the nodejs binary: test_cap_sync.py spawns `node` to exercise
+# frontend/scripts/cap-sync.mjs, which needs only node: builtins.
 #
 # Python version matches CI (.github/workflows/installation-mode-parity.yml
 # uses actions/setup-python@v5 with "3.13") and docker/Dockerfile, not
@@ -37,11 +38,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # git: some backend paths shell out to it (repo introspection).
 # build-essential + libffi-dev: argon2-cffi's cffi backend if no wheel
 #   matches this base image's glibc/arch (same reasoning as docker/Dockerfile).
+# nodejs: backend/scripts/test_cap_sync.py spawns `node` to exercise
+#   frontend/scripts/cap-sync.mjs (withMobilePackageJson /
+#   assertNativeRunnerProjection). cap-sync.mjs uses only node: builtins,
+#   so the binary alone suffices — no frontend build, no node_modules.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git \
       build-essential \
       libffi-dev \
+      nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo
@@ -60,9 +66,11 @@ COPY backend/requirements.txt backend/requirements-claude.txt backend/requiremen
 # BuildKit cache mount: persists pip's download/wheel cache across image
 # rebuilds (keyed by this layer, so it survives even when requirements*.txt
 # changes invalidate the layer itself) instead of --no-cache-dir discarding
-# it every time. Requires `# syntax=docker/dockerfile:1` above and BuildKit
-# enabled on the daemon (default; scripts/run-backend-tests.sh also sets
-# DOCKER_BUILDKIT=1 explicitly so this works even on older daemons).
+# it every time. Served by BuildKit's builtin dockerfile frontend — no
+# `# syntax=` remote-frontend pin, so builds never depend on a Docker Hub
+# fetch of docker/dockerfile (scripts/run-backend-tests.sh builds via the
+# buildx docker-container driver, whose bundled frontend supports cache
+# mounts natively; it also sets DOCKER_BUILDKIT=1 for older daemons).
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd backend \
  && pip install -r requirements.txt -r requirements-claude.txt -r requirements-test.txt
@@ -79,10 +87,16 @@ ENV BETTER_AGENT_HOME=/root/.better-agent-test-home
 
 WORKDIR /repo/backend
 
+# Wraps `python -m pytest` to fix up bind-mount output-artifact ownership
+# after the run (junit XML, --coverage dir) — see the script's own header
+# for why native Linux Docker needs this and Docker Desktop doesn't.
+COPY docker/entrypoint-test.sh /usr/local/bin/entrypoint-test.sh
+RUN chmod +x /usr/local/bin/entrypoint-test.sh
+
 # No RUN_LLM_TESTS here — that gate stays unset by default so live-LLM tests
 # self-skip; scripts/run-backend-tests.sh only forwards it if the caller's
 # shell already had it set (i.e. the user already approved that run).
-ENTRYPOINT ["python", "-m", "pytest"]
+ENTRYPOINT ["/usr/local/bin/entrypoint-test.sh"]
 CMD []
 
 # ---- full: deps + baked-in source, for the --ref (pinned-commit) path ----

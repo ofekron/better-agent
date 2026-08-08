@@ -38,12 +38,12 @@ import models  # noqa: E402
 import provider_setup  # noqa: E402
 
 
-def test_registry_resolves_copilot() -> bool:
+def test_registry_resolves_copilot() -> None:
     cls = _resolve_class("copilot")
-    return cls is provider_copilot.CopilotProvider and cls.KIND == "copilot"
+    assert cls is provider_copilot.CopilotProvider and cls.KIND == "copilot"
 
 
-def test_capability_matrix() -> bool:
+def test_capability_matrix() -> None:
     cls = _resolve_class("copilot")
     expected = {
         "supports_fork": False,
@@ -53,43 +53,38 @@ def test_capability_matrix() -> bool:
         "supports_native_subagents": False,
         "supports_reasoning_effort": False,
     }
-    return all(getattr(cls, k) is v for k, v in expected.items())
+    assert all(getattr(cls, k) is v for k, v in expected.items())
 
 
-def test_build_env_clears_anthropic() -> bool:
+def test_build_env_clears_anthropic() -> None:
     inst = provider_copilot.CopilotProvider({"id": "c1", "kind": "copilot", "mode": "subscription"})
     env = inst.build_env()
-    return not any(k in env for k in (
+    assert not any(k in env for k in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
     ))
 
 
-def test_models_static_seed() -> bool:
+def test_models_static_seed() -> None:
     seeded = models._static_cold_start({"kind": "copilot"})
-    return bool(seeded) and "auto" in seeded and "gpt-5.4" in seeded
+    assert seeded and "auto" in seeded and "gpt-5.4" in seeded
 
 
-def test_models_refresh_dispatch() -> bool:
+def test_models_refresh_dispatch() -> None:
     fetcher = models._resolve_refresh_fetch({"kind": "copilot"})
-    return callable(fetcher)
+    assert callable(fetcher)
 
 
-def test_models_fetch_parses_real_cli() -> bool:
+def test_models_fetch_parses_real_cli() -> None:
     # Only assert when the copilot CLI is installed on PATH; otherwise skip
     # (the static seed covers cold-start).
     if not shutil.which("copilot"):
-        return True
+        return
     parsed = provider_copilot.fetch_copilot_models()
-    return (
-        bool(parsed)
-        and "auto" in parsed
-        and "gpt-5.4" in parsed
-        and len(parsed) >= 5
-    )
+    assert parsed and "auto" in parsed and "gpt-5.4" in parsed and len(parsed) >= 5
 
 
-def test_parses_config_help_models() -> bool:
+def test_parses_config_help_models() -> None:
     sample = """
 Configuration Settings:
 
@@ -101,7 +96,7 @@ Configuration Settings:
 
   `contextTier`: context window tier for tiered-pricing models.
 """
-    return provider_copilot._parse_copilot_config_models(sample) == [
+    assert provider_copilot._parse_copilot_config_models(sample) == [
         "auto",
         "claude-sonnet-4.6",
         "gpt-5.4",
@@ -111,29 +106,28 @@ Configuration Settings:
     ]
 
 
-def test_parses_legacy_help_choices() -> bool:
+def test_parses_legacy_help_choices() -> None:
     sample = """
 Options:
   --model <model>  Set the AI model (choices: "gpt-5.4", "claude-sonnet-4.6", "gemma-3")
 """
-    return provider_copilot._parse_copilot_help_choices(sample) == [
+    assert provider_copilot._parse_copilot_help_choices(sample) == [
         "auto",
         "gpt-5.4",
         "claude-sonnet-4.6",
     ]
 
 
-def test_retired_model_fallbacks_to_auto() -> bool:
-    return provider_copilot._normalize_copilot_model("gpt-5.2-codex") == "auto"
+def test_retired_model_fallbacks_to_auto() -> None:
+    assert provider_copilot._normalize_copilot_model("gpt-5.2-codex") == "auto"
 
 
-def test_setup_installer() -> bool:
+def test_setup_installer() -> None:
     kinds = provider_setup.supported_provider_kinds()
-    if "copilot" not in kinds:
-        return False
+    assert "copilot" in kinds
     inst = provider_setup.installer_for("copilot")
     expected_prefix = ("winget", "install") if sys.platform == "win32" else ("brew", "install")
-    return (
+    assert (
         inst.kind == "copilot"
         and inst.command == "copilot"
         and inst.verify_argv == ("copilot", "--version")
@@ -141,7 +135,7 @@ def test_setup_installer() -> bool:
     )
 
 
-def test_runner_normalizes_event_types() -> bool:
+def test_runner_normalizes_event_types() -> None:
     sid = "000223ae-8f80-472a-84ad-f6951f71887f"
     cases = [
         (
@@ -169,49 +163,40 @@ def test_runner_normalizes_event_types() -> bool:
         out = runner_copilot.normalize_copilot_event(
             event, session_id=sid, parent_uuid=sid, model="gpt-5.4",
         )
-        if out is None or out["type"] != "agent_message":
-            return False
+        assert out is not None and out["type"] == "agent_message"
         data = out["data"]
-        if data["type"] != role or data["parentUuid"] != sid:
-            return False
+        assert data["type"] == role and data["parentUuid"] == sid
         block = data["message"]["content"][0]
-        if block["type"] != block_type:
-            return False
-        if block_type == "text" and block["text"] != payload:
-            return False
-        if block_type == "tool_use" and (block["name"] != payload or block["id"] != "call_1"):
-            return False
-        if block_type == "tool_result" and (block["content"] != payload or block["tool_use_id"] != "call_1"):
-            return False
-    return True
+        assert block["type"] == block_type
+        assert not (block_type == "text" and block["text"] != payload)
+        assert not (block_type == "tool_use" and (block["name"] != payload or block["id"] != "call_1"))
+        assert not (block_type == "tool_result" and (block["content"] != payload or block["tool_use_id"] != "call_1"))
 
 
-def test_runner_normalizer_skips_bookkeeping() -> bool:
+def test_runner_normalizer_skips_bookkeeping() -> None:
     for etype in ("session.start", "assistant.turn_start", "assistant.turn_end", "session.truncation"):
         out = runner_copilot.normalize_copilot_event(
             {"type": etype, "data": {}, "id": "x", "timestamp": "t"},
             session_id="s", parent_uuid="s", model="copilot",
         )
-        if out is not None:
-            return False
-    return True
+        assert out is None
 
 
-def test_runner_uuid_is_deterministic() -> bool:
+def test_runner_uuid_is_deterministic() -> None:
     event = {"type": "assistant.message", "data": {"content": "x", "messageId": "m"},
              "id": "evt-1", "timestamp": "t"}
     a = runner_copilot.normalize_copilot_event(
         event, session_id="s1", parent_uuid="s1", model="copilot")
     b = runner_copilot.normalize_copilot_event(
         event, session_id="s1", parent_uuid="s1", model="copilot")
-    return a["data"]["uuid"] == b["data"]["uuid"]
+    assert a["data"]["uuid"] == b["data"]["uuid"]
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message() -> None:
     # The label contract lives in prompt_heading_for_source (capability_contexts).
     # Assert it there directly — prepend_capability_context is integrations-gated
     # and short-circuits in the isolated test home, so it cannot prove the label.
-    return (
+    assert (
         prompt_heading_for_source("mssg") == "Message"
         and prompt_heading_for_source("team_ask") == "Ask"
         and prompt_heading_for_source("user") == "Injected prompt (user)"
@@ -241,10 +226,13 @@ def main() -> int:
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except AssertionError:
                 failures.append(name)
+                print(f"FAIL: {name}")
+                continue
+            print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:

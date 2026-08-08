@@ -215,7 +215,6 @@ _MARKETPLACE_PREVIEW_TTL_SECONDS = 5 * 60.0
 _MAX_MARKETPLACE_PREVIEWS = 256
 _MARKETPLACE_PREVIEWS: dict[str, tuple[float, str, dict[str, Any]]] = {}
 _MARKETPLACE_PREVIEWS_LOCK = threading.Lock()
-_required_artifact_update_checked: set[str] = set()
 
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
@@ -2435,6 +2434,30 @@ def _validate_native_mcp_permission(value: Any) -> dict[str, list[str]]:
     return validated
 
 
+_AI_RANK_KIND_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _validate_ai_rank_kinds_permission(value: Any) -> dict[str, str]:
+    """permissions.ai_rank_kinds declares, per ranking domain this extension
+    exposes to the generic `/api/internal/ai-rank` route, the internal-LLM
+    task key that resolves its model -- e.g. {"cards": "agent_board_card_search"}.
+    This is the single source of truth for BOTH concerns: which kinds the
+    extension may call `ai_rank.rank()` for, and which task key config_store
+    resolves for that kind (no separate `internal_llm_tasks` entry needed)."""
+    if not isinstance(value, dict):
+        raise ExtensionError("permissions.ai_rank_kinds must be an object of kind -> task_key")
+    validated: dict[str, str] = {}
+    for kind, task_key in value.items():
+        if not isinstance(kind, str) or not _AI_RANK_KIND_RE.fullmatch(kind):
+            raise ExtensionError(f"permissions.ai_rank_kinds has an invalid kind: {kind!r}")
+        if not isinstance(task_key, str) or not _AI_RANK_KIND_RE.fullmatch(task_key):
+            raise ExtensionError(
+                f"permissions.ai_rank_kinds.{kind} must be a valid task key string"
+            )
+        validated[kind] = task_key
+    return validated
+
+
 def _validate_permissions(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -2460,6 +2483,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "daemons",
         "native_mcp",
         "internal_llm_tasks",
+        "ai_rank_kinds",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -2475,6 +2499,9 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
             continue
         if key == "native_mcp":
             permissions[key] = _validate_native_mcp_permission(item)
+            continue
+        if key == "ai_rank_kinds":
+            permissions[key] = _validate_ai_rank_kinds_permission(item)
             continue
         if key == "daemons":
             if item not in ("backend", "supervisor"):
@@ -4134,22 +4161,6 @@ def _install_required_marketplace_from_ofekdev(extension_id: str) -> dict[str, A
         persist=False,
     )
     return record
-
-
-def _required_artifact_update_needed(extension_id: str, record: dict[str, Any]) -> bool:
-    if extension_id in _required_artifact_update_checked:
-        return False
-    _required_artifact_update_checked.add(extension_id)
-    source = record.get("source") or {}
-    if source.get("type") != "better_agent_signed":
-        return False
-    installed_sha = str(source.get("artifact_sha256") or source.get("commit_sha") or "").strip().lower()
-    try:
-        metadata = _fetch_json(_required_marketplace_metadata_url(extension_id))
-    except ExtensionError:
-        return False
-    published_sha = str(metadata.get("artifact_sha256") or "").strip().lower()
-    return bool(published_sha and published_sha != installed_sha)
 
 
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
@@ -8428,19 +8439,50 @@ def extension_config(extension_id: str) -> dict[str, Any]:
 def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
-    return _extension_internal_llm_tasks(
+    tasks = _extension_internal_llm_tasks(
         manifest,
         _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()),
     )
+    for key in _declared_ai_rank_task_keys(manifest):
+        if key not in tasks:
+            tasks.append(key)
+    return tasks
 
 
 def extension_provisioned_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
+    """Task keys this extension may pass as `inline_spec.task_key` to
+    `/api/internal/provisioned-sessions` (an ARBITRARY-prompt primitive).
+    Deliberately excludes `permissions.ai_rank_kinds` task keys: declaring a
+    kind for the fixed-prompt `/api/internal/ai-rank` route must not also
+    grant arbitrary-prompt inline_spec dispatch under that same task key --
+    that would silently widen the extension's capability beyond what it
+    declared (least privilege)."""
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
     return _extension_internal_llm_tasks(
         manifest,
         _BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()),
     )
+
+
+def extension_ai_rank_kinds(record: dict[str, Any]) -> dict[str, str]:
+    """`{kind: task_key}` this extension declared via
+    ``permissions.ai_rank_kinds`` -- the structural source of truth gating
+    `/api/internal/ai-rank`: an extension may rank only a kind it declared
+    here, and the task_key used to resolve the internal LLM for that kind
+    comes from this same declaration."""
+    manifest = record.get("manifest") or {}
+    return dict((manifest.get("permissions") or {}).get("ai_rank_kinds") or {})
+
+
+def _declared_ai_rank_task_keys(manifest: dict[str, Any]) -> list[str]:
+    declared = (manifest.get("permissions") or {}).get("ai_rank_kinds") or {}
+    tasks: list[str] = []
+    for task_key in declared.values():
+        key = str(task_key).strip()
+        if key and key not in tasks:
+            tasks.append(key)
+    return tasks
 
 
 def _declared_internal_llm_tasks(manifest: dict[str, Any]) -> list[str]:
@@ -8489,7 +8531,11 @@ def all_internal_llm_task_keys() -> list[str]:
             if key not in keys:
                 keys.append(key)
     for record in list_extensions():
-        for key in _declared_internal_llm_tasks(record.get("manifest") or {}):
+        manifest = record.get("manifest") or {}
+        for key in _declared_internal_llm_tasks(manifest):
+            if key not in keys:
+                keys.append(key)
+        for key in _declared_ai_rank_task_keys(manifest):
             if key not in keys:
                 keys.append(key)
     return keys
@@ -8506,7 +8552,9 @@ def extension_internal_llm_task_keys() -> set[str]:
     for keys in _CORE_ROLE_INTERNAL_LLM_TASKS.values():
         task_keys.update(keys)
     for record in list_extensions():
-        task_keys.update(_declared_internal_llm_tasks(record.get("manifest") or {}))
+        manifest = record.get("manifest") or {}
+        task_keys.update(_declared_internal_llm_tasks(manifest))
+        task_keys.update(_declared_ai_rank_task_keys(manifest))
     return task_keys
 
 

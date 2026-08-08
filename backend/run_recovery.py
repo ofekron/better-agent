@@ -2177,11 +2177,6 @@ def _append_reconciled_marker_rows(root: Path, rows: list[dict]) -> None:
     for_path(reconciled_marker_index_path(root)).append_many(rows)
 
 
-def _windows_path_is_reparse(st: os.stat_result) -> bool:
-    attributes = int(getattr(st, "st_file_attributes", 0) or 0)
-    return bool(attributes & int(getattr(__import__("stat"), "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
-
-
 def _touch_reconciled_windows(
     run_id: str, desc: Optional[dict], root: Path, run_dir: Path,
 ) -> bool:

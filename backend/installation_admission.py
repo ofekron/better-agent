@@ -25,7 +25,6 @@ _BOOTSTRAP_PREFIXES = (
     "/api/desktop",
     "/api/admin/restart",
     "/api/logs/frontend",
-    "/api/startup_tasks",
     # The background work manager reports the boot work itself, so its
     # snapshot has to be reachable in exactly the degraded state where
     # /ws/chat is closed and most capabilities are unavailable.

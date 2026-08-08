@@ -318,7 +318,7 @@ def _task_create_result(uuid: str, tool_use_id: str, task_id: str,
 
 # ─── tests ───────────────────────────────────────────────────────
 
-def test_claude_todowrite_first_call_sets_list() -> bool:
+def test_claude_todowrite_first_call_sets_list() -> None:
     """Claude's TodoWrite carries the entire todo list on every call.
     First call populates current_todos (UNION with empty = REPLACE)."""
     sid, msg = _mk_session("native")
@@ -333,13 +333,10 @@ def test_claude_todowrite_first_call_sets_list() -> bool:
         {"content": "step 1", "status": "in_progress", "activeForm": "Doing 1"},
         {"content": "step 2", "status": "pending", "activeForm": "Doing 2"},
     ]
-    if got != expected:
-        print(f"  expected {expected}, got {got}")
-        return False
-    return True
+    assert not (got != expected), f"  expected {expected}, got {got}"
 
 
-def test_claude_todowrite_union_keeps_completed_across_phases() -> bool:
+def test_claude_todowrite_union_keeps_completed_across_phases() -> None:
     """Core UNION-merge scenario: Claude finishes phase 1 (A, B
     completed) and starts phase 2 (C, D). With REPLACE, A and B would
     be lost. With UNION, all four items persist."""
@@ -358,9 +355,7 @@ def test_claude_todowrite_union_keeps_completed_across_phases() -> bool:
     ]
     _apply(strategy, sid, msg, _claude_todowrite_native("u2", phase2), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 4:
-        print(f"  expected 4 items, got {len(got)}: {got}")
-        return False
+    assert not (len(got) != 4), f"  expected 4 items, got {len(got)}: {got}"
     contents = [t["content"] for t in got]
     if contents != [
         "Phase1: setup project", "Phase1: write tests",
@@ -369,13 +364,10 @@ def test_claude_todowrite_union_keeps_completed_across_phases() -> bool:
         print(f"  wrong contents: {contents}")
         return False
     statuses = [t["status"] for t in got]
-    if statuses != ["completed", "completed", "in_progress", "pending"]:
-        print(f"  wrong statuses: {statuses}")
-        return False
-    return True
+    assert not (statuses != ["completed", "completed", "in_progress", "pending"]), f"  wrong statuses: {statuses}"
 
 
-def test_claude_two_sequential_todowrites_union_merge() -> bool:
+def test_claude_two_sequential_todowrites_union_merge() -> None:
     """Sample-confirmed (real session data): TodoWrite #2 reposts the
     whole list with an updated status. UNION-merge updates A in place
     and appends B — items from #1 are never lost."""
@@ -395,10 +387,9 @@ def test_claude_two_sequential_todowrites_union_merge() -> bool:
     ]:
         print(f"  got {got}")
         return False
-    return True
 
 
-def test_extractor_purity_does_not_mutate_current() -> bool:
+def test_extractor_purity_does_not_mutate_current() -> None:
     """Locked invariant: extractor MUST NOT mutate `current` or its
     items. Callers pass shallow-copy snapshots and expect them intact."""
     current = [{
@@ -410,13 +401,10 @@ def test_extractor_purity_does_not_mutate_current() -> bool:
         {"content": "new", "status": "in_progress", "activeForm": "new"},
     ])
     extract_todos_from_normalized(ev, current)
-    if current != snapshot:
-        print(f"  extractor mutated current: {current} != {snapshot}")
-        return False
-    return True
+    assert not (current != snapshot), f"  extractor mutated current: {current} != {snapshot}"
 
 
-def test_worker_event_todowrite_does_not_touch_session_todos() -> bool:
+def test_worker_event_todowrite_does_not_touch_session_todos() -> None:
     """`worker_event`-wrapped TodoWrite belongs to the worker panel's
     own events, not the session-level current_todos. The
     worker_event branch early-returns in apply_event BEFORE the
@@ -433,13 +421,10 @@ def test_worker_event_todowrite_does_not_touch_session_todos() -> bool:
     }
     _apply(strategy, sid, msg, worker_ev, source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
-    if got:
-        print(f"  expected empty current_todos, got {got}")
-        return False
-    return True
+    assert not (got), f"  expected empty current_todos, got {got}"
 
 
-def test_interleaved_manager_and_agent_message_accumulates() -> bool:
+def test_interleaved_manager_and_agent_message_accumulates() -> None:
     """Interleaved manager_event-wrapped and raw agent_message
     TodoWrites in the same session both flow through apply_event —
     UNION-merge keeps both items regardless of stream."""
@@ -452,17 +437,12 @@ def test_interleaved_manager_and_agent_message_accumulates() -> bool:
     _apply(strategy, sid, msg,
            _claude_todowrite_native("u2", second, "tu_n"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 2:
-        print(f"  expected 2 items, got {len(got)}: {got}")
-        return False
+    assert not (len(got) != 2), f"  expected 2 items, got {len(got)}: {got}"
     contents = [t["content"] for t in got]
-    if contents != ["from manager", "from raw"]:
-        print(f"  wrong contents: {contents}")
-        return False
-    return True
+    assert not (contents != ["from manager", "from raw"]), f"  wrong contents: {contents}"
 
 
-def test_convergence_invariant_live_equals_recovery() -> bool:
+def test_convergence_invariant_live_equals_recovery() -> None:
     """CLAUDE.md convergence invariant: the same event sequence
     applied via source_is_provider_stream=True and via source_is_provider_stream=False produces byte-equal
     `current_todos`. Locks scenario 1 == scenario 3 for the new
@@ -492,13 +472,10 @@ def test_convergence_invariant_live_equals_recovery() -> bool:
                source_is_provider_stream=False)
     recovery_state = session_manager.get(sid_rec).get("current_todos") or []
 
-    if live_state != recovery_state:
-        print(f"  divergence: source_is_provider_stream={live_state} recovery={recovery_state}")
-        return False
-    return True
+    assert not (live_state != recovery_state), f"  divergence: source_is_provider_stream={live_state} recovery={recovery_state}"
 
 
-def test_equality_skip_suppresses_redundant_fires() -> bool:
+def test_equality_skip_suppresses_redundant_fires() -> None:
     """The hook exits early when the extracted list equals the current state — no `todos_updated`
     fire on a no-op.
 
@@ -535,18 +512,15 @@ def test_equality_skip_suppresses_redundant_fires() -> bool:
             _claude_todowrite_native("u2", todos, tool_id="tu2"),
             source_is_provider_stream=True,
         )
-        if len(fires) != first_count:
-            print(
-                f"  expected hook precheck to suppress fire on equal "
-                f"list, fires went {first_count} -> {len(fires)}",
-            )
-            return False
+        assert not (len(fires) != first_count), (
+            f"  expected hook precheck to suppress fire on equal "
+            f"list, fires went {first_count} -> {len(fires)}"
+        )
     finally:
         session_manager._listeners.remove(listener)
-    return True
 
 
-def test_fork_derives_current_todos_from_copied_messages() -> bool:
+def test_fork_derives_current_todos_from_copied_messages() -> None:
     """Forks re-derive `current_todos` from the COPIED messages'
     events through the extractor — NOT inherit the parent's running
     state (which may reflect events past the fork point) and NOT
@@ -572,13 +546,10 @@ def test_fork_derives_current_todos_from_copied_messages() -> bool:
         {"content": "A", "status": "completed", "activeForm": "a"},
         {"content": "B", "status": "in_progress", "activeForm": "b"},
     ]
-    if derived != expected:
-        print(f"  expected {expected}, got {derived}")
-        return False
-    return True
+    assert not (derived != expected), f"  expected {expected}, got {derived}"
 
 
-def test_fork_skip_worker_panel_events() -> bool:
+def test_fork_skip_worker_panel_events() -> None:
     """`derive_current_todos` walks the flat `msg.events` ONLY —
     worker panel events under `msg.workers[*].events` are intentionally
     NOT walked (matches the apply_event worker_event early-return)."""
@@ -593,10 +564,7 @@ def test_fork_skip_worker_panel_events() -> bool:
         }],
     }]
     derived = derive_current_todos(messages)
-    if derived != []:
-        print(f"  expected empty, got {derived}")
-        return False
-    return True
+    assert not (derived != []), f"  expected empty, got {derived}"
 
 
 def test_hydration_loads_current_todos_from_events_jsonl() -> bool:
@@ -813,15 +781,13 @@ def test_hydration_reuses_todo_projection_cache_when_events_unchanged() -> bool:
     return True
 
 
-def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
+def test_cli_prompt_includes_full_open_session_todo_state() -> None:
     """The helper injects full todo/task state while anything is open."""
     from turn_helpers import _append_todo_reminder
 
     user_text = "do the thing"
 
-    if _append_todo_reminder(user_text, {"current_todos": [], "current_tasks": []}) != user_text:
-        print("  empty todo list changed prompt")
-        return False
+    assert not (_append_todo_reminder(user_text, {"current_todos": [], "current_tasks": []}) != user_text), "  empty todo list changed prompt"
 
     sess_with = {
         "current_todos": [
@@ -836,21 +802,11 @@ def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
         ],
     }
     out = _append_todo_reminder(user_text, sess_with)
-    if not out.startswith(user_text):
-        print(f"  user text not preserved: {out!r}")
-        return False
-    if "<bc-todo-reminder>" not in out or "</bc-todo-reminder>" not in out:
-        print(f"  todo tags missing: {out!r}")
-        return False
-    if "X &lt;unsafe&gt;" not in out or "Still pending" not in out or "TaskCreate work" not in out:
-        print(f"  open todo/task content missing or unescaped: {out!r}")
-        return False
-    if "Already done" not in out:
-        print(f"  completed session work missing from reminder: {out!r}")
-        return False
-    if out.count("Duplicate shared") != 1 or "- [completed] Duplicate shared" not in out:
-        print(f"  duplicate todo/task content not deduped with completed status: {out!r}")
-        return False
+    assert not (not out.startswith(user_text)), f"  user text not preserved: {out!r}"
+    assert not ("<bc-todo-reminder>" not in out or "</bc-todo-reminder>" not in out), f"  todo tags missing: {out!r}"
+    assert not ("X &lt;unsafe&gt;" not in out or "Still pending" not in out or "TaskCreate work" not in out), f"  open todo/task content missing or unescaped: {out!r}"
+    assert not ("Already done" not in out), f"  completed session work missing from reminder: {out!r}"
+    assert not (out.count("Duplicate shared") != 1 or "- [completed] Duplicate shared" not in out), f"  duplicate todo/task content not deduped with completed status: {out!r}"
 
     all_done = {
         "current_todos": [
@@ -860,14 +816,11 @@ def test_cli_prompt_includes_full_open_session_todo_state() -> bool:
             {"content": "Task already done", "status": "completed"},
         ],
     }
-    if _append_todo_reminder(user_text, all_done) != user_text:
-        print("  all-completed todo/task list changed prompt")
-        return False
-
-    return True
+    assert not (_append_todo_reminder(user_text, all_done) != user_text), "  all-completed todo/task list changed prompt"
 
 
-def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool:
+
+def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> None:
     sid, msg = _mk_session("native")
     session_manager.set_current_todos(sid, [
         {"content": "Check project orientation", "status": "in_progress", "activeForm": None},
@@ -915,32 +868,21 @@ def test_all_tasks_done_marker_completes_todos_and_suppresses_reminder() -> bool
             {"content": "Cold-load task", "status": "pending", "activeForm": None},
         ],
     )
-    if [item.get("status") for item in projected.get("current_todos") or []] != ["completed"]:
-        print(f"  cold-load projection did not complete todos: {projected}")
-        return False
-    if [item.get("status") for item in projected.get("current_tasks") or []] != ["completed"]:
-        print(f"  cold-load projection did not complete tasks: {projected}")
-        return False
+    assert not ([item.get("status") for item in projected.get("current_todos") or []] != ["completed"]), f"  cold-load projection did not complete todos: {projected}"
+    assert not ([item.get("status") for item in projected.get("current_tasks") or []] != ["completed"]), f"  cold-load projection did not complete tasks: {projected}"
 
     _apply(strategy, sid, msg, done_event, source_is_provider_stream=True)
 
     got = session_manager.get(sid).get("current_todos") or []
-    if [item.get("status") for item in got] != ["completed", "completed"]:
-        print(f"  expected marker to complete todos, got {got}")
-        return False
+    assert not ([item.get("status") for item in got] != ["completed", "completed"]), f"  expected marker to complete todos, got {got}"
     got_tasks = session_manager.get(sid).get("current_tasks") or []
-    if [item.get("status") for item in got_tasks] != ["completed"]:
-        print(f"  expected marker to complete tasks, got {got_tasks}")
-        return False
+    assert not ([item.get("status") for item in got_tasks] != ["completed"]), f"  expected marker to complete tasks, got {got_tasks}"
 
     from turn_helpers import _append_todo_reminder
-    if _append_todo_reminder("next prompt", session_manager.get(sid)) != "next prompt":
-        print("  completed marker did not suppress next todo reminder")
-        return False
-    return True
+    assert not (_append_todo_reminder("next prompt", session_manager.get(sid)) != "next prompt"), "  completed marker did not suppress next todo reminder"
 
 
-def test_run_turn_gate_covers_every_user_prompt() -> bool:
+def test_run_turn_gate_covers_every_user_prompt() -> None:
     """Runtime gate test: exercise the EXACT boolean expression at the
     `run_turn` inject site by extracting it from the source via AST.
     Every non-empty user prompt must pass through the helper regardless
@@ -980,9 +922,7 @@ def test_run_turn_gate_covers_every_user_prompt() -> bool:
                         break
                 if gate_test_src:
                     break
-    if not gate_test_src:
-        print("  could not locate the gate If around _append_todo_reminder")
-        return False
+    assert not (not gate_test_src), "  could not locate the gate If around _append_todo_reminder"
 
     # Evaluate the gate expression for each case.
     cases = [
@@ -998,16 +938,13 @@ def test_run_turn_gate_covers_every_user_prompt() -> bool:
             "prompt": p,
         }
         actual = bool(eval(gate_test_src, {}, ns))
-        if actual != expected:
-            print(
-                f"  gate({label}): expected {expected}, got {actual} — "
-                f"gate expression at injection site: {gate_test_src}"
-            )
-            return False
-    return True
+        assert not (actual != expected), (
+            f"  gate({label}): expected {expected}, got {actual} — "
+            f"gate expression at injection site: {gate_test_src}"
+        )
 
 
-def test_dispatch_supervisor_branch_passes_user_initiated() -> bool:
+def test_dispatch_supervisor_branch_passes_user_initiated() -> None:
     """`handle_prompt`'s `send_target=='supervisor'` branch calls
     `run_turn` directly (bypassing the native/manager handle_turn
     wrappers that set `user_initiated=True`). It MUST pass
@@ -1050,14 +987,12 @@ def test_dispatch_supervisor_branch_passes_user_initiated() -> bool:
                         ):
                             kws = {kw.arg: kw for kw in inner.keywords}
                             ui_kw = kws.get("user_initiated")
-                            if ui_kw is None:
-                                print(
-                                    "  supervisor branch's run_turn call "
-                                    "missing `user_initiated=` keyword — "
-                                    "the nudge is silently skipped for "
-                                    "every direct-supervisor user prompt."
-                                )
-                                return False
+                            assert not (ui_kw is None), (
+                                "  supervisor branch's run_turn call "
+                                "missing `user_initiated=` keyword — "
+                                "the nudge is silently skipped for "
+                                "every direct-supervisor user prompt."
+                            )
                             # Must be literal True.
                             if not (
                                 isinstance(ui_kw.value, ast.Constant)
@@ -1070,13 +1005,10 @@ def test_dispatch_supervisor_branch_passes_user_initiated() -> bool:
                                 )
                                 return False
                             found = True
-    if not found:
-        print("  could not locate the supervisor branch / run_turn call")
-        return False
-    return True
+    assert not (not found), "  could not locate the supervisor branch / run_turn call"
 
 
-def test_run_turn_actually_calls_append_todo_reminder() -> bool:
+def test_run_turn_actually_calls_append_todo_reminder() -> None:
     """Structural lock: `_append_todo_reminder` MUST be called from
     inside `TurnManager.run_turn`. Without this assertion,
     deleting the call line at the inject site would silently disable
@@ -1107,17 +1039,14 @@ def test_run_turn_actually_calls_append_todo_reminder() -> bool:
             for sub in ast.walk(item):
                 if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
                     run_turn_calls.append(sub.func.id)
-    if "_append_todo_reminder" not in run_turn_calls:
-        print(
-            "  TurnManager.run_turn no longer calls "
-            "_append_todo_reminder — the open-todo reminder feature is "
-            "silently disabled."
-        )
-        return False
-    return True
+    assert not ("_append_todo_reminder" not in run_turn_calls), (
+        "  TurnManager.run_turn no longer calls "
+        "_append_todo_reminder — the open-todo reminder feature is "
+        "silently disabled."
+    )
 
 
-def test_get_current_todos_snapshot_returns_copy() -> bool:
+def test_get_current_todos_snapshot_returns_copy() -> None:
     """The snapshot helper returns a shallow copy — caller mutations
     to the returned list MUST NOT leak back into the session record.
     Required by the apply_event hook contract (it passes the snapshot
@@ -1129,13 +1058,10 @@ def test_get_current_todos_snapshot_returns_copy() -> bool:
     snap = session_manager.get_current_todos_snapshot(sid)
     snap.append({"content": "Y", "status": "pending", "activeForm": "y"})
     fresh = session_manager.get(sid).get("current_todos") or []
-    if len(fresh) != 1:
-        print(f"  snapshot append leaked into session: {fresh}")
-        return False
-    return True
+    assert not (len(fresh) != 1), f"  snapshot append leaked into session: {fresh}"
 
 
-def test_sidebar_summary_includes_current_todos_and_tasks() -> bool:
+def test_sidebar_summary_includes_current_todos_and_tasks() -> None:
     sid, _msg = _mk_session("native")
     todos = [
         {"content": "Trace marker source", "status": "in_progress", "activeForm": "trace"},
@@ -1148,16 +1074,9 @@ def test_sidebar_summary_includes_current_todos_and_tasks() -> bool:
     session_manager.set_current_tasks(sid, tasks)
 
     summary = next((item for item in session_manager.list() if item.get("id") == sid), None)
-    if not summary:
-        print("  session missing from sidebar summary list")
-        return False
-    if summary.get("current_todos") != todos:
-        print(f"  summary current_todos missing/stale: {summary.get('current_todos')}")
-        return False
-    if summary.get("current_tasks") != tasks:
-        print(f"  summary current_tasks missing/stale: {summary.get('current_tasks')}")
-        return False
-    return True
+    assert not (not summary), "  session missing from sidebar summary list"
+    assert not (summary.get("current_todos") != todos), f"  summary current_todos missing/stale: {summary.get('current_todos')}"
+    assert not (summary.get("current_tasks") != tasks), f"  summary current_tasks missing/stale: {summary.get('current_tasks')}"
 
 
 def test_summary_by_ids_loads_requested_todos_before_warm_index() -> bool:
@@ -1192,7 +1111,7 @@ def test_summary_by_ids_loads_requested_todos_before_warm_index() -> bool:
 
 # ─── Codex todo_list tests ───────────────────────────────────────
 
-def test_codex_todo_list_first_incomplete_is_in_progress() -> bool:
+def test_codex_todo_list_first_incomplete_is_in_progress() -> None:
     """Codex `todo_list` (full snapshot, binary `completed`) maps to a
     Claude TodoWrite REPLACE. The FIRST not-completed entry surfaces as
     `in_progress` (Codex's stream lacks in_progress); the rest pending."""
@@ -1213,10 +1132,9 @@ def test_codex_todo_list_first_incomplete_is_in_progress() -> bool:
     ]:
         print(f"  got {statuses}")
         return False
-    return True
 
 
-def test_codex_todo_list_completed_then_first_incomplete() -> bool:
+def test_codex_todo_list_completed_then_first_incomplete() -> None:
     """A completed leading entry stays completed; the first NOT-completed
     entry after it becomes in_progress, remainder pending."""
     sid, msg = _mk_session("native")
@@ -1229,13 +1147,10 @@ def test_codex_todo_list_completed_then_first_incomplete() -> bool:
     _apply(strategy, sid, msg, _codex_todo_list("item_0", items), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["completed", "in_progress", "pending"]:
-        print(f"  got {statuses}")
-        return False
-    return True
+    assert not (statuses != ["completed", "in_progress", "pending"]), f"  got {statuses}"
 
 
-def test_codex_todo_list_all_completed_no_in_progress() -> bool:
+def test_codex_todo_list_all_completed_no_in_progress() -> None:
     """When every entry is completed, none is forced to in_progress."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1246,13 +1161,10 @@ def test_codex_todo_list_all_completed_no_in_progress() -> bool:
     _apply(strategy, sid, msg, _codex_todo_list("item_0", items), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["completed", "completed"]:
-        print(f"  got {statuses}")
-        return False
-    return True
+    assert not (statuses != ["completed", "completed"]), f"  got {statuses}"
 
 
-def test_codex_todo_list_stable_uuid_replaces_in_place() -> bool:
+def test_codex_todo_list_stable_uuid_replaces_in_place() -> None:
     """Codex re-emits the SAME todo_list item (stable id) across
     started→updated→completed. The stable per-(thread,id) uuid makes
     apply_event REPLACE the render node: current_todos reflects only the
@@ -1271,17 +1183,12 @@ def test_codex_todo_list_stable_uuid_replaces_in_place() -> bool:
     _apply(strategy, sid, msg, _codex_todo_list("item_0", completed), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["completed", "in_progress"]:
-        print(f"  current_todos statuses: {statuses}")
-        return False
+    assert not (statuses != ["completed", "in_progress"]), f"  current_todos statuses: {statuses}"
     nodes = _count_todowrite_render_nodes(msg)
-    if nodes != 1:
-        print(f"  expected 1 todo render node (stable uuid), got {nodes}")
-        return False
-    return True
+    assert not (nodes != 1), f"  expected 1 todo render node (stable uuid), got {nodes}"
 
 
-def test_codex_distinct_items_each_render() -> bool:
+def test_codex_distinct_items_each_render() -> None:
     """Two DIFFERENT codex item ids → distinct stable uuids → two
     separate render nodes (not collapsed)."""
     sid, msg = _mk_session("native")
@@ -1293,13 +1200,10 @@ def test_codex_distinct_items_each_render() -> bool:
         {"text": "B", "completed": False},
     ]), source_is_provider_stream=True)
     nodes = _count_todowrite_render_nodes(msg)
-    if nodes != 2:
-        print(f"  expected 2 distinct render nodes, got {nodes}")
-        return False
-    return True
+    assert not (nodes != 2), f"  expected 2 distinct render nodes, got {nodes}"
 
 
-def test_codex_todo_list_convergence_live_equals_recovery() -> bool:
+def test_codex_todo_list_convergence_live_equals_recovery() -> None:
     """CLAUDE.md convergence invariant for the Codex path: the same
     todo_list emission sequence via source_is_provider_stream=True and source_is_provider_stream=False yields
     byte-equal current_todos (stable uuid + REPLACE are replay-safe)."""
@@ -1324,16 +1228,13 @@ def test_codex_todo_list_convergence_live_equals_recovery() -> bool:
             )
         return session_manager.get(sid).get("current_todos") or []
 
-    if run(source_is_provider_stream=True) != run(source_is_provider_stream=False):
-        print("  Codex live != recovery")
-        return False
-    return True
+    assert not (run(source_is_provider_stream=True) != run(source_is_provider_stream=False)), "  Codex live != recovery"
 
 
 # ─── Codex update_plan tests ─────────────────────────────────────
 
 
-def test_codex_update_plan_maps_to_todos() -> bool:
+def test_codex_update_plan_maps_to_todos() -> None:
     """Codex `update_plan` (`plan: [{step,status}]`) is normalized to a
     TodoWrite tool_use and reconstructed as current_todos. Status passes
     through — Codex shares TodoWrite's pending/in_progress/completed vocab."""
@@ -1353,10 +1254,9 @@ def test_codex_update_plan_maps_to_todos() -> bool:
     ]:
         print(f"  got {statuses}")
         return False
-    return True
 
 
-def test_codex_update_plan_status_progression_union_merge() -> bool:
+def test_codex_update_plan_status_progression_union_merge() -> None:
     """Two sequential update_plan calls (same plan, statuses advancing)
     UNION-merge by content: the in_progress step → completed, the next
     → in_progress. Accumulates like Claude TodoWrite, no items lost."""
@@ -1376,13 +1276,10 @@ def test_codex_update_plan_status_progression_union_merge() -> bool:
            source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_todos") or []
     statuses = [(t["content"], t["status"]) for t in got]
-    if statuses != [("A", "completed"), ("B", "in_progress")]:
-        print(f"  got {statuses}")
-        return False
-    return True
+    assert not (statuses != [("A", "completed"), ("B", "in_progress")]), f"  got {statuses}"
 
 
-def test_codex_update_plan_convergence_live_equals_recovery() -> bool:
+def test_codex_update_plan_convergence_live_equals_recovery() -> None:
     """Convergence invariant for the Codex update_plan path: the same
     emission sequence via source_is_provider_stream=True and False yields
     byte-equal current_todos (union-merge by content is replay-safe)."""
@@ -1411,37 +1308,25 @@ def test_codex_update_plan_convergence_live_equals_recovery() -> bool:
     expected = [("A", "completed"), ("B", "in_progress")]
     live = projection(run(source_is_provider_stream=True))
     recovery = projection(run(source_is_provider_stream=False))
-    if live != expected or recovery != expected:
-        print(f"  expected {expected}\n  live={live}\n  recovery={recovery}")
-        return False
-    return True
+    assert not (live != expected or recovery != expected), f"  expected {expected}\n  live={live}\n  recovery={recovery}"
 
 
 # ─── TaskCreate / TaskUpdate tests ───────────────────────────────
 
-def test_task_create_adds_pending_item() -> bool:
+def test_task_create_adds_pending_item() -> None:
     """TaskCreate adds a new item with content=subject, status=pending."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
     _apply(strategy, sid, msg,
            _task_create("u1", "Fix login bug", activeForm="Fixing login"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item, got {len(got)}: {got}")
-        return False
-    if got[0]["content"] != "Fix login bug":
-        print(f"  wrong content: {got[0]['content']}")
-        return False
-    if got[0]["status"] != "pending":
-        print(f"  wrong status: {got[0]['status']}")
-        return False
-    if got[0]["activeForm"] != "Fixing login":
-        print(f"  wrong activeForm: {got[0]['activeForm']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item, got {len(got)}: {got}"
+    assert got[0]["content"] == "Fix login bug", f"wrong content: {got[0]['content']}"
+    assert got[0]["status"] == "pending", f"wrong status: {got[0]['status']}"
+    assert got[0]["activeForm"] == "Fixing login", f"wrong activeForm: {got[0]['activeForm']}"
 
 
-def test_task_create_multiple_accumulates() -> bool:
+def test_task_create_multiple_accumulates() -> None:
     """Multiple TaskCreate calls accumulate items."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1452,17 +1337,12 @@ def test_task_create_multiple_accumulates() -> bool:
     _apply(strategy, sid, msg,
            _task_create("u3", "Task C", tool_id="tc3"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 3:
-        print(f"  expected 3 items, got {len(got)}: {got}")
-        return False
+    assert len(got) == 3, f"expected 3 items, got {len(got)}: {got}"
     contents = [t["content"] for t in got]
-    if contents != ["Task A", "Task B", "Task C"]:
-        print(f"  wrong contents: {contents}")
-        return False
-    return True
+    assert contents == ["Task A", "Task B", "Task C"], f"wrong contents: {contents}"
 
 
-def test_task_create_dedup_on_replay() -> bool:
+def test_task_create_dedup_on_replay() -> None:
     """Replaying the same TaskCreate doesn't duplicate items."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1470,13 +1350,10 @@ def test_task_create_dedup_on_replay() -> bool:
     _apply(strategy, sid, msg, ev, source_is_provider_stream=True)
     _apply(strategy, sid, msg, ev, source_is_provider_stream=False)  # recovery replay
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item after replay, got {len(got)}: {got}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item after replay, got {len(got)}: {got}"
 
 
-def test_task_update_status_heuristic_pending_to_in_progress() -> bool:
+def test_task_update_status_heuristic_pending_to_in_progress() -> None:
     """TaskUpdate(status=in_progress) advances the first pending item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1488,13 +1365,10 @@ def test_task_update_status_heuristic_pending_to_in_progress() -> bool:
            _task_update("u3", "1", status="in_progress", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["in_progress", "pending"]:
-        print(f"  wrong statuses: {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending"], f"wrong statuses: {statuses}"
 
 
-def test_task_update_status_heuristic_to_completed() -> bool:
+def test_task_update_status_heuristic_to_completed() -> None:
     """TaskUpdate(status=completed) completes the first in_progress item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1505,16 +1379,11 @@ def test_task_update_status_heuristic_to_completed() -> bool:
     _apply(strategy, sid, msg,
            _task_update("u3", "1", status="completed", tool_id="tu2"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item, got {len(got)}: {got}")
-        return False
-    if got[0]["status"] != "completed":
-        print(f"  wrong status: {got[0]['status']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item, got {len(got)}: {got}"
+    assert got[0]["status"] == "completed", f"wrong status: {got[0]['status']}"
 
 
-def test_task_update_by_subject_match() -> bool:
+def test_task_update_by_subject_match() -> None:
     """TaskUpdate with subject matches by content."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1526,16 +1395,11 @@ def test_task_update_by_subject_match() -> bool:
            _task_update("u3", "2", status="in_progress",
                         subject="Fix tests", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if got[1]["status"] != "in_progress":
-        print(f"  second item not in_progress: {got}")
-        return False
-    if got[0]["status"] != "pending":
-        print(f"  first item not pending: {got}")
-        return False
-    return True
+    assert got[1]["status"] == "in_progress", f"second item not in_progress: {got}"
+    assert got[0]["status"] == "pending", f"first item not pending: {got}"
 
 
-def test_task_update_deleted_removes_item() -> bool:
+def test_task_update_deleted_removes_item() -> None:
     """TaskUpdate(status=deleted) with subject removes the matched item."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1547,16 +1411,11 @@ def test_task_update_deleted_removes_item() -> bool:
            _task_update("u3", "2", status="deleted",
                         subject="Remove me", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if len(got) != 1:
-        print(f"  expected 1 item after delete, got {len(got)}: {got}")
-        return False
-    if got[0]["content"] != "Keep":
-        print(f"  wrong item remained: {got[0]['content']}")
-        return False
-    return True
+    assert len(got) == 1, f"expected 1 item after delete, got {len(got)}: {got}"
+    assert got[0]["content"] == "Keep", f"wrong item remained: {got[0]['content']}"
 
 
-def test_task_create_and_todowrite_stored_separately() -> bool:
+def test_task_create_and_todowrite_stored_separately() -> None:
     """TaskCreate and TodoWrite store into separate fields."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1568,50 +1427,36 @@ def test_task_create_and_todowrite_stored_separately() -> bool:
            ], tool_id="tw1"), source_is_provider_stream=True)
     todos = session_manager.get(sid).get("current_todos") or []
     tasks = session_manager.get(sid).get("current_tasks") or []
-    if len(todos) != 1 or todos[0]["content"] != "From TodoWrite":
-        print(f"  wrong todos: {todos}")
-        return False
-    if len(tasks) != 1 or tasks[0]["content"] != "From TaskCreate":
-        print(f"  wrong tasks: {tasks}")
-        return False
-    return True
+    assert len(todos) == 1 and todos[0]["content"] == "From TodoWrite", f"wrong todos: {todos}"
+    assert len(tasks) == 1 and tasks[0]["content"] == "From TaskCreate", f"wrong tasks: {tasks}"
 
 
-def test_task_update_no_match_returns_none() -> bool:
+def test_task_update_no_match_returns_none() -> None:
     """TaskUpdate with no matching item returns None."""
     normalized = _task_update("u1", "nonexistent", status="completed", tool_id="tu1")
     result = extract_tasks_from_normalized(normalized, [])
-    if result is not None:
-        print(f"  expected None, got {result}")
-        return False
-    return True
+    assert result is None, f"expected None, got {result}"
 
 
-def test_task_create_purity() -> bool:
+def test_task_create_purity() -> None:
     """TaskCreate MUST NOT mutate `current`."""
     current = [{"content": "existing", "status": "pending", "activeForm": "e"}]
     snapshot = copy.deepcopy(current)
     ev = _task_create("u1", "New task", tool_id="tc1")
     extract_tasks_from_normalized(ev, current)
-    if current != snapshot:
-        print(f"  TaskCreate mutated current: {current} != {snapshot}")
-        return False
-    return True
+    assert current == snapshot, f"TaskCreate mutated current: {current} != {snapshot}"
 
 
-def test_task_update_purity() -> bool:
+def test_task_update_purity() -> None:
     """TaskUpdate MUST NOT mutate `current`."""
     current = [{"content": "existing", "status": "pending", "activeForm": "e"}]
     snapshot = copy.deepcopy(current)
     ev = _task_update("u1", "1", status="in_progress", tool_id="tu1")
     extract_tasks_from_normalized(ev, current)
-    if current != snapshot:
-        print(f"  TaskUpdate mutated current: {current} != {snapshot}")
-        return False
-    return True
+    assert current == snapshot, f"TaskUpdate mutated current: {current} != {snapshot}"
 
 
-def test_task_convergence_live_equals_recovery() -> bool:
+def test_task_convergence_live_equals_recovery() -> None:
     """Same TaskCreate+TaskUpdate sequence via live and recovery produces
     identical current_tasks."""
     seq = [
@@ -1634,13 +1479,10 @@ def test_task_convergence_live_equals_recovery() -> bool:
 
     live_result = run(True)
     recovery_result = run(False)
-    if live_result != recovery_result:
-        print(f"  divergence: source_is_provider_stream={live_result} recovery={recovery_result}")
-        return False
-    return True
+    assert live_result == recovery_result, f"divergence: source_is_provider_stream={live_result} recovery={recovery_result}"
 
 
-def test_fork_derives_tasks_from_copied_messages() -> bool:
+def test_fork_derives_tasks_from_copied_messages() -> None:
     """Fork re-derives current_tasks from TaskCreate events."""
     messages = [{
         "id": "m1", "role": "assistant", "seq": 0,
@@ -1651,43 +1493,29 @@ def test_fork_derives_tasks_from_copied_messages() -> bool:
         ],
     }]
     derived = derive_current_tasks(messages)
-    if len(derived) != 2:
-        print(f"  expected 2 items, got {len(derived)}: {derived}")
-        return False
+    assert len(derived) == 2, f"expected 2 items, got {len(derived)}: {derived}"
     statuses = [t["status"] for t in derived]
-    if statuses != ["in_progress", "pending"]:
-        print(f"  wrong statuses: {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending"], f"wrong statuses: {statuses}"
 
 
 # ── tool_result → taskId tracking tests ─────────────────────────
 
-def test_task_result_stamps_task_id() -> bool:
+def test_task_result_stamps_task_id() -> None:
     """A tool_result for TaskCreate extracts taskId and stamps it on
     the matching item."""
     normalized = _task_create("u1", "My task", tool_id="tc_abc")
     result = extract_tasks_from_normalized(normalized, [])
-    if result is None or len(result) != 1:
-        print(f"  TaskCreate failed: {result}")
-        return False
-    if result[0].get("tool_use_id") != "tc_abc":
-        print(f"  missing tool_use_id: {result[0]}")
-        return False
+    assert result is not None and len(result) == 1, f"TaskCreate failed: {result}"
+    assert result[0].get("tool_use_id") == "tc_abc", f"missing tool_use_id: {result[0]}"
 
     # Now feed the tool_result
     tr = _task_create_result("u2", "tc_abc", "42")
     updated = extract_tasks_from_normalized(tr, result)
-    if updated is None:
-        print("  tool_result returned None")
-        return False
-    if updated[0].get("task_id") != "42":
-        print(f"  task_id not stamped: {updated[0]}")
-        return False
-    return True
+    assert updated is not None, "tool_result returned None"
+    assert updated[0].get("task_id") == "42", f"task_id not stamped: {updated[0]}"
 
 
-def test_task_update_matches_by_task_id() -> bool:
+def test_task_update_matches_by_task_id() -> None:
     """After tool_result stamps task_id, TaskUpdate matches exactly."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1705,16 +1533,11 @@ def test_task_update_matches_by_task_id() -> bool:
     _apply(strategy, sid, msg,
            _task_update("u3", "2", status="in_progress", tool_id="tu1"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
-    if got[0]["status"] != "pending":
-        print(f"  Task A should be pending: {got}")
-        return False
-    if got[1]["status"] != "in_progress":
-        print(f"  Task B should be in_progress: {got}")
-        return False
-    return True
+    assert got[0]["status"] == "pending", f"Task A should be pending: {got}"
+    assert got[1]["status"] == "in_progress", f"Task B should be in_progress: {got}"
 
 
-def test_task_update_matches_out_of_order() -> bool:
+def test_task_update_matches_out_of_order() -> None:
     """TaskUpdate matches by taskId even when working out of order."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
@@ -1738,13 +1561,10 @@ def test_task_update_matches_out_of_order() -> bool:
            _task_update("u5", "1", status="in_progress", tool_id="tu2"), source_is_provider_stream=True)
     got = session_manager.get(sid).get("current_tasks") or []
     statuses = [t["status"] for t in got]
-    if statuses != ["in_progress", "pending", "completed"]:
-        print(f"  wrong statuses (should be exact match): {statuses}")
-        return False
-    return True
+    assert statuses == ["in_progress", "pending", "completed"], f"wrong statuses (should be exact match): {statuses}"
 
 
-def test_task_result_ignores_already_stamped() -> bool:
+def test_task_result_ignores_already_stamped() -> None:
     """Re-playing a tool_result on an item that already has a task_id
     is a no-op (idempotent replay)."""
     normalized = _task_create("u1", "My task", tool_id="tc_abc")
@@ -1753,21 +1573,15 @@ def test_task_result_ignores_already_stamped() -> bool:
     updated = extract_tasks_from_normalized(tr, result)
     # Replay the same result
     updated2 = extract_tasks_from_normalized(tr, updated)
-    if updated2 is not None:
-        print(f"  replay should be no-op, got {updated2}")
-        return False
-    return True
+    assert updated2 is None, f"replay should be no-op, got {updated2}"
 
 
-def test_task_result_no_match_is_noop() -> bool:
+def test_task_result_no_match_is_noop() -> None:
     """A tool_result that doesn't match any pending item is a no-op."""
     current = [{"content": "existing", "status": "pending", "source_id": "tc:abc"}]
     tr = _task_create_result("u1", "nonexistent_id", "99")
     result = extract_tasks_from_normalized(tr, current)
-    if result is not None:
-        print(f"  expected None for non-matching result, got {result}")
-        return False
-    return True
+    assert result is None, f"expected None for non-matching result, got {result}"
 
 
 def test_disabled_todos_extension_blocks_session_mutation() -> bool:
@@ -1849,7 +1663,7 @@ def test_builtin_todos_projection_does_not_dispatch_extension_backend() -> bool:
         session_event_extensions._enqueue_external_hook = original_enqueue
 
 
-def test_builtin_todos_worker_applies_projection() -> bool:
+def test_builtin_todos_worker_applies_projection() -> None:
     import session_event_extensions
 
     sid, _msg = _mk_session("native")
@@ -1870,14 +1684,10 @@ def test_builtin_todos_worker_applies_projection() -> bool:
     )
     session_event_extensions._run_builtin_todos_job(job)
     got = session_manager.get(sid).get("current_todos") or []
-    return (
-        len(got) == 1
-        and got[0].get("content") == "Worker projection"
-        and got[0].get("status") == "pending"
-    )
+    assert len(got) == 1 and got[0].get('content') == 'Worker projection' and (got[0].get('status') == 'pending')
 
 
-def test_session_event_bridge_dispatches_non_todos_hooks() -> bool:
+def test_session_event_bridge_dispatches_non_todos_hooks() -> None:
     import extension_backend_loader
     import session_event_extensions
 
@@ -1930,14 +1740,10 @@ def test_session_event_bridge_dispatches_non_todos_hooks() -> bool:
         extension_store.session_field_allowlist = original_allowlist
         extension_store.session_field_read_allowlist = original_read_allowlist
         extension_backend_loader.invoke_extension_backend_sync = original_invoke
-    return (
-        calls == [("ofek-dev.other", "session-event")]
-        and bodies[0].get("session_fields") == {"current_tasks": []}
-        and bool(fields)
-    )
+    assert calls == [('ofek-dev.other', 'session-event')] and bodies[0].get('session_fields') == {'current_tasks': []} and bool(fields)
 
 
-def test_session_event_bridge_filters_undeclared_hook_fields() -> bool:
+def test_session_event_bridge_filters_undeclared_hook_fields() -> None:
     import extension_backend_loader
     import session_event_extensions
 
@@ -1984,7 +1790,7 @@ def test_session_event_bridge_filters_undeclared_hook_fields() -> bool:
         extension_store.session_field_allowlist = original_allowlist
         extension_store.session_field_read_allowlist = original_read_allowlist
         extension_backend_loader.invoke_extension_backend_sync = original_invoke
-    return fields == [] and bodies[0].get("session_fields") == {}
+    assert fields == [] and bodies[0].get('session_fields') == {}
 
 
 def test_session_event_hook_discovery_failure_is_nonfatal() -> bool:
@@ -2007,7 +1813,7 @@ def test_session_event_hook_discovery_failure_is_nonfatal() -> bool:
         extension_store.session_event_hooks = original_hooks
 
 
-def test_session_event_hook_dispatch_failure_is_nonfatal() -> bool:
+def test_session_event_hook_dispatch_failure_is_nonfatal() -> None:
     import extension_backend_loader
     import session_event_extensions
 
@@ -2044,10 +1850,10 @@ def test_session_event_hook_dispatch_failure_is_nonfatal() -> bool:
         extension_store.session_field_allowlist = original_allowlist
         extension_store.session_field_read_allowlist = original_read_allowlist
         extension_backend_loader.invoke_extension_backend_sync = original_invoke
-    return fields == []
+    assert fields == []
 
 
-def test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch() -> bool:
+def test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch() -> None:
     import session_event_extensions
 
     original_hooks = extension_store.session_event_hooks
@@ -2074,12 +1880,7 @@ def test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch() -> bool:
         extension_store.session_field_read_allowlist = original_read_allowlist
         session_event_extensions._enqueue_external_hook = original_enqueue
         extension_store.set_enabled(todos_id, True)
-    return (
-        changed is True
-        and len(jobs) == 1
-        and jobs[0].spec.extension_id == "ofek-dev.other"
-        and jobs[0].session_id == "sid"
-    )
+    assert changed is True and len(jobs) == 1 and (jobs[0].spec.extension_id == 'ofek-dev.other') and (jobs[0].session_id == 'sid')
 
 
 def _irrelevant_text_event(uuid: str = "irrelevant") -> dict:
@@ -2096,7 +1897,7 @@ def _irrelevant_text_event(uuid: str = "irrelevant") -> dict:
     }
 
 
-def test_builtin_todos_skips_irrelevant_agent_message() -> bool:
+def test_builtin_todos_skips_irrelevant_agent_message() -> None:
     import session_event_extensions
 
     original_hooks = extension_store.session_event_hooks
@@ -2115,10 +1916,10 @@ def test_builtin_todos_skips_irrelevant_agent_message() -> bool:
     finally:
         extension_store.session_event_hooks = original_hooks
         session_event_extensions._enqueue_external_hook = original_enqueue
-    return changed is False and jobs == []
+    assert changed is False and jobs == []
 
 
-def test_builtin_todos_skips_irrelevant_burst() -> bool:
+def test_builtin_todos_skips_irrelevant_burst() -> None:
     import session_event_extensions
 
     original_hooks = extension_store.session_event_hooks
@@ -2140,10 +1941,10 @@ def test_builtin_todos_skips_irrelevant_burst() -> bool:
     finally:
         extension_store.session_event_hooks = original_hooks
         session_event_extensions._enqueue_external_hook = original_enqueue
-    return changed == [False] * 1100 and jobs == []
+    assert changed == [False] * 1100 and jobs == []
 
 
-def test_builtin_todos_enqueues_relevant_projection_events() -> bool:
+def test_builtin_todos_enqueues_relevant_projection_events() -> None:
     import session_event_extensions
 
     original_hooks = extension_store.session_event_hooks
@@ -2181,14 +1982,10 @@ def test_builtin_todos_enqueues_relevant_projection_events() -> bool:
     finally:
         extension_store.session_event_hooks = original_hooks
         session_event_extensions._enqueue_external_hook = original_enqueue
-    return (
-        changed == [True] * len(events)
-        and [job.spec.extension_id for job in jobs]
-        == [extension_store.BUILTIN_TODOS_EXTENSION_ID] * len(events)
-    )
+    assert changed == [True] * len(events) and [job.spec.extension_id for job in jobs] == [extension_store.BUILTIN_TODOS_EXTENSION_ID] * len(events)
 
 
-def test_builtin_todos_prefilter_preserves_external_hooks() -> bool:
+def test_builtin_todos_prefilter_preserves_external_hooks() -> None:
     import session_event_extensions
 
     original_hooks = extension_store.session_event_hooks
@@ -2213,14 +2010,10 @@ def test_builtin_todos_prefilter_preserves_external_hooks() -> bool:
         extension_store.session_field_allowlist = original_allowlist
         extension_store.session_field_read_allowlist = original_read_allowlist
         session_event_extensions._enqueue_external_hook = original_enqueue
-    return (
-        changed is True
-        and len(jobs) == 1
-        and jobs[0].spec.extension_id == "ofek-dev.other"
-    )
+    assert changed is True and len(jobs) == 1 and (jobs[0].spec.extension_id == 'ofek-dev.other')
 
 
-def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> bool:
+def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> None:
     import session_event_extensions
 
     original_enqueue = session_event_extensions._enqueue_external_hook
@@ -2242,11 +2035,7 @@ def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> bool:
         )
     finally:
         session_event_extensions._enqueue_external_hook = original_enqueue
-    return (
-        len(jobs) == 1
-        and jobs[0].normalized.get("type") == "agent_message"
-        and jobs[0].normalized.get("data", {}).get("uuid") == "manager-builtin"
-    )
+    assert len(jobs) == 1 and jobs[0].normalized.get('type') == 'agent_message' and (jobs[0].normalized.get('data', {}).get('uuid') == 'manager-builtin')
 
 
 TESTS = [
@@ -2322,7 +2111,10 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
+                ret = fn()
+                # De-frauded tests assert and return None (pass); legacy
+                # fraud tests still return True/False. Treat None as pass.
+                ok = ret is not False
             except Exception as e:
                 ok = False
                 import traceback

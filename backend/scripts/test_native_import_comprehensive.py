@@ -40,8 +40,18 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
+# session_manager.create() defaults to orchestration_mode="team", which —
+# since "Add selective installation runtime profiles" — requires an active,
+# bootstrap-ready installation profile with integrations enabled.
+_TMP_HOME = _test_home.isolate_installed("bc-test-native-import-comprehensive-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
+
+from _projection_fold import start_projection_fold  # noqa: E402
+
+# Without this the ingest tests only pass when another test module (e.g.
+# test_native_import.py) happens to have registered the subscribers first
+# in the same process.
+start_projection_fold()
 
 import native_import  # noqa: E402
 logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)  # silence intentional error logs
@@ -877,6 +887,9 @@ def test_ingest_codex() -> None:
             asst_events = msgs[1]["events"]
             check(len(asst_events) == n_texts, f"codex n={n_texts} events {len(asst_events)} != {n_texts}")
             check(loaded["cwd"] == "/repo", "codex cwd recovered")
+            check(loaded.get("agent_session_id") is None,
+                  "codex import must not stamp a resume sid (external threads "
+                  "fail the resume capability-contract check)")
             # idempotent
             check(native_import.import_session(sess) == root_id, "codex idempotent")
 
@@ -971,6 +984,8 @@ def test_ingest_agy() -> None:
         check(msgs[0]["content"] == "What is in the hosts file please explain", "agy prompt text")
         # assistant carries tool_use + tool_result + text (≥3 events)
         check(len(msgs[1]["events"]) >= 3, f"agy assistant events {len(msgs[1]['events'])}")
+        check(loaded.get("agent_session_id") == "agy1",
+              "agy import stamps native sid for resume")
         check(native_import.import_session(sess) == root_id, "agy idempotent")
 
 
@@ -1066,6 +1081,9 @@ def test_ingest_pi() -> None:
               "pi prompts imported")
         check(len(asst_msgs) == 2 and all(len(m.get("events") or []) >= 2 for m in asst_msgs),
               "pi assistant events imported")
+        check(loaded.get("agent_session_id") is None,
+              "pi import must not stamp a resume sid (pi resume lookup only "
+              "scans BA's own runs tree)")
         check(native_import.import_session(sess) == root_id, "pi idempotent")
 
 
@@ -1206,15 +1224,56 @@ def _poll_done(timeout: float) -> dict:
 
 def test_unknown_kind_not_enumerated() -> None:
     # Only the 4 supported kinds enumerate; an unknown kind yields nothing.
-    prov = config_store.add_provider({"name": "future-cli", "kind": "future-cli", "mode": "subscription"})
-    pid = prov["id"]
+    # config_store.add_provider() AND _save_state() now reject unsupported
+    # kinds outright (dependency_plan.assert_provider_supported /
+    # assert_state_supported, added by "Add selective installation runtime
+    # profiles") — correct for every write path, but this test needs a
+    # provider record with a kind native_import has never heard of (e.g.
+    # one written by an older/newer version, or a deprecated kind still on
+    # disk after a downgrade). That scenario is "the file already has it",
+    # not "the API let one in", so write the config file directly,
+    # bypassing config_store's write-side validation entirely; read-side
+    # (_load_state) has no such gate.
+    import provider_sync_authority
+
+    pid = str(uuid.uuid4())
+    path = config_store._config_path()
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["providers"].append({
+        "generation": str(uuid.uuid4()),
+        "revision": 0,
+        "execution_revision": 0,
+        "id": pid,
+        "name": "future-cli",
+        "nickname": "",
+        "kind": "future-cli",
+        "mode": "subscription",
+        "base_url": "",
+        "config_dir": "",
+        "custom_models": [],
+        "default_permission": {},
+        "suspended": False,
+        "allowed_sinks": [],
+        "capabilities": {},
+    })
+    # _load_state()'s canonical-shape check verifies provider_state_authority's
+    # digest against the current providers list — recompute it for the
+    # mutated list, same as _save_state() would.
+    state["provider_state_authority"] = provider_sync_authority.new_authority(
+        state.get("default_provider_id"), state["providers"],
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+    config_store._state_cache = None
     try:
         check(native_import.enumerate_native_sessions([pid]) == [], "unknown kind not enumerated (scoped)")
     finally:
-        try:
-            config_store.delete_provider(pid)
-        except Exception:
-            pass
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["providers"] = [p for p in state["providers"] if p.get("id") != pid]
+        state["provider_state_authority"] = provider_sync_authority.new_authority(
+            state.get("default_provider_id"), state["providers"],
+        )
+        path.write_text(json.dumps(state), encoding="utf-8")
+        config_store._state_cache = None
 
 
 # --------------------------------------------------------------------------- #

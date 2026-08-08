@@ -55,18 +55,17 @@ def _fresh_client() -> TestClient:
     return TestClient(main.app, client=("127.0.0.1", 50001))
 
 
-def test_bearer_only_request_does_not_plant_session_cookie() -> tuple[bool, str]:
+def test_bearer_only_request_does_not_plant_session_cookie() -> None:
     """Case 1: authenticating via bearer alone must not set a session cookie."""
     client = _fresh_client()
     res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_TOKEN}"})
-    if res.status_code != 200:
-        return False, f"expected 200, got {res.status_code}"
-    if _SESSION_COOKIE in client.cookies:
-        return False, "a bearer-only request planted a session cookie (resurrection)"
-    return True, ""
+    assert res.status_code == 200, f"expected 200, got {res.status_code}"
+    assert _SESSION_COOKIE not in client.cookies, (
+        "a bearer-only request planted a session cookie (resurrection)"
+    )
 
 
-def test_dropping_bearer_after_prior_request_stays_unauthenticated() -> tuple[bool, str]:
+def test_dropping_bearer_after_prior_request_stays_unauthenticated() -> None:
     """Case 2: once the bearer header is dropped, a client that only carries
     whatever cookie a prior bearer-authenticated request left behind must
     NOT be authenticated — mirrors calling /api/auth/logout (clears the
@@ -75,7 +74,7 @@ def test_dropping_bearer_after_prior_request_stays_unauthenticated() -> tuple[bo
     client = _fresh_client()
     client.get("/api/auth/me", headers={"Authorization": f"Bearer {_TOKEN}"})
     res = client.get("/api/auth/me")
-    return res.status_code == 401, f"expected 401, got {res.status_code}"
+    assert res.status_code == 401, f"expected 401, got {res.status_code}"
 
 
 TESTS = [
@@ -90,15 +89,19 @@ def main_run() -> int:
     failed = 0
     for name, fn in TESTS:
         try:
-            ok, detail = fn()
+            fn()
+        except AssertionError as e:
+            detail = str(e) or name
+            print(f"  {FAIL} {name} — {detail}")
+            failed += 1
+            continue
         except Exception as e:  # noqa: BLE001
-            ok, detail = False, f"exception: {e}"
             import traceback
             traceback.print_exc()
-        tag = PASS if ok else FAIL
-        print(f"  {tag} {name}{'' if ok else ' — ' + detail}")
-        if not ok:
+            print(f"  {FAIL} {name} — exception: {e}")
             failed += 1
+            continue
+        print(f"  {PASS} {name}")
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
           else f"all {len(TESTS)} tests passed")

@@ -46,7 +46,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 # ── A. known_workers ────────────────────────────────────────────────
 
-def test_format_known_workers_includes_required_fields() -> bool:
+def test_format_known_workers_includes_required_fields() -> None:
     workers = [
         {
             "agent_session_id": "abc12345-aaaa-bbbb-cccc-dddddddddddd",
@@ -67,37 +67,19 @@ def test_format_known_workers_includes_required_fields() -> bool:
     # Header preserves the `agent_session_id` token so the manager
     # bootstrap prose ("use the agent_session_id as the opaque identifier")
     # still has its referent.
-    if "agent_session_id" not in out:
-        print("  missing 'agent_session_id' header token")
-        return False
+    assert "agent_session_id" in out, "missing 'agent_session_id' header token"
     for w in workers:
-        if w["agent_session_id"] not in out:
-            print(f"  worker id {w['agent_session_id'][:8]} missing from output")
-            return False
-        if w["description"] not in out:
-            print(f"  description '{w['description']}' missing")
-            return False
-        if w["orchestration_mode"] not in out:
-            print(f"  mode '{w['orchestration_mode']}' missing")
-            return False
-        if str(w["delegation_count"]) not in out:
-            print(f"  turns '{w['delegation_count']}' missing")
-            return False
-    if "<known_workers>" not in out or "</known_workers>" not in out:
-        print("  envelope tags missing")
-        return False
-    return True
+        assert w["agent_session_id"] in out, f"worker id {w['agent_session_id'][:8]} missing from output"
+        assert w["description"] in out, f"description '{w['description']}' missing"
+        assert w["orchestration_mode"] in out, f"mode '{w['orchestration_mode']}' missing"
+        assert str(w["delegation_count"]) in out, f"turns '{w['delegation_count']}' missing"
+    assert "<known_workers>" in out and "</known_workers>" in out, "envelope tags missing"
 
 
-def test_format_known_workers_no_workers() -> bool:
+def test_format_known_workers_no_workers() -> None:
     out = format_known_workers([])
-    if "No workers yet" not in out:
-        print("  no-workers branch lost the 'No workers yet' sentinel")
-        return False
-    if "<known_workers>" not in out or "</known_workers>" not in out:
-        print("  envelope tags missing on empty branch")
-        return False
-    return True
+    assert "No workers yet" in out, "no-workers branch lost the 'No workers yet' sentinel"
+    assert "<known_workers>" in out and "</known_workers>" in out, "envelope tags missing on empty branch"
 
 
 # ── B. Verdict prompt full / compact ────────────────────────────────
@@ -105,7 +87,7 @@ def test_format_known_workers_no_workers() -> bool:
 _VERDICT_BULLETS = ("DONE", "AWAIT_USER", "CONTINUE", "FIX")
 
 
-def test_verdict_prompt_full_contains_schema_and_framing() -> bool:
+def test_verdict_prompt_full_contains_schema_and_framing() -> None:
     out = _verdict._build_verdict_prompt(
         primary_last_text="primary said X",
         original_user_request="user asked Y",
@@ -114,22 +96,15 @@ def test_verdict_prompt_full_contains_schema_and_framing() -> bool:
         compact=False,
     )
     for bullet in _VERDICT_BULLETS:
-        if bullet not in out:
-            print(f"  full prompt missing verdict bullet '{bullet}'")
-            return False
+        assert bullet in out, f"full prompt missing verdict bullet '{bullet}'"
     # Framing rationale only present in full form — these are the
     # exact substrings the compact test asserts ABSENT, so they pin
     # the diff between branches.
-    if "lazy" not in out:
-        print("  full prompt missing 'lazy' framing")
-        return False
-    if "worst cut" not in out:
-        print("  full prompt missing 'worst cut' rationale")
-        return False
-    return True
+    assert "lazy" in out, "full prompt missing 'lazy' framing"
+    assert "worst cut" in out, "full prompt missing 'worst cut' rationale"
 
 
-def test_verdict_prompt_compact_contains_schema_and_minimal_framing() -> bool:
+def test_verdict_prompt_compact_contains_schema_and_minimal_framing() -> None:
     out = _verdict._build_verdict_prompt(
         primary_last_text="primary said X",
         original_user_request="user asked Y",
@@ -138,25 +113,16 @@ def test_verdict_prompt_compact_contains_schema_and_minimal_framing() -> bool:
         compact=True,
     )
     for bullet in _VERDICT_BULLETS:
-        if bullet not in out:
-            print(f"  compact prompt missing verdict bullet '{bullet}'")
-            return False
+        assert bullet in out, f"compact prompt missing verdict bullet '{bullet}'"
     # Role anchor still present — survives context compaction inside
     # the supervisor sub-session.
-    if "lazy" not in out:
-        print("  compact prompt lost role anchor ('lazy')")
-        return False
+    assert "lazy" in out, "compact prompt lost role anchor ('lazy')"
     # Rationale paragraphs removed.
-    if "worst cut" in out:
-        print("  compact prompt still contains 'worst cut' rationale")
-        return False
-    if "fabricated defaults" in out:
-        print("  compact prompt still contains 'fabricated defaults' rationale")
-        return False
-    return True
+    assert "worst cut" not in out, "compact prompt still contains 'worst cut' rationale"
+    assert "fabricated defaults" not in out, "compact prompt still contains 'fabricated defaults' rationale"
 
 
-def test_choose_verdict_prompt_full_when_flag_false() -> bool:
+def test_choose_verdict_prompt_full_when_flag_false() -> None:
     session = {"supervisor_bootstrap_received": False}
     out = _verdict._choose_verdict_prompt(
         session,
@@ -165,13 +131,10 @@ def test_choose_verdict_prompt_full_when_flag_false() -> bool:
         primary_session_path=None,
         primary_session_lines=None,
     )
-    if "worst cut" not in out:
-        print("  flag=False did not select full preamble")
-        return False
-    return True
+    assert "worst cut" in out, "flag=False did not select full preamble"
 
 
-def test_choose_verdict_prompt_compact_when_flag_true() -> bool:
+def test_choose_verdict_prompt_compact_when_flag_true() -> None:
     session = {"supervisor_bootstrap_received": True}
     out = _verdict._choose_verdict_prompt(
         session,
@@ -180,14 +143,9 @@ def test_choose_verdict_prompt_compact_when_flag_true() -> bool:
         primary_session_path=None,
         primary_session_lines=None,
     )
-    if "worst cut" in out:
-        print("  flag=True did not select compact preamble")
-        return False
+    assert "worst cut" not in out, "flag=True did not select compact preamble"
     for bullet in _VERDICT_BULLETS:
-        if bullet not in out:
-            print(f"  compact branch missing verdict bullet '{bullet}'")
-            return False
-    return True
+        assert bullet in out, f"compact branch missing verdict bullet '{bullet}'"
 
 
 # ── B. Gate behaviour (real request_verdict, mocked turn runner) ────
@@ -228,13 +186,13 @@ def _make_session_with_assistant_turn() -> dict:
     return session_manager.get(sid)
 
 
-def test_first_verdict_failure_keeps_flag_false() -> bool:
+def test_first_verdict_failure_keeps_flag_false() -> None:
     sess = _make_session_with_assistant_turn()
     sid = sess["id"]
 
-    if sess.get("supervisor_bootstrap_received") is not False:
-        print(f"  flag did not default False: {sess.get('supervisor_bootstrap_received')!r}")
-        return False
+    assert sess.get("supervisor_bootstrap_received") is False, (
+        f"flag did not default False: {sess.get('supervisor_bootstrap_received')!r}"
+    )
 
     # First call: monkeypatch the turn runner to raise. flag must stay
     # False, return must be ("DONE", "") via the fail-open path.
@@ -258,13 +216,11 @@ def test_first_verdict_failure_keeps_flag_false() -> bool:
     finally:
         _verdict._run_supervisor_turn = original_runner  # type: ignore[assignment]
 
-    if verdict != "DONE":
-        print(f"  failed first call should fail-open to DONE, got {verdict!r}")
-        return False
+    assert verdict == "DONE", f"failed first call should fail-open to DONE, got {verdict!r}"
     fresh = session_manager.get(sid) or {}
-    if fresh.get("supervisor_bootstrap_received") is not False:
-        print(f"  flag flipped after a FAILED first call: {fresh.get('supervisor_bootstrap_received')!r}")
-        return False
+    assert fresh.get("supervisor_bootstrap_received") is False, (
+        f"flag flipped after a FAILED first call: {fresh.get('supervisor_bootstrap_received')!r}"
+    )
 
     # Second call: monkeypatch the turn runner to succeed but write a
     # supervisor-source assistant message into the session so the
@@ -288,41 +244,34 @@ def test_first_verdict_failure_keeps_flag_false() -> bool:
     finally:
         _verdict._run_supervisor_turn = original_runner  # type: ignore[assignment]
 
-    if verdict2 != "DONE":
-        print(f"  successful second call should parse DONE, got {verdict2!r}")
-        return False
+    assert verdict2 == "DONE", f"successful second call should parse DONE, got {verdict2!r}"
     fresh2 = session_manager.get(sid) or {}
-    if fresh2.get("supervisor_bootstrap_received") is not True:
-        print(f"  flag did NOT flip after a successful second call: {fresh2.get('supervisor_bootstrap_received')!r}")
-        return False
-    return True
+    assert fresh2.get("supervisor_bootstrap_received") is True, (
+        f"flag did NOT flip after a successful second call: {fresh2.get('supervisor_bootstrap_received')!r}"
+    )
 
 
-def test_mark_supervisor_bootstrap_received_is_idempotent() -> bool:
+def test_mark_supervisor_bootstrap_received_is_idempotent() -> None:
     sess = session_manager.create(
         name="idem", model="sonnet", cwd="/tmp",
         orchestration_mode="native", source="cli",
     )
     sid = sess["id"]
-    if sess.get("supervisor_bootstrap_received") is not False:
-        print("  default not False")
-        return False
+    assert sess.get("supervisor_bootstrap_received") is False, "default not False"
     session_manager.mark_supervisor_bootstrap_received(sid)
     after_one = session_manager.get(sid) or {}
-    if after_one.get("supervisor_bootstrap_received") is not True:
-        print("  first mark did not flip flag to True")
-        return False
+    assert after_one.get("supervisor_bootstrap_received") is True, "first mark did not flip flag to True"
     session_manager.mark_supervisor_bootstrap_received(sid)
     after_two = session_manager.get(sid) or {}
-    if after_two.get("supervisor_bootstrap_received") is not True:
-        print("  second mark changed the value away from True")
-        return False
-    # Round-trip on disk so a reload would still see True.
+    assert after_two.get("supervisor_bootstrap_received") is True, "second mark changed the value away from True"
+    # Round-trip on disk so a reload would still see True. `mark_*`
+    # persists via the debounced coordinator, so drain the durability
+    # barrier before reading the on-disk record.
+    session_manager.flush_root_persist(sid)
     fresh = session_store.get_session(sid)
-    if fresh is None or fresh.get("supervisor_bootstrap_received") is not True:
-        print("  on-disk round trip lost the True value")
-        return False
-    return True
+    assert fresh is not None and fresh.get("supervisor_bootstrap_received") is True, (
+        "on-disk round trip lost the True value"
+    )
 
 
 TESTS = [
@@ -345,26 +294,31 @@ TESTS = [
 ]
 
 
-def main_run() -> int:
+def main_run() -> None:
     failed = 0
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as e:
-                ok = False
+                fn()
+            except AssertionError as e:
+                failed += 1
+                print(f"{FAIL} {name}")
+                if str(e):
+                    print(f"  {e}")
+            except Exception:
+                failed += 1
                 import traceback
                 traceback.print_exc()
-                print(f"  {name} raised {type(e).__name__}: {e}")
-            print(f"{PASS if ok else FAIL} {name}")
-            if not ok:
-                failed += 1
+                print(f"{FAIL} {name}")
+            else:
+                print(f"{PASS} {name}")
         print()
         print(f"summary: {len(TESTS) - failed}/{len(TESTS)} passed")
-        return 0 if failed == 0 else 1
+        if failed:
+            raise SystemExit(1)
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    sys.exit(main_run())
+    main_run()

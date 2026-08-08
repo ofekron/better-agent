@@ -227,7 +227,7 @@ def _mk_native_two_turn_session() -> tuple[str, str, str]:
 
 # ─── unit ─────────────────────────────────────────────────────────
 
-def test_build_stub_filters_lifecycle() -> bool:
+def test_build_stub_filters_lifecycle() -> None:
     msg = {"role": "assistant", "events": [
         {"type": "agent_message", "data": {"uuid": "x1"}},
         {"type": "session_discovered", "data": {}},
@@ -236,20 +236,18 @@ def test_build_stub_filters_lifecycle() -> bool:
         {"type": "complete", "data": {}},
     ]}
     stub = render_stub.build_stub(msg)
-    if stub["event_count"] != 2:
-        print(f"  expected event_count 2, got {stub['event_count']}")
-        return False
-    if [e.get("data", {}).get("uuid") for e in stub["last_events"]] != ["x1", "x2"]:
-        print(f"  last_events wrong: {stub['last_events']}")
-        return False
+    assert stub["event_count"] == 2, f"expected event_count 2, got {stub['event_count']}"
+    assert [e.get("data", {}).get("uuid") for e in stub["last_events"]] == ["x1", "x2"], (
+        f"last_events wrong: {stub['last_events']}"
+    )
     # native primary list
     nat = {"role": "assistant", "events": [
         {"type": "agent_message"}, {"type": "worker_prep_start"},
     ]}
-    return render_stub.renderable_count(nat) == 1
+    assert render_stub.renderable_count(nat) == 1
 
 
-def test_build_stub_includes_worker_timeline_tail() -> bool:
+def test_build_stub_includes_worker_timeline_tail() -> None:
     msg = {
         "role": "assistant",
         "events": [
@@ -278,33 +276,29 @@ def test_build_stub_includes_worker_timeline_tail() -> bool:
     }
     stub = render_stub.build_stub(msg)
     uuids = [e.get("data", {}).get("uuid") for e in stub["last_events"]]
-    if uuids != ["m1", "m2", "w1", "m3"]:
-        print(f"  expanded timeline tail wrong: {uuids}")
-        return False
-    return stub["event_count"] == 4
+    assert uuids == ["m1", "m2", "w1", "m3"], f"expanded timeline tail wrong: {uuids}"
+    assert stub["event_count"] == 4
 
 
-def test_latest_assistant_id() -> bool:
+def test_latest_assistant_id() -> None:
     msgs = [
         {"id": "u0", "role": "user", "seq": 0},
         {"id": "a0", "role": "assistant", "seq": 1},
         {"id": "u1", "role": "user", "seq": 2},
         {"id": "a1", "role": "assistant", "seq": 3},
     ]
-    return render_stub.latest_assistant_id(msgs) == "a1"
+    assert render_stub.latest_assistant_id(msgs) == "a1"
 
 
-def test_stub_tail_truncates() -> bool:
+def test_stub_tail_truncates() -> None:
     events = [{"type": "agent_message", "data": {"uuid": str(i)}} for i in range(40)]
     msg = {"role": "assistant", "events": events}
     stub = render_stub.build_stub(msg, tail=render_stub.STUB_TAIL)
-    if stub["event_count"] != 40:
-        print(f"  count should be full 40, got {stub['event_count']}")
-        return False
-    return len(stub["last_events"]) == render_stub.STUB_TAIL
+    assert stub["event_count"] == 40, f"count should be full 40, got {stub['event_count']}"
+    assert len(stub["last_events"]) == render_stub.STUB_TAIL
 
 
-def test_stub_tail_keeps_steer_prompts() -> bool:
+def test_stub_tail_keeps_steer_prompts() -> None:
     steer = {
         "type": "steer_prompt",
         "data": {"uuid": "steer-1", "prompt": "keep visible while collapsed"},
@@ -319,53 +313,44 @@ def test_stub_tail_keeps_steer_prompts() -> bool:
         for e in stub["last_events"]
         if e.get("type") == "steer_prompt"
     ]
-    if prompts != ["keep visible while collapsed"]:
-        print(f"  steer prompt missing from collapsed stub tail: {stub['last_events']}")
-        return False
-    if len(stub["last_events"]) != render_stub.STUB_TAIL + 1:
-        print(f"  tail should keep steer plus normal tail, got {len(stub['last_events'])}")
-        return False
+    assert prompts == ["keep visible while collapsed"], (
+        f"steer prompt missing from collapsed stub tail: {stub['last_events']}"
+    )
+    assert len(stub["last_events"]) == render_stub.STUB_TAIL + 1, (
+        f"tail should keep steer plus normal tail, got {len(stub['last_events'])}"
+    )
     explicit_stub = render_stub.build_stub_from_events(events, tail=render_stub.STUB_TAIL)
     explicit_prompts = [
         e.get("data", {}).get("prompt")
         for e in explicit_stub["last_events"]
         if e.get("type") == "steer_prompt"
     ]
-    if explicit_prompts != prompts:
-        print(f"  explicit-events stub dropped steer prompt: {explicit_stub['last_events']}")
-        return False
-    return stub["event_count"] == 41 and explicit_stub["event_count"] == 41
+    assert explicit_prompts == prompts, (
+        f"explicit-events stub dropped steer prompt: {explicit_stub['last_events']}"
+    )
+    assert stub["event_count"] == 41
+    assert explicit_stub["event_count"] == 41
 
 
 # ─── integration ──────────────────────────────────────────────────
 
-def test_stubbed_load_stubs_completed_latest() -> bool:
+def test_stubbed_load_stubs_completed_latest() -> None:
     sid, asst1_id, asst2_id = _mk_two_turn_session()
     tree = session_manager.get_root_tree_stubbed(sid)
     msgs = {m["id"]: m for m in tree["messages"]}
     a1, a2 = msgs[asst1_id], msgs[asst2_id]
-    if a1.get("stub") is None:
-        print("  non-latest asst1 should be stubbed")
-        return False
-    if a1.get("events"):
-        print(f"  asst1 events should be empty, got {a1['events']}")
-        return False
-    if a1["stub"]["event_count"] != 3 or len(a1["stub"]["last_events"]) != 3:
-        print(f"  asst1 stub wrong: {a1['stub']}")
-        return False
-    if a2.get("events"):
-        print(f"  completed latest asst2 events should be empty, got {a2.get('events')}")
-        return False
-    if a2.get("stub", {}).get("event_count") != 2:
-        print(f"  completed latest asst2 should be stubbed, got {a2.get('stub')}")
-        return False
-    if not a2.get("event_ref"):
-        print("  completed latest asst2 missing event_ref")
-        return False
-    return True
+    assert a1.get("stub") is not None, "non-latest asst1 should be stubbed"
+    assert not a1.get("events"), f"asst1 events should be empty, got {a1['events']}"
+    assert a1["stub"]["event_count"] == 3, f"asst1 stub wrong: {a1['stub']}"
+    assert len(a1["stub"]["last_events"]) == 3, f"asst1 stub wrong: {a1['stub']}"
+    assert not a2.get("events"), f"completed latest asst2 events should be empty, got {a2.get('events')}"
+    assert a2.get("stub", {}).get("event_count") == 2, (
+        f"completed latest asst2 should be stubbed, got {a2.get('stub')}"
+    )
+    assert a2.get("event_ref"), "completed latest asst2 missing event_ref"
 
 
-def test_stubbed_load_keeps_streaming_latest_full() -> bool:
+def test_stubbed_load_keeps_streaming_latest_full() -> None:
     sid, _, asst2_id = _mk_two_turn_session()
     live = session_manager.get_ref(sid)
     latest = next(m for m in live["messages"] if m["id"] == asst2_id)
@@ -375,35 +360,25 @@ def test_stubbed_load_keeps_streaming_latest_full() -> bool:
 
     tree = session_manager.get_root_tree_stubbed(sid)
     msg = {m["id"]: m for m in tree["messages"]}[asst2_id]
-    if msg.get("stub") is not None:
-        print(f"  streaming latest must stay full, got stub={msg.get('stub')}")
-        return False
-    if len(msg.get("events") or []) != 2:
-        print(f"  streaming latest should keep full events, got {msg.get('events')}")
-        return False
-    return True
+    assert msg.get("stub") is None, f"streaming latest must stay full, got stub={msg.get('stub')}"
+    assert len(msg.get("events") or []) == 2, (
+        f"streaming latest should keep full events, got {msg.get('events')}"
+    )
 
 
-def test_message_window_stubs_completed_latest() -> bool:
+def test_message_window_stubs_completed_latest() -> None:
     sid, _asst1_id, asst2_id = _mk_two_turn_session()
     delta = session_manager.get_messages_since(sid, since_seq=0, limit=50)
-    if not delta:
-        print("  get_messages_since returned no delta")
-        return False
+    assert delta, "get_messages_since returned no delta"
     msg = {m["id"]: m for m in delta["messages"]}[asst2_id]
-    if msg.get("events"):
-        print(f"  completed latest delta events should be empty, got {msg.get('events')}")
-        return False
-    if msg.get("stub", {}).get("event_count") != 2:
-        print(f"  completed latest delta should be stubbed, got {msg.get('stub')}")
-        return False
-    if not msg.get("event_ref"):
-        print("  completed latest delta missing event_ref")
-        return False
-    return True
+    assert not msg.get("events"), f"completed latest delta events should be empty, got {msg.get('events')}"
+    assert msg.get("stub", {}).get("event_count") == 2, (
+        f"completed latest delta should be stubbed, got {msg.get('stub')}"
+    )
+    assert msg.get("event_ref"), "completed latest delta missing event_ref"
 
 
-def test_manager_stubbed_cold_load_skips_hydrate_without_workers() -> bool:
+def test_manager_stubbed_cold_load_skips_hydrate_without_workers() -> None:
     sid, asst1_id, asst2_id = _mk_two_turn_session()
     session_manager.flush_pending_persists()
     session_manager._roots.pop(sid, None)
@@ -432,19 +407,18 @@ def test_manager_stubbed_cold_load_skips_hydrate_without_workers() -> bool:
         e.get("data", {}).get("uuid")
         for e in a2.get("events") or []
     ]
-    if calls:
-        print(f"  manager stubbed cold load hydrated unexpectedly: {calls}")
-        return False
-    if a1.get("stub", {}).get("event_count") != 3 or a1_uuids != ["a1", "a2", "a3"]:
-        print(f"  manager journal stub wrong: {a1.get('stub')}")
-        return False
-    if a2.get("stub", {}).get("event_count") != 2 or a2.get("events"):
-        print(f"  manager completed latest stub wrong: stub={a2.get('stub')} uuids={a2_uuids}")
-        return False
-    return True
+    assert not calls, f"manager stubbed cold load hydrated unexpectedly: {calls}"
+    assert a1.get("stub", {}).get("event_count") == 3, f"manager journal stub wrong: {a1.get('stub')}"
+    assert a1_uuids == ["a1", "a2", "a3"], f"manager journal stub wrong: {a1.get('stub')}"
+    assert a2.get("stub", {}).get("event_count") == 2, (
+        f"manager completed latest stub wrong: stub={a2.get('stub')} uuids={a2_uuids}"
+    )
+    assert not a2.get("events"), (
+        f"manager completed latest stub wrong: stub={a2.get('stub')} uuids={a2_uuids}"
+    )
 
 
-def test_manager_stubbed_cold_load_skips_hydrate_with_workers() -> bool:
+def test_manager_stubbed_cold_load_skips_hydrate_with_workers() -> None:
     sid, asst1_id, _ = _mk_two_turn_session_with_worker()
     session_manager.flush_pending_persists()
     session_manager._roots.pop(sid, None)
@@ -464,37 +438,24 @@ def test_manager_stubbed_cold_load_skips_hydrate_with_workers() -> bool:
         session_manager._hydrate_cached_root_events = original
 
     a1 = {m["id"]: m for m in tree["messages"]}[asst1_id]
-    if calls:
-        print(f"  manager worker stubbed cold load hydrated unexpectedly: {calls}")
-        return False
-    if a1.get("events"):
-        print(f"  manager worker stub events should be empty, got {a1.get('events')}")
-        return False
-    if a1.get("stub", {}).get("event_count") != 4:
-        print(f"  manager worker journal stub wrong: {a1.get('stub')}")
-        return False
-    return True
+    assert not calls, f"manager worker stubbed cold load hydrated unexpectedly: {calls}"
+    assert not a1.get("events"), f"manager worker stub events should be empty, got {a1.get('events')}"
+    assert a1.get("stub", {}).get("event_count") == 4, f"manager worker journal stub wrong: {a1.get('stub')}"
 
 
-def test_get_message_full_count_matches_stub() -> bool:
+def test_get_message_full_count_matches_stub() -> None:
     sid, asst1_id, _ = _mk_two_turn_session()
     tree = session_manager.get_root_tree_stubbed(sid)
     stub = {m["id"]: m for m in tree["messages"]}[asst1_id]["stub"]
     full = session_manager.get_message_full(sid, asst1_id)
-    if full is None:
-        print("  get_message_full returned None")
-        return False
-    if len(full.get("events") or []) != 3:
-        print(f"  full events expected 3, got {full.get('events')}")
-        return False
-    if render_stub.renderable_count(full) != stub["event_count"]:
-        print(f"  count mismatch: full={render_stub.renderable_count(full)} "
-              f"stub={stub['event_count']}")
-        return False
-    return True
+    assert full is not None, "get_message_full returned None"
+    assert len(full.get("events") or []) == 3, f"full events expected 3, got {full.get('events')}"
+    assert render_stub.renderable_count(full) == stub["event_count"], (
+        f"count mismatch: full={render_stub.renderable_count(full)} stub={stub['event_count']}"
+    )
 
 
-def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
+def test_stub_summary_dedupes_streaming_uuid_updates() -> None:
     sess = session_manager.create(
         name="streaming-summary", model="sonnet", cwd="/tmp",
         orchestration_mode="manager", source="cli",
@@ -535,25 +496,16 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
     tree = session_manager.get_root_tree_stubbed(sid)
     stub = {m["id"]: m for m in tree["messages"]}[asst1_id]["stub"]
     full = session_manager.get_message_full(sid, asst1_id)
-    if full is None:
-        print("  get_message_full returned None")
-        return False
-    if render_stub.renderable_count(full) != 1:
-        print(f"  full renderable count wrong: {full.get('events')}")
-        return False
-    if stub["event_count"] != 1:
-        print(f"  stub should dedupe same uuid to 1, got {stub}")
-        return False
+    assert full is not None, "get_message_full returned None"
+    assert render_stub.renderable_count(full) == 1, f"full renderable count wrong: {full.get('events')}"
+    assert stub["event_count"] == 1, f"stub should dedupe same uuid to 1, got {stub}"
     tail = stub["last_events"]
     text = (((tail[-1].get("data") or {}).get("message") or {})
             .get("content") or [{}])[0].get("text")
-    if text != "final":
-        print(f"  stub tail should carry latest mutation, got {tail}")
-        return False
-    return True
+    assert text == "final", f"stub tail should carry latest mutation, got {tail}"
 
 
-def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
+def test_journal_stubbed_load_keeps_steer_prompts() -> None:
     sess = session_manager.create(
         name="journal-steer-summary", model="sonnet", cwd="/tmp",
         orchestration_mode="manager", source="cli",
@@ -619,16 +571,13 @@ def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
         for e in stub.get("last_events") or []
         if e.get("type") == "steer_prompt"
     ]
-    if prompts != ["visible from journal summary"]:
-        print(f"  journal-backed collapsed stub dropped steer prompt: {stub}")
-        return False
-    if stub.get("event_count") != 41:
-        print(f"  journal-backed stub count wrong: {stub}")
-        return False
-    return True
+    assert prompts == ["visible from journal summary"], (
+        f"journal-backed collapsed stub dropped steer prompt: {stub}"
+    )
+    assert stub.get("event_count") == 41, f"journal-backed stub count wrong: {stub}"
 
 
-def test_journal_summary_matches_render_tree_event_gate() -> bool:
+def test_journal_summary_matches_render_tree_event_gate() -> None:
     root_id = "summary-render-gate"
     msg_id = "assistant-summary-render-gate"
 
@@ -703,73 +652,48 @@ def test_journal_summary_matches_render_tree_event_gate() -> bool:
     summary = event_ingester.message_event_summaries(
         root_id, sid_filter=root_id, msg_ids={msg_id}, tail=25,
     ).get(msg_id)
-    if not summary:
-        print("  missing message summary")
-        return False
-    if summary.get("event_count") != 2:
-        print(f"  summary should count two render-tree events, got {summary}")
-        return False
+    assert summary, "missing message summary"
+    assert summary.get("event_count") == 2, f"summary should count two render-tree events, got {summary}"
     tail = summary.get("last_events") or []
     serialized = repr(tail)
-    if "old top" in serialized or "old wrapped" in serialized:
-        print(f"  summary tail kept stale uuid snapshots: {tail}")
-        return False
-    if "new top" not in serialized or "new wrapped" not in serialized:
-        print(f"  summary tail missing latest uuid snapshots: {tail}")
-        return False
-    if "not in render tree" in serialized:
-        print(f"  summary tail included uuid-less provider bookkeeping: {tail}")
-        return False
-    return True
+    assert "old top" not in serialized and "old wrapped" not in serialized, (
+        f"summary tail kept stale uuid snapshots: {tail}"
+    )
+    assert "new top" in serialized and "new wrapped" in serialized, (
+        f"summary tail missing latest uuid snapshots: {tail}"
+    )
+    assert "not in render tree" not in serialized, (
+        f"summary tail included uuid-less provider bookkeeping: {tail}"
+    )
 
 
-def test_stubbed_load_does_not_corrupt_cache() -> bool:
+def test_stubbed_load_does_not_corrupt_cache() -> None:
     sid, asst1_id, _ = _mk_two_turn_session()
     session_manager.get_root_tree_stubbed(sid)  # strips + restores
     live = session_manager.get(sid)
     a1 = next(m for m in live["messages"] if m["id"] == asst1_id)
-    if len(a1.get("events") or []) != 3:
-        print(f"  live cache corrupted: asst1 events={a1.get('events')}")
-        return False
-    if "stub" in a1:
-        print("  temp stub key leaked onto live cache")
-        return False
-    return True
+    assert len(a1.get("events") or []) == 3, f"live cache corrupted: asst1 events={a1.get('events')}"
+    assert "stub" not in a1, "temp stub key leaked onto live cache"
 
 
-def test_native_stubbed_load_keeps_cache_thin() -> bool:
+def test_native_stubbed_load_keeps_cache_thin() -> None:
     sid, asst1_id, asst2_id = _mk_native_two_turn_session()
     tree = session_manager.get_root_tree_stubbed(sid)
     msgs = {m["id"]: m for m in tree["messages"]}
     a1, a2 = msgs[asst1_id], msgs[asst2_id]
-    if a1.get("events") != []:
-        print(f"  historical native events should be stubbed, got {a1.get('events')}")
-        return False
-    if a1.get("stub", {}).get("event_count") != 3:
-        print(f"  native stub wrong: {a1.get('stub')}")
-        return False
-    if not a1.get("event_ref"):
-        print("  native stub missing event_ref")
-        return False
-    if a2.get("events"):
-        print(f"  completed latest native message should be stubbed, got {a2}")
-        return False
-    if a2.get("stub", {}).get("event_count") != 2:
-        print(f"  completed latest native stub wrong, got {a2.get('stub')}")
-        return False
+    assert a1.get("events") == [], f"historical native events should be stubbed, got {a1.get('events')}"
+    assert a1.get("stub", {}).get("event_count") == 3, f"native stub wrong: {a1.get('stub')}"
+    assert a1.get("event_ref"), "native stub missing event_ref"
+    assert not a2.get("events"), f"completed latest native message should be stubbed, got {a2}"
+    assert a2.get("stub", {}).get("event_count") == 2, f"completed latest native stub wrong: {a2.get('stub')}"
     live_root = session_manager._roots.get(sid)
     live_a1 = next(m for m in live_root["messages"] if m["id"] == asst1_id)
-    if live_a1.get("events"):
-        print("  native cold cache should stay thin after stubbed load")
-        return False
+    assert not live_a1.get("events"), "native cold cache should stay thin after stubbed load"
     full = session_manager.get_message_full(sid, asst1_id)
-    if len(full.get("events") or []) != 3:
-        print(f"  lazy full native events expected 3, got {full}")
-        return False
-    return True
+    assert len(full.get("events") or []) == 3, f"lazy full native events expected 3, got {full}"
 
 
-def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
+def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> None:
     sid, _, asst2_id = _mk_two_turn_session()
     strategy = get_strategy("manager")
     msg = session_manager.get_ref(sid)["messages"][-1]
@@ -800,10 +724,10 @@ def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
         tree = session_manager.get_root_tree_stubbed(sid)
 
     latest = render_stub.latest_assistant_id(tree.get("messages") or [])
-    if latest != asst2_id:
-        return False
+    assert latest == asst2_id
     latest_msg = {m["id"]: m for m in tree["messages"]}[latest]
-    return latest_msg.get("events") == [] and latest_msg.get("stub", {}).get("event_count") == render_stub.STUB_TAIL + 12
+    assert latest_msg.get("events") == []
+    assert latest_msg.get("stub", {}).get("event_count") == render_stub.STUB_TAIL + 12
 
 
 TESTS = [
@@ -840,27 +764,30 @@ TESTS = [
 ]
 
 
-def main_run() -> int:
+def main_run() -> None:
     failed = 0
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as e:
-                ok = False
+                fn()
+            except AssertionError as e:
+                failed += 1
+                print(f"{FAIL}  {name}: {e}")
+            except Exception:
+                failed += 1
                 import traceback
                 traceback.print_exc()
-                print(f"  exception: {e}")
-            print(f"{PASS if ok else FAIL}  {name}")
-            if not ok:
-                failed += 1
+                print(f"{FAIL}  {name}")
+            else:
+                print(f"{PASS}  {name}")
+        print()
+        if failed:
+            print(f"{failed} of {len(TESTS)} test(s) FAILED")
+            raise SystemExit(1)
+        print(f"all {len(TESTS)} tests passed")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    print()
-    print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed
-          else f"all {len(TESTS)} tests passed")
-    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main_run())
+    main_run()

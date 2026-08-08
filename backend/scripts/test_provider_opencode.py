@@ -42,7 +42,7 @@ import runner_opencode  # noqa: E402
 _SID = "ses_0b79206b6ffepfkQFkR4mbrdcA"
 
 
-def test_kind_and_capability_matrix() -> bool:
+def test_kind_and_capability_matrix() -> None:
     cls = provider_opencode.OpencodeProvider
     expected = {
         "supports_fork": True,
@@ -54,14 +54,12 @@ def test_kind_and_capability_matrix() -> bool:
         "supports_reasoning_effort": True,
         "supports_headless_no_tools": False,
     }
-    return (
-        cls.KIND == "opencode"
-        and all(getattr(cls, k) is v for k, v in expected.items())
-        and cls.reasoning_effort_options == ("minimal", "high", "max")
-    )
+    assert cls.KIND == "opencode"
+    assert all(getattr(cls, k) is v for k, v in expected.items())
+    assert cls.reasoning_effort_options == ("minimal", "high", "max")
 
 
-def test_build_env_scrubs_claude_session_env() -> bool:
+def test_build_env_scrubs_claude_session_env() -> None:
     import os
     inst = provider_opencode.OpencodeProvider(
         {"id": "oc1", "kind": "opencode", "mode": "api_key"}
@@ -73,22 +71,22 @@ def test_build_env_scrubs_claude_session_env() -> bool:
     finally:
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         os.environ.pop("ANTHROPIC_API_KEY", None)
-    return (
-        not any(k in env for k in (
-            "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
-        ))
-        # ANTHROPIC_API_KEY is a valid opencode credential source — kept.
-        and env.get("ANTHROPIC_API_KEY") == "test-key"
-    )
+    assert not any(k in env for k in (
+        "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    ))
+    # ANTHROPIC_API_KEY is a valid opencode credential source — kept.
+    assert env.get("ANTHROPIC_API_KEY") == "test-key"
 
 
-def test_models_static_seed() -> bool:
+def test_models_static_seed() -> None:
     seed = provider_opencode.OPENCODE_MODELS
-    return bool(seed) and all("/" in m for m in seed) and "opencode/big-pickle" in seed
+    assert seed
+    assert all("/" in m for m in seed)
+    assert "opencode/big-pickle" in seed
 
 
-def test_parses_models_output() -> bool:
+def test_parses_models_output() -> None:
     sample = """
 opencode/big-pickle
 anthropic/claude-sonnet-4-5
@@ -97,23 +95,24 @@ INFO some stray log line
 anthropic/claude-sonnet-4-5
 not a model line at all
 """
-    return provider_opencode.parse_opencode_models(sample) == [
+    assert provider_opencode.parse_opencode_models(sample) == [
         "opencode/big-pickle",
         "anthropic/claude-sonnet-4-5",
         "opencode/north-mini-code-free",
     ]
 
 
-def test_models_fetch_parses_real_cli() -> bool:
+def test_models_fetch_parses_real_cli() -> None:
     # Only assert when the opencode CLI is installed on PATH; otherwise
     # skip (the static seed covers cold-start).
     if not shutil.which("opencode"):
-        return True
+        return
     parsed = provider_opencode.fetch_opencode_models()
-    return bool(parsed) and all("/" in m for m in parsed)
+    assert parsed
+    assert all("/" in m for m in parsed)
 
 
-def test_argv_stdin_only_no_prompt_leakage() -> bool:
+def test_argv_stdin_only_no_prompt_leakage() -> None:
     argv = runner_opencode.build_opencode_argv(
         opencode_bin="/usr/bin/opencode",
         model="opencode/big-pickle",
@@ -124,12 +123,12 @@ def test_argv_stdin_only_no_prompt_leakage() -> bool:
         cwd="/work/project",
     )
     # Prompt is piped over stdin — argv must never contain it.
-    return argv == ["/usr/bin/opencode", "run", "--format", "json",
+    assert argv == ["/usr/bin/opencode", "run", "--format", "json",
                     "--dir", "/work/project",
                     "-m", "opencode/big-pickle"]
 
 
-def test_argv_resume_fork_variant_files() -> bool:
+def test_argv_resume_fork_variant_files() -> None:
     argv = runner_opencode.build_opencode_argv(
         opencode_bin="opencode",
         model="anthropic/claude-sonnet-4-5",
@@ -139,7 +138,7 @@ def test_argv_resume_fork_variant_files() -> bool:
         permission_argv=["--auto"],
         attachment_paths=[Path("/tmp/att/a.png")],
     )
-    return argv == [
+    assert argv == [
         "opencode", "run", "--format", "json",
         "-m", "anthropic/claude-sonnet-4-5",
         "--variant", "high",
@@ -149,7 +148,7 @@ def test_argv_resume_fork_variant_files() -> bool:
     ]
 
 
-def test_argv_fork_without_session_fails_closed() -> bool:
+def test_argv_fork_without_session_fails_closed() -> None:
     try:
         runner_opencode.build_opencode_argv(
             opencode_bin="opencode",
@@ -160,31 +159,30 @@ def test_argv_fork_without_session_fails_closed() -> bool:
             permission_argv=[],
         )
     except ValueError:
-        return True
-    return False
+        return
+    raise AssertionError("fork without a session must fail closed")
 
 
-def test_permission_mapping() -> bool:
+def test_permission_mapping() -> None:
     import json as _json
     auto_argv, auto_env = runner_opencode.resolve_permission_spawn({"mode": "auto"})
     default_argv, default_env = runner_opencode.resolve_permission_spawn({})
     ro_argv, ro_env = runner_opencode.resolve_permission_spawn({"mode": "readonly"})
-    if auto_argv != ["--auto"] or auto_env:
-        return False
-    if default_argv or default_env:
-        return False
-    if ro_argv:
-        return False
+    assert auto_argv == ["--auto"]
+    assert not auto_env
+    assert not default_argv
+    assert not default_env
+    assert not ro_argv
     denied = _json.loads(ro_env.get("OPENCODE_PERMISSION", "{}"))
-    return denied == {"bash": "deny", "edit": "deny", "write": "deny", "patch": "deny"}
+    assert denied == {"bash": "deny", "edit": "deny", "write": "deny", "patch": "deny"}
 
 
-def test_permission_unknown_mode_fails_closed() -> bool:
+def test_permission_unknown_mode_fails_closed() -> None:
     try:
         runner_opencode.resolve_permission_spawn({"mode": "yolo"})
     except ValueError:
-        return True
-    return False
+        return
+    raise AssertionError("unknown permission mode must fail closed")
 
 
 def _norm(event: dict) -> list[dict]:
@@ -193,37 +191,32 @@ def _norm(event: dict) -> list[dict]:
     )
 
 
-def test_runner_normalizes_text_event() -> bool:
+def test_runner_normalizes_text_event() -> None:
     out = _norm({
         "type": "text", "timestamp": 1783626598785, "sessionID": _SID,
         "part": {"id": "prt_1", "messageID": "msg_1", "sessionID": _SID,
                  "type": "text", "text": "PONG"},
     })
-    if len(out) != 1:
-        return False
+    assert len(out) == 1
     ev = out[0]
     block = ev["message"]["content"][0]
-    return (
-        ev["type"] == "assistant"
-        and ev["parentUuid"] == _SID
-        and ev["message"]["model"] == "opencode/big-pickle"
-        and block == {"type": "text", "text": "PONG"}
-    )
+    assert ev["type"] == "assistant"
+    assert ev["parentUuid"] == _SID
+    assert ev["message"]["model"] == "opencode/big-pickle"
+    assert block == {"type": "text", "text": "PONG"}
 
 
-def test_runner_normalizes_reasoning_event() -> bool:
+def test_runner_normalizes_reasoning_event() -> None:
     out = _norm({
         "type": "reasoning", "sessionID": _SID,
         "part": {"id": "prt_r", "type": "reasoning", "text": "thinking hard"},
     })
-    return (
-        len(out) == 1
-        and out[0]["type"] == "assistant"
-        and out[0]["message"]["content"][0] == {"type": "thinking", "thinking": "thinking hard"}
-    )
+    assert len(out) == 1
+    assert out[0]["type"] == "assistant"
+    assert out[0]["message"]["content"][0] == {"type": "thinking", "thinking": "thinking hard"}
 
 
-def test_runner_normalizes_completed_tool_event() -> bool:
+def test_runner_normalizes_completed_tool_event() -> None:
     out = _norm({
         "type": "tool_use", "timestamp": 1783626624808, "sessionID": _SID,
         "part": {
@@ -236,26 +229,23 @@ def test_runner_normalizes_completed_tool_event() -> bool:
             "id": "prt_t1", "sessionID": _SID, "messageID": "msg_1",
         },
     })
-    if len(out) != 2:
-        return False
+    assert len(out) == 2
     use, result = out
     use_block = use["message"]["content"][0]
     result_block = result["message"]["content"][0]
-    return (
-        use["type"] == "assistant"
-        and use_block["type"] == "tool_use"
-        and use_block["id"] == "read_wx16"
-        and use_block["name"] == "Read"                       # name mapped
-        and use_block["input"] == {"file_path": "/tmp/sample.txt"}  # key mapped
-        and result["type"] == "user"
-        and result_block["type"] == "tool_result"
-        and result_block["tool_use_id"] == "read_wx16"
-        and result_block["content"] == "hello"
-        and result_block["is_error"] is False
-    )
+    assert use["type"] == "assistant"
+    assert use_block["type"] == "tool_use"
+    assert use_block["id"] == "read_wx16"
+    assert use_block["name"] == "Read"                       # name mapped
+    assert use_block["input"] == {"file_path": "/tmp/sample.txt"}  # key mapped
+    assert result["type"] == "user"
+    assert result_block["type"] == "tool_result"
+    assert result_block["tool_use_id"] == "read_wx16"
+    assert result_block["content"] == "hello"
+    assert result_block["is_error"] is False
 
 
-def test_runner_running_tool_emits_use_only_then_result_on_completion() -> bool:
+def test_runner_running_tool_emits_use_only_then_result_on_completion() -> None:
     running = _norm({
         "type": "tool_use", "sessionID": _SID,
         "part": {"type": "tool", "tool": "bash", "callID": "b1", "id": "prt_b",
@@ -267,27 +257,27 @@ def test_runner_running_tool_emits_use_only_then_result_on_completion() -> bool:
                  "state": {"status": "completed", "input": {"command": "ls"},
                            "output": "file.py"}},
     })
-    if len(running) != 1 or len(completed) != 2:
-        return False
+    assert len(running) == 1
+    assert len(completed) == 2
     # Same part → same tool_use render uuid, so the completed update
     # replaces the running one instead of duplicating.
-    return running[0]["uuid"] == completed[0]["uuid"]
+    assert running[0]["uuid"] == completed[0]["uuid"]
 
 
-def test_runner_error_tool_result_flagged() -> bool:
+def test_runner_error_tool_result_flagged() -> None:
     out = _norm({
         "type": "tool_use", "sessionID": _SID,
         "part": {"type": "tool", "tool": "bash", "callID": "b2", "id": "prt_e",
                  "state": {"status": "error", "input": {"command": "boom"},
                            "error": "command failed"}},
     })
-    if len(out) != 2:
-        return False
+    assert len(out) == 2
     block = out[1]["message"]["content"][0]
-    return block["is_error"] is True and block["content"] == "command failed"
+    assert block["is_error"] is True
+    assert block["content"] == "command failed"
 
 
-def test_runner_skips_bookkeeping_events() -> bool:
+def test_runner_skips_bookkeeping_events() -> None:
     for etype in ("step_start", "step_finish"):
         out = _norm({
             "type": etype, "sessionID": _SID,
@@ -295,21 +285,17 @@ def test_runner_skips_bookkeeping_events() -> bool:
                      "tokens": {"total": 10, "input": 8, "output": 2,
                                 "reasoning": 0, "cache": {"write": 0, "read": 0}}},
         })
-        if out:
-            return False
-    return True
+        assert not out
 
 
-def test_runner_surfaces_unknown_event() -> bool:
+def test_runner_surfaces_unknown_event() -> None:
     out = _norm({"type": "brand_new_thing", "sessionID": _SID, "part": {"id": "p"}})
-    return (
-        len(out) == 1
-        and out[0]["type"] == "unknown_event"
-        and out[0]["raw_type"] == "brand_new_thing"
-    )
+    assert len(out) == 1
+    assert out[0]["type"] == "unknown_event"
+    assert out[0]["raw_type"] == "brand_new_thing"
 
 
-def test_runner_uuid_deterministic_per_part() -> bool:
+def test_runner_uuid_deterministic_per_part() -> None:
     event = {
         "type": "text", "sessionID": _SID,
         "part": {"id": "prt_x", "type": "text", "text": "partial"},
@@ -324,10 +310,11 @@ def test_runner_uuid_deterministic_per_part() -> bool:
         "type": "text", "sessionID": _SID,
         "part": {"id": "prt_y", "type": "text", "text": "different part"},
     })[0]
-    return a["uuid"] == b["uuid"] and a["uuid"] != other["uuid"]
+    assert a["uuid"] == b["uuid"]
+    assert a["uuid"] != other["uuid"]
 
 
-def test_runner_usage_accumulation() -> bool:
+def test_runner_usage_accumulation() -> None:
     usage: dict[str, int] = {}
     usage = runner_opencode._sum_tokens(usage, {
         "total": 15387, "input": 15301, "output": 0, "reasoning": 94,
@@ -337,7 +324,7 @@ def test_runner_usage_accumulation() -> bool:
         "total": 100, "input": 80, "output": 20, "reasoning": 0,
         "cache": {"write": 2, "read": 0},
     })
-    return usage == {
+    assert usage == {
         "input_tokens": 15381,
         "output_tokens": 20,
         "total_tokens": 15487,
@@ -347,13 +334,11 @@ def test_runner_usage_accumulation() -> bool:
     }
 
 
-def test_capability_context_labels_team_message() -> bool:
+def test_capability_context_labels_team_message() -> None:
     from capability_contexts import prompt_heading_for_source
 
-    return (
-        prompt_heading_for_source("mssg") == "Message"
-        and prompt_heading_for_source("team_ask") == "Ask"
-    )
+    assert prompt_heading_for_source("mssg") == "Message"
+    assert prompt_heading_for_source("team_ask") == "Ask"
 
 
 TESTS = [
@@ -380,26 +365,29 @@ TESTS = [
 ]
 
 
-def main() -> int:
+def main() -> None:
     failures = []
     try:
         for name, fn in TESTS:
             try:
-                ok = fn()
-            except Exception as exc:  # noqa: BLE001 — report, don't abort the suite
-                print(f"FAIL: {name} ({type(exc).__name__}: {exc})")
+                fn()
+            except AssertionError as exc:
+                print(f"FAIL: {name} ({exc})")
                 failures.append(name)
                 continue
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            except Exception:  # noqa: BLE001 — report, don't abort the suite
+                import traceback
+                print(f"FAIL: {name}")
+                traceback.print_exc()
                 failures.append(name)
+                continue
+            print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
         print("Failures:", ", ".join(failures))
-        return 1
-    return 0
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

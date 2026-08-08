@@ -205,7 +205,9 @@ class ReconciledMarkerIndex:
             except (TypeError, ValueError):
                 malformed += 1
                 continue
-            if not key[0]:
+            # row_key() only returns keys whose run_id (key[0]) is a non-empty
+            # string, so this arm cannot fire — kept as defense-in-depth.
+            if not key[0]:  # pragma: no cover
                 malformed += 1
                 continue
             self._keys.add(key)

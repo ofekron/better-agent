@@ -30,7 +30,6 @@ import type {
   Schedule,
   Session,
   SessionStatusKey,
-  StartupTask,
   BackgroundWorkItem,
   ToolApproval,
   UserInteractionRequest,
@@ -148,9 +147,6 @@ export interface BusEventMap {
     went_retired?: string[];
     truly_removed?: string[];
   };
-  startup_task_changed:
-    | { cleared: true }
-    | { task: StartupTask };
   background_work_changed:
     | { epoch: string; cleared: true }
     | { epoch: string; item: BackgroundWorkItem }
@@ -213,6 +209,9 @@ export interface BusEventMap {
   // on start; end carries nothing.
   session_drag_start: { session_id: string; name?: string };
   session_drag_end: Record<string, never>;
+  // User-preference patch broadcast (backend WS frame + client-local publishes
+  // from the background-work visibility toggle). Open payload: pref keys vary.
+  user_prefs_changed: Record<string, unknown>;
 }
 
 type Handler<T> = (payload: T) => void;

@@ -87,7 +87,7 @@ def _install_slow_handler(logger, hold_seconds: float):
     return h
 
 
-async def test_offloaded_flush_does_not_block_loop() -> bool:
+async def test_offloaded_flush_does_not_block_loop() -> None:
     handler = _install_slow_handler(perf.logger, SLOW_SECONDS)
     original_level = perf.logger.level
     perf.logger.setLevel("INFO")  # match production: rollup logs at INFO
@@ -98,16 +98,28 @@ async def test_offloaded_flush_does_not_block_loop() -> bool:
         perf.logger.removeHandler(handler)  # type: ignore[arg-type]
         perf.logger.setLevel(original_level)
 
-    ok = ticks >= 10
+    # The property under test is binary — did the loop keep making progress
+    # concurrently with the slow flush, or was it synchronously blocked for
+    # the whole hold? `test_direct_flush_blocks_loop_control` proves the
+    # regressed (blocking) case always yields exactly 0 ticks, so any
+    # non-zero count here already distinguishes "offloaded" from "blocking"
+    # with no straddling ambiguity. A fixed throughput floor (e.g. ">=10"
+    # ticks, assuming near-ideal 20ms-granularity scheduling) instead
+    # measures host CPU contention, not this code's behavior, and false-fails
+    # under a busy/CPU-capped CI runner even though the loop never blocked.
+    ok = ticks >= 1
     print(
         f"{PASS if ok else FAIL} perf.flush() via asyncio.to_thread: loop "
         f"ticks during a {SLOW_SECONDS}s slow-handler flush = {ticks} "
-        f"(want >=10, proves loop stayed responsive)"
+        f"(want >=1, proves loop stayed responsive)"
     )
-    return ok
+    assert ok, (
+        f"loop froze: {ticks} ticks during off-thread flush "
+        f"(want >=1 -- zero ticks means the loop was synchronously blocked)"
+    )
 
 
-async def test_direct_flush_blocks_loop_control() -> bool:
+async def test_direct_flush_blocks_loop_control() -> None:
     """Control: prove the OLD (direct) call pattern really does freeze
     the loop, so a false pass above isn't hiding a no-op handler."""
     handler = _install_slow_handler(perf.logger, SLOW_SECONDS)
@@ -130,10 +142,13 @@ async def test_direct_flush_blocks_loop_control() -> bool:
         f"during a {SLOW_SECONDS}s slow-handler flush = {ticks} (want ==0, "
         f"proves a slow handler flush is real blocking, not a no-op)"
     )
-    return ok
+    assert ok, (
+        f"control failed: direct flush let {ticks} ticks through "
+        f"(want ==0); slow handler may be a no-op"
+    )
 
 
-def test_rollup_loop_calls_flush_via_to_thread() -> bool:
+def test_rollup_loop_calls_flush_via_to_thread() -> None:
     """Static guard: _rollup_loop must not call flush() directly."""
     src = inspect.getsource(perf._rollup_loop)
     bare_calls = [line for line in src.splitlines() if line.strip() == "flush()"]
@@ -147,17 +162,30 @@ def test_rollup_loop_calls_flush_via_to_thread() -> bool:
         f"asyncio.to_thread (bare calls={len(bare_calls)}, "
         f"wrapped calls={len(wrapped_calls)})"
     )
-    return ok
+    assert ok, (
+        f"_rollup_loop wiring wrong: bare flush() calls={len(bare_calls)}, "
+        f"asyncio.to_thread(flush) calls={len(wrapped_calls)} (want 0 bare, 1 wrapped)"
+    )
 
 
 def main() -> int:
-    results = []
-    results.append(asyncio.run(test_offloaded_flush_does_not_block_loop()))
-    results.append(asyncio.run(test_direct_flush_blocks_loop_control()))
-    results.append(test_rollup_loop_calls_flush_via_to_thread())
-    ok = all(results)
-    print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
-    return 0 if ok else 1
+    failed = False
+    for label, runner in [
+        ("offloaded_flush_does_not_block_loop", lambda: asyncio.run(test_offloaded_flush_does_not_block_loop())),
+        ("direct_flush_blocks_loop_control", lambda: asyncio.run(test_direct_flush_blocks_loop_control())),
+        ("rollup_loop_calls_flush_via_to_thread", lambda: test_rollup_loop_calls_flush_via_to_thread()),
+    ]:
+        try:
+            runner()
+        except AssertionError as exc:
+            failed = True
+            print(f"{FAIL} {label}: {exc}")
+        except Exception:
+            failed = True
+            import traceback
+            traceback.print_exc()
+    print(f"\n{'ALL PASS' if not failed else 'FAILURES PRESENT'}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

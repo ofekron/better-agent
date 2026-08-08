@@ -45,6 +45,28 @@ def _write_route_status(
     ask_status_store.write_status(ask_id, **fields)
 
 
+def _reader_none_until_persisted(lifecycle_msg_id: str, *, kind: str):
+    """Terminal-event reader stub modeling the recovery emit contract.
+
+    `_emit_recovered_user_message_terminal_on_main` reads the terminal event
+    before emitting (must be absent → no early return) and again after emitting
+    (must be present → the post-emit persistence verify passes). The fake UPM
+    calls the returned `mark_persisted` from its emit methods, so the reader
+    returns None until the emit lands, then the persisted terminal event.
+    """
+    state = {"persisted": False}
+
+    def mark_persisted() -> None:
+        state["persisted"] = True
+
+    async def _scan(_app_session_id: str, _lifecycle_msg_id: str):
+        if not state["persisted"]:
+            return None
+        return {"type": kind, "data": {"lifecycle_msg_id": lifecycle_msg_id}}
+
+    return mark_persisted, _scan
+
+
 def test_ask_status_store_roundtrip():
     assert ask_status_store.read_status("ask_1") is None
     ask_status_store.write_status(
@@ -421,6 +443,7 @@ def test_recovery_uses_async_terminal_scan(monkeypatch):
 
     asyncio.run(run_recovery._emit_recovered_user_message_terminal(
         coordinator=_Coordinator(),
+        app_session_id=target["id"],
         persist_sid=target["id"],
         mode="native",
         agent_sid=None,
@@ -565,13 +588,21 @@ def test_recovery_emits_user_message_done_for_recovered_success(monkeypatch):
     })
     sess = session_manager.get(target["id"])
     captured: list[tuple] = []
+    mark_persisted, scan = _reader_none_until_persisted(
+        "life-recovery-terminal", kind="user_message_done",
+    )
+    monkeypatch.setattr(
+        user_msg_lifecycle, "terminal_event_for_lifecycle_async", scan,
+    )
 
     class _UPM:
         async def emit_user_msg_done(self, *args, **kwargs):
             captured.append(("done", args, kwargs))
+            mark_persisted()
 
         async def emit_user_msg_failed(self, *args, **kwargs):
             captured.append(("failed", args, kwargs))
+            mark_persisted()
 
     class _Coordinator:
         user_prompt_manager = _UPM()
@@ -588,6 +619,7 @@ def test_recovery_emits_user_message_done_for_recovered_success(monkeypatch):
 
     asyncio.run(run_recovery._emit_recovered_user_message_terminal(
         coordinator=_Coordinator(),
+        app_session_id=target["id"],
         persist_sid=target["id"],
         mode="native",
         agent_sid="agent-sid",
@@ -626,13 +658,21 @@ def test_recovery_emits_user_message_failed_when_complete_missing(monkeypatch):
     })
     sess = session_manager.get(target["id"])
     captured: list[tuple] = []
+    mark_persisted, scan = _reader_none_until_persisted(
+        "life-recovery-failed", kind="user_message_failed",
+    )
+    monkeypatch.setattr(
+        user_msg_lifecycle, "terminal_event_for_lifecycle_async", scan,
+    )
 
     class _UPM:
         async def emit_user_msg_done(self, *args, **kwargs):
             captured.append(("done", args, kwargs))
+            mark_persisted()
 
         async def emit_user_msg_failed(self, *args, **kwargs):
             captured.append(("failed", args, kwargs))
+            mark_persisted()
 
     class _Coordinator:
         user_prompt_manager = _UPM()
@@ -641,6 +681,7 @@ def test_recovery_emits_user_message_failed_when_complete_missing(monkeypatch):
 
     asyncio.run(run_recovery._emit_recovered_user_message_terminal(
         coordinator=_Coordinator(),
+        app_session_id=target["id"],
         persist_sid=target["id"],
         mode="native",
         agent_sid=None,

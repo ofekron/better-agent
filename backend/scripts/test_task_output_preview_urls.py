@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 
 import pytest
+from itsdangerous import URLSafeTimedSerializer
 from starlette.testclient import TestClient
 
 import _test_home
@@ -95,6 +96,52 @@ def test_preview_token_expiry_and_secret_scope(monkeypatch) -> None:
     monkeypatch.setattr(task_output_preview_urls, "MAX_AGE_SECONDS", -1)
     with pytest.raises(ValueError):
         task_output_preview_urls.verify(token, "task1", "0123456789ab")
+
+
+_VALID_TASK = "task1"
+_VALID_OUTPUT = "0123456789ab"
+
+
+def _forge_token(payload) -> str:
+    # Sign an arbitrary payload with the real secret + salt so verify() reaches
+    # the type guards past the signature check.
+    serializer = URLSafeTimedSerializer(
+        auth.get_session_secret(), salt=task_output_preview_urls._SALT
+    )
+    return serializer.dumps(payload)
+
+
+def test_validate_ids_rejects_invalid_task_id() -> None:
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint(None, _VALID_OUTPUT)
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint("has space", _VALID_OUTPUT)
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint("x" * 65, _VALID_OUTPUT)
+
+
+def test_validate_ids_rejects_invalid_output_id() -> None:
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint(_VALID_TASK, None)
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint(_VALID_TASK, "too short")
+    with pytest.raises(ValueError):
+        task_output_preview_urls.mint(_VALID_TASK, "ABCDEF012345")
+
+
+def test_verify_rejects_validly_signed_non_dict_payload() -> None:
+    token = _forge_token("not-a-dict")
+    with pytest.raises(ValueError):
+        task_output_preview_urls.verify(token, _VALID_TASK, _VALID_OUTPUT)
+
+
+def test_verify_rejects_validly_signed_dict_with_non_string_fields() -> None:
+    token = _forge_token({"task_id": 123, "output_id": _VALID_OUTPUT})
+    with pytest.raises(ValueError):
+        task_output_preview_urls.verify(token, _VALID_TASK, _VALID_OUTPUT)
+    token = _forge_token({"task_id": _VALID_TASK, "output_id": 456})
+    with pytest.raises(ValueError):
+        task_output_preview_urls.verify(token, _VALID_TASK, _VALID_OUTPUT)
 
 
 if __name__ == "__main__":

@@ -120,6 +120,9 @@ STORE_ACCESS_ALLOWLIST = (
     "backend.node_store",
     "backend.node_link",
     "backend.node_provider_credential_sync",
+    # ADR 0005 (background-work migration) — host-startup-task records are a
+    # filtered read of the shared background_work_registry.
+    "backend.background_work",
     # Package E (ADR 0009) addition — RunsSurfaceAdapter.run_detail()'s
     # on-demand process-tree enrichment (store_access.inspect_process_tree).
     "backend.process_inspect",

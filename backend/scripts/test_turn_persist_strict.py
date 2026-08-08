@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,9 +40,9 @@ _test_home.isolate("bc-test-turn-persist-strict-")
 
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
+import pytest  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
-FAIL = "\x1b[31mFAIL\x1b[0m"
 
 _COORD = None
 
@@ -54,18 +55,17 @@ def _coordinator():
     return _COORD
 
 
-def test_append_contracts() -> bool:
+def test_append_contracts() -> None:
     """Lenient append on a missing sid returns None; strict raises
     KeyError naming the miss branch."""
     missing = "00000000-dead-beef-0000-000000000000"
-    ok = True
 
-    if session_manager.append_assistant_msg(missing, {"id": "m1"}) is not None:
-        print(f"{FAIL} lenient append_assistant_msg should return None")
-        ok = False
-    if session_manager.append_user_msg(missing, {"id": "m2", "role": "user"}) is not None:
-        print(f"{FAIL} lenient append_user_msg should return None")
-        ok = False
+    assert session_manager.append_assistant_msg(missing, {"id": "m1"}) is None, (
+        "lenient append_assistant_msg should return None"
+    )
+    assert session_manager.append_user_msg(missing, {"id": "m2", "role": "user"}) is None, (
+        "lenient append_user_msg should return None"
+    )
 
     for fn, msg in (
         (session_manager.append_assistant_msg, {"id": "m3"}),
@@ -73,14 +73,11 @@ def test_append_contracts() -> bool:
         # client_id fast path of append_user_msg has its own miss branches.
         (session_manager.append_user_msg, {"id": "m5", "role": "user", "client_id": "c1"}),
     ):
-        try:
+        with pytest.raises(KeyError) as exc:
             fn(missing, msg, strict=True)
-            print(f"{FAIL} strict {fn.__name__} should raise KeyError ({msg['id']})")
-            ok = False
-        except KeyError as e:
-            if "root resolve failed" not in str(e):
-                print(f"{FAIL} strict KeyError should name the rid-miss branch, got: {e}")
-                ok = False
+        assert "root resolve failed" in str(exc.value), (
+            f"strict KeyError should name the rid-miss branch, got: {exc.value}"
+        )
 
     # node-miss branch: root resolvable but tree gone from disk + cache.
     sess = session_manager.create(
@@ -92,16 +89,8 @@ def test_append_contracts() -> bool:
     assert rid is not None
     (Path(session_store._sessions_dir()) / f"{rid}.json").unlink()
     session_manager.reload_root_from_disk(rid)
-    try:
+    with pytest.raises(KeyError):
         session_manager.append_assistant_msg(sid, {"id": "m6"}, strict=True)
-        print(f"{FAIL} strict append after root deletion should raise KeyError")
-        ok = False
-    except KeyError:
-        pass
-
-    if ok:
-        print(f"{PASS} append strict/lenient contracts")
-    return ok
 
 
 class _CaptureWS:
@@ -130,7 +119,7 @@ def _bookkeeping_clean(tm, sid: str) -> list[str]:
     return leaks
 
 
-def test_missing_root_aborts_before_registration() -> bool:
+def test_missing_root_aborts_before_registration() -> None:
     """run_turn on an unresolvable persist_to raises KeyError with ZERO
     bookkeeping — the prompt-processor barrier stays clean and
     handle_prompt's catch terminates the lifecycle as `failed`."""
@@ -153,31 +142,20 @@ def test_missing_root_aborts_before_registration() -> bool:
             mode="native",
         )
 
-    try:
+    with pytest.raises(KeyError):
         asyncio.run(_drive())
-        print(f"{FAIL} run_turn on missing session should raise KeyError")
-        return False
-    except KeyError:
-        pass
-    except Exception as e:
-        print(f"{FAIL} expected KeyError, got {type(e).__name__}: {e}")
-        return False
 
     leaks = _bookkeeping_clean(tm, missing)
-    if leaks:
-        print(f"{FAIL} bookkeeping leaked after pre-registration abort: {leaks}")
-        return False
-    if "user_message_persisted" in ws.types():
-        print(f"{FAIL} false persisted-ack emitted for a failed persist")
-        return False
-    if "turn_start" in ws.types():
-        print(f"{FAIL} turn_start emitted for a turn that never registered")
-        return False
-    print(f"{PASS} missing root aborts pre-registration, zero bookkeeping, no false ack")
-    return True
+    assert not leaks, f"bookkeeping leaked after pre-registration abort: {leaks}"
+    assert "user_message_persisted" not in ws.types(), (
+        "false persisted-ack emitted for a failed persist"
+    )
+    assert "turn_start" not in ws.types(), (
+        "turn_start emitted for a turn that never registered"
+    )
 
 
-def test_mid_turn_vanish_cleans_bookkeeping() -> bool:
+def test_mid_turn_vanish_cleans_bookkeeping() -> None:
     """Root vanishes AFTER the user-msg persist (synchronous listener on
     `user_msg_appended` deletes + evicts) → the strict assistant append
     raises inside the widened try → turn-failure UX runs and the finally
@@ -229,23 +207,19 @@ def test_mid_turn_vanish_cleans_bookkeeping() -> bool:
         session_manager._listeners.remove(_vanish)
 
     leaks = _bookkeeping_clean(tm, sid)
-    if leaks:
-        print(f"{FAIL} bookkeeping leaked after mid-turn abort: {leaks}")
-        return False
+    assert not leaks, f"bookkeeping leaked after mid-turn abort: {leaks}"
     runs = tm._run_state.get(sid) or []
-    if any(r.get("target_message_id") for r in runs):
-        print(f"{FAIL} phantom target left registered: {runs}")
-        return False
-    if "error" not in ws.types() and "user_message_persisted" not in ws.types():
-        # Persist succeeded (frame emitted) so the failure MUST have been
-        # reported; if persist never happened neither frame is required.
-        print(f"{FAIL} turn failed silently: frames={ws.types()}")
-        return False
-    print(f"{PASS} mid-turn vanish aborts loudly and restores bookkeeping")
-    return True
+    assert not any(r.get("target_message_id") for r in runs), (
+        f"phantom target left registered: {runs}"
+    )
+    # Persist succeeded (frame emitted) so the failure MUST have been
+    # reported; if persist never happened neither frame is required.
+    assert "error" in ws.types() or "user_message_persisted" in ws.types(), (
+        f"turn failed silently: frames={ws.types()}"
+    )
 
 
-def test_pre_begin_claim_cleared_on_abort() -> bool:
+def test_pre_begin_claim_cleared_on_abort() -> None:
     """A pre-begin claim must not survive a pre-registration abort."""
     tm = _coordinator().turn_manager
     missing = "22222222-dead-beef-0000-000000000000"
@@ -274,24 +248,16 @@ def test_pre_begin_claim_cleared_on_abort() -> bool:
             queue_item_id="queue-missing",
         )
 
-    try:
+    with pytest.raises(KeyError):
         asyncio.run(_drive())
-        print(f"{FAIL} run_turn on missing session should raise KeyError")
-        return False
-    except KeyError:
-        pass
 
     _coordinator().user_prompt_manager.clear_in_flight_lifecycle_msg_id(missing)
-    if tm.has_pre_begin_prompt(missing):
-        tm.release_pre_begin_prompt(missing, claim)
-        raise AssertionError(
-            "stale pre-begin claim survived the pre-registration abort"
-        )
-    print(f"{PASS} pre-registration abort clears the exact pre-begin claim")
-    return True
+    assert not tm.has_pre_begin_prompt(missing), (
+        "stale pre-begin claim survived the pre-registration abort"
+    )
 
 
-def test_root_writer_guard() -> bool:
+def test_root_writer_guard() -> None:
     """`_migrate_and_persist`'s bulk-walk write routes through the
     registered root-writer guard: a RESIDENT root's stale disk snapshot
     must never be written back (it would clobber live in-memory
@@ -307,14 +273,11 @@ def test_root_writer_guard() -> bool:
     rid = session_manager._root_id_for(sid)
     assert rid is not None
     path = Path(session_store._sessions_dir()) / f"{rid}.json"
-    ok = True
 
-    if session_store._root_writer_guard is None:
-        print(f"{FAIL} session_manager did not register the root writer guard")
-        return False
-    if rid not in session_manager._roots:
-        print(f"{FAIL} freshly created root is not resident — fixture broken")
-        return False
+    assert session_store._root_writer_guard is not None, (
+        "session_manager did not register the root writer guard"
+    )
+    assert rid in session_manager._roots, "freshly created root is not resident — fixture broken"
 
     # Resident root: the walker's stale snapshot write must be SKIPPED.
     stale = json.loads(path.read_text(encoding="utf-8"))
@@ -322,41 +285,80 @@ def test_root_writer_guard() -> bool:
     stale["name"] = "stale-clobber"
     session_store._migrate_and_persist(stale)
     on_disk = json.loads(path.read_text(encoding="utf-8"))
-    if on_disk.get("name") == "stale-clobber":
-        print(f"{FAIL} resident root was overwritten by a bulk-walk snapshot")
-        ok = False
+    assert on_disk.get("name") != "stale-clobber", (
+        "resident root was overwritten by a bulk-walk snapshot"
+    )
 
     # Non-resident root: the backfill write must go through.
     session_manager.reload_root_from_disk(rid)
-    if rid in session_manager._roots:
-        print(f"{FAIL} eviction fixture broken — root still resident")
-        return False
+    assert rid not in session_manager._roots, "eviction fixture broken — root still resident"
     stale2 = json.loads(path.read_text(encoding="utf-8"))
     stale2.pop("_schema_version", None)
     stale2["name"] = "backfill-write"
     session_store._migrate_and_persist(stale2)
     on_disk = json.loads(path.read_text(encoding="utf-8"))
-    if on_disk.get("name") != "backfill-write":
-        print(f"{FAIL} non-resident backfill write was skipped")
-        ok = False
-    if on_disk.get("_schema_version") is None:
-        print(f"{FAIL} backfill write did not persist the migrated fields")
-        ok = False
+    assert on_disk.get("name") == "backfill-write", "non-resident backfill write was skipped"
+    assert on_disk.get("_schema_version") is not None, (
+        "backfill write did not persist the migrated fields"
+    )
 
-    if ok:
-        print(f"{PASS} root writer guard (resident skip / non-resident persist)")
-    return ok
+
+def test_reload_root_from_disk_releases_persist_coordinator_accepted_root() -> None:
+    """Regression: a root vanishing right after a persist was enqueued
+    (e.g. redigest rollback, or the `_vanish` listener above) must not
+    leak into the persist coordinator's `accepted_roots`.
+
+    `_is_quiescent_unlocked` treats ANY entry in `accepted_roots` as
+    "not quiescent" for the WHOLE coordinator, regardless of which root
+    it names. Before the fix, `reload_root_from_disk` popped `pending`
+    and cancelled the deadline for the reloaded root but never released
+    it from `accepted_roots` — leaving one phantom entry that poisons
+    every future `shutdown_persistence()` forever, raising "session
+    persistence drain is incomplete" even when nothing is actually
+    pending."""
+    persist = session_manager._persist_coordinator
+
+    sess = session_manager.create(
+        name="reload-quiescence", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    rid = session_manager._root_id_for(sid)
+    assert rid is not None
+
+    # Mirror the `_vanish` listener: a persist gets enqueued for this root,
+    # then the root is reloaded from disk before the debounce fires.
+    with persist.lock:
+        persist.enqueue_unlocked(
+            rid, session_manager._roots[rid], now=time.monotonic(), debounce=999,
+        )
+    assert rid in persist.accepted_roots, "fixture broken: enqueue did not accept the root"
+
+    session_manager.reload_root_from_disk(rid)
+
+    with persist.lock:
+        assert rid not in persist.accepted_roots, (
+            "reload_root_from_disk leaked the reloaded root into "
+            "accepted_roots — this permanently blocks quiescence"
+        )
+        assert rid not in persist.pending
+        assert rid not in persist.deadlines
 
 
 def main() -> int:
-    results = [
-        test_append_contracts(),
-        test_missing_root_aborts_before_registration(),
-        test_mid_turn_vanish_cleans_bookkeeping(),
-        test_pre_begin_claim_cleared_on_abort(),
-        test_root_writer_guard(),
-    ]
-    return 0 if all(results) else 1
+    test_append_contracts()
+    print(f"{PASS} append strict/lenient contracts")
+    test_missing_root_aborts_before_registration()
+    print(f"{PASS} missing root aborts pre-registration, zero bookkeeping, no false ack")
+    test_mid_turn_vanish_cleans_bookkeeping()
+    print(f"{PASS} mid-turn vanish aborts loudly and restores bookkeeping")
+    test_pre_begin_claim_cleared_on_abort()
+    print(f"{PASS} pre-registration abort clears the exact pre-begin claim")
+    test_root_writer_guard()
+    print(f"{PASS} root writer guard (resident skip / non-resident persist)")
+    test_reload_root_from_disk_releases_persist_coordinator_accepted_root()
+    print(f"{PASS} reload_root_from_disk releases the persist coordinator's accepted_roots entry")
+    return 0
 
 
 if __name__ == "__main__":

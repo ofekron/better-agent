@@ -35,7 +35,29 @@ import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
 import password_manager  # noqa: E402
 import personal_harness_extension  # noqa: E402
+import installation_profile  # noqa: E402
 from json_store import read_json, write_json  # noqa: E402
+import pytest  # noqa: E402
+
+
+# This module exercises the integrations/extension subsystem, which gates
+# active records on installation_profile.integrations_enabled(). Bare test
+# homes carry no installation.json, so the gate is False by default; the
+# standalone __main__ runner forces it True globally. Mirror that baseline so
+# pytest sees the same precondition every test here was designed against.
+@pytest.fixture(autouse=True)
+def _enable_integrations_baseline(monkeypatch):
+    monkeypatch.setattr(installation_profile, "integrations_enabled", lambda: True)
+    # Bare test homes have no bootstrapped installation, so dependency_plan
+    # cannot resolve a "verified" active runtime python. The __main__ runner
+    # stubs active_runtime_python to a fixed path; mirror that so the runtime
+    # extension paths that call _extension_python(has_dependency_environment=False)
+    # resolve instead of raising.
+    monkeypatch.setattr(
+        extension_store.dependency_plan,
+        "active_runtime_python",
+        lambda _backend_dir: Path("/authoritative/backend/python"),
+    )
 
 
 def _record_testape_internal_runtime_mcp() -> Path:
@@ -234,6 +256,7 @@ def _write_private_extension_package(
         "surfaces": manifest.get("surfaces") or [],
         "entrypoints": manifest.get("entrypoints") or {},
         "permissions": manifest.get("permissions") or {},
+        "core_roles": manifest.get("core_roles") or [],
         "protocol": manifest.get("protocol") or _default_protocol(manifest.get("entrypoints") or {}),
         "marketplace": manifest.get("marketplace") or {},
     }
@@ -345,7 +368,6 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     with its own venv on PATH. Uses a self-contained fixture so it does not
     depend on any extension living inside this repo (extensions live in the
     private extensions repo)."""
-    os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
     package = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-ext-")) / "synthetic-runtime-mcp"
     (package / "mcp").mkdir(parents=True)
     manifest = {
@@ -378,17 +400,28 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
 
-    record = extension_store._install_from_package_dir(
-        package_dir=package,
-        source={
-            "type": "test",
-            "repo_url": "",
-            "extension_path": "synthetic-runtime-mcp",
-            "ref": "",
-            "commit_sha": "synthetic-test",
-        },
-        persist=True,
-    )
+    # The synthetic runtime dep is not pip-installable in tests. Skip real
+    # dependency creation during install (the venv is faked below) and restore
+    # immediately so the skip never leaks into later tests that need a real env.
+    previous_skip = os.environ.get("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL")
+    os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
+    try:
+        record = extension_store._install_from_package_dir(
+            package_dir=package,
+            source={
+                "type": "test",
+                "repo_url": "",
+                "extension_path": "synthetic-runtime-mcp",
+                "ref": "",
+                "commit_sha": "synthetic-test",
+            },
+            persist=True,
+        )
+    finally:
+        if previous_skip is None:
+            os.environ.pop("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL", None)
+        else:
+            os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = previous_skip
     extension_store.set_enabled(record["manifest"]["id"], True)
     if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
         raise AssertionError("python_requirements declaration was not preserved")
@@ -491,13 +524,20 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         if "internal-runtime" not in configs:
             raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
 
+        # requires_backend_auth MCPs whose extension holds internal_loopback
+        # self-mint a per-extension token (commit 98e8acbb3), so they remain
+        # available to internal runners even when the external internal_token
+        # is blank at structural-plan time.
         missing_token = dict(inputs)
         missing_token["internal_token"] = ""
         configs = extension_store.runtime_mcp_server_configs(
             missing_token, user_facing=False, bare=False
         )
-        if "internal-runtime" in configs:
-            raise AssertionError("internal runtime MCP available without internal token")
+        if "internal-runtime" not in configs:
+            raise AssertionError(
+                "internal runtime MCP unavailable without external token "
+                "(internal_loopback extensions self-mint)"
+            )
     finally:
         extension_store.dependency_plan.active_runtime_python = original_verified
         try:
@@ -742,16 +782,10 @@ def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> 
 
 def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
     import config_store
-    import installation_profile
 
     _record_testape_internal_runtime_mcp()
     extension_store.grant_native_mcp_server("ofek.testape-internal", "testape", "global")
     original_has_permission = extension_store.has_permission
-    original_integrations_enabled = installation_profile.integrations_enabled
-    # Bare test homes have no installation.json -- _record_active() gates on
-    # integrations_enabled(), which is False without one. resolve_native_mcp_servers_for_context
-    # depends on _record_active, so patch it for the whole test body.
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store.has_permission = lambda _record, permission: permission == "internal_loopback"  # type: ignore[assignment]
     try:
         ambient_config = extension_store.resolve_native_mcp_server_config(
@@ -773,20 +807,17 @@ def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
             raise AssertionError(resolved_disabled)
     finally:
         extension_store.has_permission = original_has_permission  # type: ignore[assignment]
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         config_store.set_disabled_builtin_extensions([])
 
 
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
-    import installation_profile
 
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     stale = extension_store._load()
     root = Path(tempfile.mkdtemp(prefix="bc-test-concurrent-marketplace-ext-"))
     package = root / "headroom-like"
     extension_id = "ofek.concurrent-headroom"
-    original_integrations_enabled = installation_profile.integrations_enabled
     original_extension_python = extension_store._extension_python
     (package / "mcp").mkdir(parents=True)
     manifest = {
@@ -817,7 +848,6 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
     (package / "mcp" / "server.py").write_text("print('headroom')\n", encoding="utf-8")
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store._extension_python = lambda *_args, **_kwargs: sys.executable  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
@@ -864,7 +894,6 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
         except extension_store.ExtensionError:
             pass
         extension_store._extension_python = original_extension_python  # type: ignore[assignment]
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1020,13 +1049,11 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
 
 
 def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy() -> None:
-    import installation_profile
     import runtime_skills
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-synthetic-skill-ext-"))
     package = root / "synthetic-skill"
     extension_id = "ofek.synthetic-skill"
-    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "synthetic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -1051,7 +1078,6 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         encoding="utf-8",
     )
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
             package_dir=package,
@@ -1100,18 +1126,15 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
-    import installation_profile
     import runtime_skills
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-atomic-skill-ext-"))
     package = root / "atomic-skill"
     extension_id = "ofek.atomic-skill"
-    original_integrations_enabled = installation_profile.integrations_enabled
     (package / "skills" / "atomic-skill").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
@@ -1135,7 +1158,6 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
         "---\nname: atomic-skill\ndescription: From package\n---\n",
         encoding="utf-8",
     )
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         extension_store._install_from_package_dir(
             package_dir=package,
@@ -1200,7 +1222,6 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -2446,7 +2467,15 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
     # task genuinely unready is to remove providers entirely. Save/restore the
     # full provider state around the test.
     old_state = config_store._load_state()
-    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
+    # Removing providers also removes the live runtime profiles that reference
+    # them; leaving the profiles orphaned is invalid state the store rejects.
+    config_store._save_state({
+        **old_state,
+        "providers": [],
+        "default_provider_id": None,
+        "runtime_profiles": [],
+        "default_runtime_profile_id": None,
+    })
     loopback = _write_private_extension_package(
         "ofek.loopback-ready",
         "extensions/loopback-ready",
@@ -2499,6 +2528,8 @@ def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
                 **current_state,
                 "providers": old_state["providers"],
                 "default_provider_id": old_state["default_provider_id"],
+                "runtime_profiles": old_state["runtime_profiles"],
+                "default_runtime_profile_id": old_state["default_runtime_profile_id"],
             }
         )
         extension_store.uninstall(loopback_record["manifest"]["id"])
@@ -2865,12 +2896,9 @@ def test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts() -> None:
 
 
 def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
-    import installation_profile
     import lag_incident_queue
 
     work = _private_monorepo_test_work()
-    original_integrations_enabled = installation_profile.integrations_enabled
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     receipt_path = work / "receipts.jsonl"
     old_receipt_path = os.environ.get("LEGACY_LAG_RECEIPT_PATH")
     os.environ["LEGACY_LAG_RECEIPT_PATH"] = str(receipt_path)
@@ -3007,7 +3035,6 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
         if len(receipts) != 1 or lag_incident_queue.depth() != 0:
             raise AssertionError((receipts, lag_incident_queue.depth()))
     finally:
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         extension_backend_loader.evict_persistent_backend("ofek-dev.assistant")
         for extension_id in ("ofek-dev.assistant", "ofek-dev.agent-board"):
             try:
@@ -4090,13 +4117,11 @@ def test_manifest_validates_skill_template_variables() -> None:
 
 
 def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> None:
-    import installation_profile
     import local_machine_identity
 
     root = Path(tempfile.mkdtemp(prefix="bc-test-machine-skill-ext-"))
     package = root / "machine-skill"
     extension_id = "ofek.machine-skill-refresh"
-    original_integrations_enabled = installation_profile.integrations_enabled
     original_machine_id = local_machine_identity._local_machine_id
     (package / "skills" / "operate-machine").mkdir(parents=True)
     manifest = {
@@ -4126,7 +4151,6 @@ def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> N
         encoding="utf-8",
     )
 
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     local_machine_identity._local_machine_id = None
     try:
         extension_store._install_from_package_dir(
@@ -4168,17 +4192,13 @@ def test_machine_template_native_copy_fails_closed_and_refreshes_identity() -> N
             extension_store.uninstall(extension_id)
         except extension_store.ExtensionError:
             pass
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_extension_enable_disable_installs_runtime_skills() -> None:
-    import installation_profile
-
     work = _private_monorepo_test_work()
     home = Path(tempfile.mkdtemp(prefix="bc-test-extension-skills-home-"))
     original_home = os.environ.get("HOME")
-    original_integrations_enabled = installation_profile.integrations_enabled
     repo = work / "skill-repo"
     package = repo / "extensions" / "skillful"
     package.mkdir(parents=True)
@@ -4215,7 +4235,6 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
     _git(repo, "commit", "-m", "skill extension")
     try:
         os.environ["HOME"] = str(home)
-        installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
         target = home / ".agents" / "skills" / "get-requirements"
         record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
@@ -4243,7 +4262,6 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
             except extension_store.ExtensionError:
                 pass
         finally:
-            installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
             if original_home is None:
                 os.environ.pop("HOME", None)
             else:
@@ -4821,6 +4839,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         {
             "name": "Assistant",
             "surfaces": ["backend_feature"],
+            "core_roles": ["assistant"],
             "permissions": {"session_state": True},
         },
         files={"prompts/system.md": "Assistant role prompt."},
@@ -4836,6 +4855,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(assistant_id, True)
 
     sess = assistant_ui.ensure_singleton("board")
     sid = sess["id"]
@@ -4908,7 +4928,15 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
     # unready (tasks resolve via inheritance from the default provider, so
     # clearing assignments alone no longer gates readiness). Restored below.
     old_state = config_store._load_state()
-    config_store._save_state({**old_state, "providers": [], "default_provider_id": None})
+    # Removing providers also removes the live runtime profiles that reference
+    # them; leaving the profiles orphaned is invalid state the store rejects.
+    config_store._save_state({
+        **old_state,
+        "providers": [],
+        "default_provider_id": None,
+        "runtime_profiles": [],
+        "default_runtime_profile_id": None,
+    })
     # Reset any tombstone/record a prior test left: reconcile honors the
     # deleted_extensions tombstone for managed private ids and would otherwise
     # skip re-seeding project-structure, leaving the fixture uninstalled.
@@ -4983,6 +5011,8 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
                 **current_state,
                 "providers": old_state["providers"],
                 "default_provider_id": old_state["default_provider_id"],
+                "runtime_profiles": old_state["runtime_profiles"],
+                "default_runtime_profile_id": old_state["default_runtime_profile_id"],
             }
         )
 

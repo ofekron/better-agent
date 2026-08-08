@@ -66,7 +66,7 @@ class _Provider(Provider):
         pass
 
 
-def test_unknown_registered_run_dir_gets_cancel_sentinel() -> bool:
+def test_unknown_registered_run_dir_gets_cancel_sentinel() -> None:
     run_id = "run-lost-registry"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True)
@@ -76,33 +76,21 @@ def test_unknown_registered_run_dir_gets_cancel_sentinel() -> bool:
     )
     provider = _Provider({"id": "provider-test"})
 
-    if not provider.cancel_turn(run_id):
-        print("cancel_turn returned False")
-        return False
-    if not (run_dir / "cancel").exists():
-        print("cancel sentinel was not written")
-        return False
+    assert provider.cancel_turn(run_id), "cancel_turn returned False"
+    assert (run_dir / "cancel").exists(), "cancel sentinel was not written"
     state = json.loads(
         (run_dir / "backend_state.json").read_text(encoding="utf-8")
     )
-    if state.get("turn_cancelled") is not True:
-        print(f"detached soft cancel was not persisted: {state!r}")
-        return False
-    return True
+    assert state.get("turn_cancelled") is True, f"detached soft cancel was not persisted: {state!r}"
 
 
-def test_unknown_missing_run_stays_noop() -> bool:
+def test_unknown_missing_run_stays_noop() -> None:
     provider = _Provider({"id": "provider-test"})
-    if provider.cancel_turn("missing-run"):
-        print("missing run returned True")
-        return False
-    if (runs_root() / "missing-run" / "cancel").exists():
-        print("missing run created a cancel file")
-        return False
-    return True
+    assert not provider.cancel_turn("missing-run"), "missing run returned True"
+    assert not (runs_root() / "missing-run" / "cancel").exists(), "missing run created a cancel file"
 
 
-def test_turn_run_id_resolves_to_provider_run() -> bool:
+def test_turn_run_id_resolves_to_provider_run() -> None:
     """`active_run_ids`/`_run_state` register live turns under the
     orchestrator-level turn_run_id (turn_manager.py), not this
     provider's own run id — the id `_cancel_turn_fanout` actually fans
@@ -118,39 +106,23 @@ def test_turn_run_id_resolves_to_provider_run() -> bool:
         run_id=run_id, run_dir=run_dir, turn_run_id=turn_run_id,
     )
 
-    if not provider.cancel_turn(turn_run_id):
-        print("cancel_turn(turn_run_id) returned False")
-        return False
-    if not (run_dir / "cancel").exists():
-        print("cancel sentinel was not written for the resolved run")
-        return False
-    if not provider._runs[run_id].turn_cancelled:
-        print("soft cancel intent was not retained on the run")
-        return False
-    if provider._runs[run_id].cancelled:
-        print("soft cancel was incorrectly promoted to a hard cancel")
-        return False
-    if provider.persisted_states != [{
+    assert provider.cancel_turn(turn_run_id), "cancel_turn(turn_run_id) returned False"
+    assert (run_dir / "cancel").exists(), "cancel sentinel was not written for the resolved run"
+    assert provider._runs[run_id].turn_cancelled, "soft cancel intent was not retained on the run"
+    assert not provider._runs[run_id].cancelled, "soft cancel was incorrectly promoted to a hard cancel"
+    assert provider.persisted_states == [{
         "cancelled": False,
         "turn_cancelled": True,
-    }]:
-        print(f"soft cancel intent was not persisted: {provider.persisted_states!r}")
-        return False
-    return True
+    }], f"soft cancel intent was not persisted: {provider.persisted_states!r}"
 
 
-def test_path_escape_is_rejected() -> bool:
+def test_path_escape_is_rejected() -> None:
     provider = _Provider({"id": "provider-test"})
-    if provider.cancel_turn("../escape"):
-        print("path escape returned True")
-        return False
-    if (runs_root().parent / "escape" / "cancel").exists():
-        print("path escape wrote outside runs root")
-        return False
-    return True
+    assert not provider.cancel_turn("../escape"), "path escape returned True"
+    assert not (runs_root().parent / "escape" / "cancel").exists(), "path escape wrote outside runs root"
 
 
-def test_recovery_reads_runner_soft_cancel() -> bool:
+def test_recovery_reads_runner_soft_cancel() -> None:
     run_id = "run-completed-soft-cancel"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True)
@@ -158,12 +130,8 @@ def test_recovery_reads_runner_soft_cancel() -> bool:
         '{"success":false,"cancelled":true,"error":"error_during_execution"}',
         encoding="utf-8",
     )
-    if not _recovered_run_cancelled({"run_id": run_id}):
-        print("recovery ignored the runner's durable soft cancel")
-        return False
-    if _recovered_run_cancelled({"run_id": "missing-run"}):
-        print("missing run was spuriously classified as cancelled")
-        return False
+    assert _recovered_run_cancelled({"run_id": run_id}), "recovery ignored the runner's durable soft cancel"
+    assert not _recovered_run_cancelled({"run_id": "missing-run"}), "missing run was spuriously classified as cancelled"
 
     late_run_id = "run-late-soft-cancel"
     late_run_dir = runs_root() / late_run_id
@@ -173,12 +141,10 @@ def test_recovery_reads_runner_soft_cancel() -> bool:
         '{"success":true,"cancelled":false,"error":null}',
         encoding="utf-8",
     )
-    if _recovered_run_cancelled({
+    assert not _recovered_run_cancelled({
         "run_id": late_run_id,
         "turn_cancelled": True,
-    }):
-        print("late soft cancel overrode authoritative successful completion")
-        return False
+    }), "late soft cancel overrode authoritative successful completion"
 
     legacy_run_id = "run-legacy-soft-cancel"
     legacy_run_dir = runs_root() / legacy_run_id
@@ -188,10 +154,7 @@ def test_recovery_reads_runner_soft_cancel() -> bool:
         '{"success":false,"error":"error_during_execution"}',
         encoding="utf-8",
     )
-    if not _recovered_run_cancelled({"run_id": legacy_run_id}):
-        print("durable cancel sentinel was ignored for a legacy completion")
-        return False
-    return True
+    assert _recovered_run_cancelled({"run_id": legacy_run_id}), "durable cancel sentinel was ignored for a legacy completion"
 
 
 TESTS = [
@@ -207,10 +170,15 @@ def main() -> int:
     failures = []
     try:
         for name, fn in TESTS:
-            ok = fn()
-            print(("PASS" if ok else "FAIL") + f": {name}")
-            if not ok:
+            try:
+                fn()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"FAIL: {name}  ({e})")
                 failures.append(name)
+                continue
+            print(f"PASS: {name}")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:

@@ -1219,7 +1219,7 @@ def test_analytics_projection_preserves_results_and_bounds_rows() -> bool:
         comparisons = []
         row_counts = []
         for granularity in ("hour", "day", "week", "month"):
-            projection = analytics._native_analytics_projection(
+            projection, _projection_status = analytics._native_analytics_projection(
                 start,
                 end,
                 granularity,
@@ -1307,7 +1307,7 @@ def test_analytics_projection_preserves_results_and_bounds_rows() -> bool:
     }
     try:
         projection_started = time.perf_counter()
-        bounded = analytics._native_analytics_projection(
+        bounded, _bounded_status = analytics._native_analytics_projection(
             start,
             end,
             "day",

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import _test_home
@@ -133,7 +134,7 @@ def _externally_delete_and_wait(sid: str) -> bool:
     return binding.owner.wait_for_observation(generation, 2.0)
 
 
-def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
+def test_root_change_owner_delete_projects_hot_summary_index() -> None:
     _reset_home()
     sid = "manual-delete-root"
     _write_root(sid)
@@ -147,12 +148,16 @@ def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
         opened_exists = (_sessions_dir() / f"{sid}.opened.json").exists()
     finally:
         session_store.shutdown_root_change_owner()
-    ok = observed and before and not listed and not summary_exists and not opened_exists
-    print(f"{PASS if ok else FAIL} projected root delete purges hot summary row")
-    return ok
+    # `before` locks #372: a cold-scan build must load a freshly-written root,
+    # not self-invalidate and leave the index empty.
+    assert before, "root not listed after cold-scan build (#372 self-invalidation)"
+    assert observed, "root-change owner did not observe the external delete"
+    assert not listed, "deleted root still present in listed sessions"
+    assert not summary_exists, "summary sidecar survived root delete"
+    assert not opened_exists, "opened sidecar survived root delete"
 
 
-def test_root_change_owner_delete_projects_warming_summary_index() -> bool:
+def test_root_change_owner_delete_projects_warming_summary_index() -> None:
     _reset_home()
     sid = "manual-delete-warming-root"
     _write_root(sid)
@@ -171,12 +176,34 @@ def test_root_change_owner_delete_projects_warming_summary_index() -> bool:
     finally:
         session_store.shutdown_root_change_owner()
         session_store._start_summary_index_warm = original_warm
-    ok = observed and before and not snapshot_complete and not listed and not summary_exists
-    print(f"{PASS if ok else FAIL} projected root delete purges warming summary row")
-    return ok
+    assert observed, "root-change owner did not observe the external delete"
+    assert before, "upserted root not listed before delete"
+    assert not snapshot_complete, "snapshot reported complete during warm build"
+    assert not listed, "deleted warming root still present in listed sessions"
+    assert not summary_exists, "summary sidecar survived warming root delete"
 
 
-def test_orphan_sidecars_are_removed_on_summary_build() -> bool:
+def test_warm_build_loads_after_sessions_dir_reset() -> None:
+    # Locks the warm (blocking=False) path against #372: forcing _SESSIONS_DIR
+    # to re-resolve bumps _summary_index_reset_epoch inside _do_build. The warm
+    # builder must still complete and load the index, not self-invalidate.
+    _reset_home()
+    sid = "warm-reset-root"
+    _write_root(sid)
+    session_store._SESSIONS_DIR = None
+    session_store._summary_index_loaded = False
+    session_store._summary_index.clear()
+    session_store._ensure_summary_index(blocking=False)
+    deadline = time.monotonic() + 2.0
+    while not session_store._summary_index_loaded and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert session_store._summary_index_loaded, (
+        "warm build left summary index unloaded (#372 self-invalidation)"
+    )
+    assert sid in _listed_ids(), "warm build did not load freshly-written root"
+
+
+def test_orphan_sidecars_are_removed_on_summary_build() -> None:
     _reset_home()
     sid = "orphan-sidecar-root"
     _write_orphan_sidecars(sid)
@@ -185,12 +212,12 @@ def test_orphan_sidecars_are_removed_on_summary_build() -> bool:
     listed = sid in _listed_ids()
     summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
     opened_exists = (_sessions_dir() / f"{sid}.opened.json").exists()
-    ok = not listed and not summary_exists and not opened_exists
-    print(f"{PASS if ok else FAIL} orphan sidecars removed during summary build")
-    return ok
+    assert not listed, "orphan-sidecar-only root appeared in listed sessions"
+    assert not summary_exists, "orphan summary sidecar survived summary build"
+    assert not opened_exists, "orphan opened sidecar survived summary build"
 
 
-def test_queued_summary_write_does_not_resurrect_deleted_root() -> bool:
+def test_queued_summary_write_does_not_resurrect_deleted_root() -> None:
     _reset_home()
     sid = "queued-summary-root"
     _write_root(sid)
@@ -214,12 +241,11 @@ def test_queued_summary_write_does_not_resurrect_deleted_root() -> bool:
 
     listed = sid in _listed_ids()
     summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
-    ok = not listed and not summary_exists
-    print(f"{PASS if ok else FAIL} queued summary write skips missing root")
-    return ok
+    assert not listed, "queued write resurrected a deleted root in listings"
+    assert not summary_exists, "queued write wrote a sidecar for a deleted root"
 
 
-def test_summary_sidecar_batch_coalesces_latest_per_root() -> bool:
+def test_summary_sidecar_batch_coalesces_latest_per_root() -> None:
     _reset_home()
     for sid in ("summary-batch-a", "summary-batch-b"):
         _write_root(sid)
@@ -253,12 +279,13 @@ def test_summary_sidecar_batch_coalesces_latest_per_root() -> bool:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
         work_queue.join()
     by_root = {root_id: summary["version"] for root_id, summary, _ in writes}
-    ok = not stop and by_root == {"summary-batch-a": 3, "summary-batch-b": 1}
-    print(f"{PASS if ok else FAIL} summary sidecar batch coalesces latest per root")
-    return ok
+    assert not stop, "batch stopped on a non-sentinel drain"
+    assert by_root == {"summary-batch-a": 3, "summary-batch-b": 1}, (
+        f"batch did not coalesce latest per root: {by_root}"
+    )
 
 
-def test_summary_sidecar_batch_skips_stale_root_mtime() -> bool:
+def test_summary_sidecar_batch_skips_stale_root_mtime() -> None:
     _reset_home()
     sid = "summary-stale-root"
     _write_root(sid)
@@ -286,12 +313,11 @@ def test_summary_sidecar_batch_skips_stale_root_mtime() -> bool:
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
         work_queue.join()
-    ok = not stop and writes == []
-    print(f"{PASS if ok else FAIL} stale summary sidecar batch item is skipped")
-    return ok
+    assert not stop, "batch stopped on a non-sentinel drain"
+    assert writes == [], f"stale-mtime batch item was written: {writes}"
 
 
-def test_summary_sidecar_batch_handles_sentinel_after_work() -> bool:
+def test_summary_sidecar_batch_handles_sentinel_after_work() -> None:
     _reset_home()
     sid = "summary-sentinel-root"
     _write_root(sid)
@@ -315,12 +341,12 @@ def test_summary_sidecar_batch_handles_sentinel_after_work() -> bool:
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
         work_queue.join()
-    ok = stop and writes == [sid] and work_queue.empty()
-    print(f"{PASS if ok else FAIL} summary sidecar batch handles sentinel after work")
-    return ok
+    assert stop, "sentinel did not stop the batch"
+    assert writes == [sid], f"sentinel batch wrote unexpected roots: {writes}"
+    assert work_queue.empty(), "work remained in queue after sentinel"
 
 
-def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
+def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> None:
     _reset_home()
     for sid in ("summary-fail-a", "summary-fail-b"):
         _write_root(sid)
@@ -348,22 +374,36 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
     finally:
         session_store._write_summary_file = original_write  # type: ignore[assignment]
         work_queue.join()
-    ok = not stop and writes == ["summary-fail-b"]
-    print(f"{PASS if ok else FAIL} summary sidecar batch failure keeps other roots")
-    return ok
+    assert not stop, "batch stopped after a per-root failure"
+    assert writes == ["summary-fail-b"], (
+        f"per-root failure blocked other roots: {writes}"
+    )
 
 
 if __name__ == "__main__":
-    results = [
-        test_root_change_owner_delete_projects_hot_summary_index(),
-        test_root_change_owner_delete_projects_warming_summary_index(),
-        test_orphan_sidecars_are_removed_on_summary_build(),
-        test_queued_summary_write_does_not_resurrect_deleted_root(),
-        test_summary_sidecar_batch_coalesces_latest_per_root(),
-        test_summary_sidecar_batch_skips_stale_root_mtime(),
-        test_summary_sidecar_batch_handles_sentinel_after_work(),
-        test_summary_sidecar_batch_failure_does_not_block_other_roots(),
+    tests = [
+        ("projected root delete purges hot summary row", test_root_change_owner_delete_projects_hot_summary_index),
+        ("projected root delete purges warming summary row", test_root_change_owner_delete_projects_warming_summary_index),
+        ("warm build loads after sessions dir reset (#372)", test_warm_build_loads_after_sessions_dir_reset),
+        ("orphan sidecars removed during summary build", test_orphan_sidecars_are_removed_on_summary_build),
+        ("queued summary write skips missing root", test_queued_summary_write_does_not_resurrect_deleted_root),
+        ("summary sidecar batch coalesces latest per root", test_summary_sidecar_batch_coalesces_latest_per_root),
+        ("stale summary sidecar batch item is skipped", test_summary_sidecar_batch_skips_stale_root_mtime),
+        ("summary sidecar batch handles sentinel after work", test_summary_sidecar_batch_handles_sentinel_after_work),
+        ("summary sidecar batch failure keeps other roots", test_summary_sidecar_batch_failure_does_not_block_other_roots),
     ]
-    if not all(results):
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print(f"{PASS}  {name}")
+        except Exception:
+            failed += 1
+            import traceback
+            traceback.print_exc()
+            print(f"{FAIL}  {name}")
+    print()
+    if failed:
+        print(f"{failed} of {len(tests)} test(s) FAILED")
         raise SystemExit(1)
     print(f"{PASS} deleted session summary reconciliation")

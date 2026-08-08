@@ -21,7 +21,7 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def test_stubbed_tree_cache_hit_is_isolated() -> bool:
+def test_stubbed_tree_cache_hit_is_isolated() -> None:
     sess = session_manager.create(
         name="cache-copy", model="sonnet", cwd="/tmp",
         orchestration_mode="manager", source="cli",
@@ -35,27 +35,27 @@ def test_stubbed_tree_cache_hit_is_isolated() -> bool:
         "isStreaming": False,
     })
     first = session_manager.get_root_tree_stubbed(sid)
-    if not first or not first.get("messages"):
-        return False
+    assert first and first.get("messages"), "stubbed tree returned no messages"
     first["messages"][0]["content"] = "caller mutation"
     first["messages"].append({"id": "caller-added", "role": "user"})
     second = session_manager.get_root_tree_stubbed(sid)
-    if any(m.get("id") == "caller-added" for m in second.get("messages") or []):
-        print("cached tree kept caller-added message")
-        return False
-    if second["messages"][0].get("content") == "caller mutation":
-        print("cached tree kept caller-mutated content")
-        return False
-    return True
+    assert not any(m.get("id") == "caller-added" for m in second.get("messages") or []), \
+        "cached tree kept caller-added message"
+    assert second["messages"][0].get("content") != "caller mutation", \
+        "cached tree kept caller-mutated content"
 
 
 def main() -> int:
     try:
-        ok = test_stubbed_tree_cache_hit_is_isolated()
-        print(f"{PASS if ok else FAIL} stubbed tree cache hit is isolated")
-        return 0 if ok else 1
+        try:
+            test_stubbed_tree_cache_hit_is_isolated()
+            print(f"{PASS} stubbed tree cache hit is isolated")
+        except AssertionError as exc:
+            print(f"{FAIL} stubbed tree cache hit is isolated: {exc}")
+            return 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
+    return 0
 
 
 if __name__ == "__main__":

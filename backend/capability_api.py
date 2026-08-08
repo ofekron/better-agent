@@ -1581,6 +1581,9 @@ _register_machine_nodes()
 _register_project_structure()
 _register_git()
 _register_session_events()
+from background_work_capability import register_background_work as _register_background_work
+
+_register_background_work(register, _CAPABILITY_CALLER)
 from runtime_operations import register_operations as _register_runtime_operations
 
 _register_runtime_operations(register)
