@@ -548,6 +548,20 @@ class SessionManager:
         self._kind_by_sid: dict[str, Optional[str]] = {}
         # One lock per root tree — siblings serialize on the same lock.
         self._root_locks: dict[str, threading.RLock] = {}
+        # Per-root FILE-write ordering (see `_write_root_current` /
+        # `_write_root_snapshot`): every root-file write/delete this
+        # manager issues holds the root's write lock, and snapshot
+        # flushes CAS on the root's write seq so an out-of-lock copy
+        # can never land on top of a newer locked write.
+        self._root_write_locks: dict[str, threading.Lock] = {}
+        self._root_write_seqs: dict[str, int] = {}
+        # root_id -> write seq at deletion time. Lets a snapshot flush
+        # that was superseded MID-write distinguish "a current writer is
+        # waiting on the write lock and overwrites right after" (leave
+        # the file) from "a delete already ran and does not wait"
+        # (remove the file this write just recreated). Cleared by any
+        # subsequent current-state write of the same root.
+        self._root_deleted_seqs: dict[str, int] = {}
         self._cache_guard = threading.Lock()
         self._home_transition_lock = threading.Lock()
         self._listeners: list[Listener] = []
@@ -693,7 +707,12 @@ class SessionManager:
         with self._lock_for_root(root_id):
             if root_id in self._roots:
                 return
-            write_fn()
+            # Same write-ordering discipline as `_write_root_current`:
+            # bump + write-lock, so a still-in-flight snapshot flush
+            # for this root can't land on top of the walker's write.
+            self._advance_root_write_seq(root_id)
+            with self._write_lock_for_root(root_id):
+                write_fn()
 
     # ── Listeners ──────────────────────────────────────────────────
 
@@ -1280,6 +1299,9 @@ class SessionManager:
         self._mutation_miss_logged_at.clear()
         self._kind_by_sid.clear()
         self._root_locks.clear()
+        self._root_write_locks.clear()
+        self._root_write_seqs.clear()
+        self._root_deleted_seqs.clear()
         self._batches.clear()
         self._loading_roots.clear()
         self._since_cache.clear()
@@ -1442,6 +1464,85 @@ class SessionManager:
                 self._root_locks[root_id] = lock
             return lock
 
+    def _write_lock_for_root(self, root_id: str) -> threading.Lock:
+        with self._cache_guard:
+            lock = self._root_write_locks.get(root_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._root_write_locks[root_id] = lock
+            return lock
+
+    def _write_root_current(self, root: dict, **kwargs) -> None:
+        """Write a root that IS (or supersedes) the live current state.
+
+        Bumps the root's write seq so any in-flight snapshot flush
+        (`_write_root_snapshot`) aborts instead of landing an older
+        copy on top of this write. The actual file write is serialized
+        under the per-root write lock, so a snapshot flush already
+        past its CAS check finishes BEFORE this newer write replaces
+        the file — last writer on disk is always the newest state.
+
+        Callers mutating a shared root MUST hold `_lock_for_root`;
+        writers of a brand-new root (id not yet published) may call
+        without it."""
+        rid = root["id"]
+        self._advance_root_write_seq(rid)
+        self._root_deleted_seqs.pop(rid, None)
+        with self._write_lock_for_root(rid):
+            self._root_repository.write_root(root, **kwargs)
+
+    def _write_root_snapshot(
+        self, root_id: str, snapshot: dict, *, expected_seq: int, **kwargs,
+    ) -> bool:
+        """Write an out-of-lock persistable copy ONLY if the root's
+        write seq has not advanced since the copy was taken (seq CAS
+        under the per-root write lock).
+
+        Returns False when superseded. Skipping loses nothing: the
+        superseding write persisted the SAME live dict this snapshot
+        was copied from (a strict superset of the snapshot's state),
+        and a superseding delete means the file must stay gone. This
+        is the guard that stops the debounced tail flush from erasing
+        a fork that a synchronous `write_root` persisted between the
+        flush's copy and its write, or from resurrecting a
+        just-deleted root."""
+        with self._write_lock_for_root(root_id):
+            if self._root_write_seqs.get(root_id, 0) != expected_seq:
+                return False
+            self._root_repository.write_root(snapshot, **kwargs)
+            if self._root_write_seqs.get(root_id, 0) == expected_seq:
+                return True
+            # Superseded MID-write. A superseding current-state writer
+            # is blocked on this write lock and overwrites right after
+            # — nothing to repair. A superseding delete does NOT wait
+            # on this lock (a wedged flush write must never block a
+            # user-facing delete) — remove the file this write just
+            # recreated so the delete stays durable.
+            if self._root_deleted_seqs.get(root_id, 0) > expected_seq:
+                self._root_repository.delete_root(root_id)
+            return False
+
+    def _root_write_seq(self, root_id: str) -> int:
+        return self._root_write_seqs.get(root_id, 0)
+
+    def _advance_root_write_seq(self, root_id: str) -> None:
+        """Advance the root's write generation, invalidating every
+        in-flight snapshot flush for it (their CAS in
+        `_write_root_snapshot` fails). Called by every current-state
+        writer/deleter before it touches the file."""
+        self._root_write_seqs[root_id] = self._root_write_seqs.get(root_id, 0) + 1
+
+    def _delete_root_ordered(self, root_id: str) -> bool:
+        """Delete the root file with resurrection protection but WITHOUT
+        waiting on the per-root write lock — a wedged in-flight flush
+        write must never block a user-facing delete. The advanced seq
+        makes a not-yet-started snapshot write CAS-fail; the deleted-seq
+        marker makes a snapshot write already past its CAS repair
+        itself (see `_write_root_snapshot`'s post-write check)."""
+        self._advance_root_write_seq(root_id)
+        self._root_deleted_seqs[root_id] = self._root_write_seqs[root_id]
+        return self._root_repository.delete_root(root_id)
+
     def _index_root(self, root: dict) -> None:
         """Populate `_node_root_id` for every node in the tree rooted at
         `root`. Safe to call repeatedly — overwrites with the same
@@ -1583,7 +1684,7 @@ class SessionManager:
         drain_failed = False
         if pending is not None:
             try:
-                self._root_repository.write_root(
+                self._write_root_current(
                     pending,
                     bump_updated_at=False,
                     preserve_projection_fields=True,
@@ -4106,6 +4207,7 @@ class SessionManager:
                         sess = self._root_repository.copy_persistable_root(
                             claim.live_root,
                         )
+                        copied_seq = self._root_write_seq(root_id)
             finally:
                 lock_released_at = time.perf_counter()
                 root_lock.release()
@@ -4120,13 +4222,18 @@ class SessionManager:
             # bump=False — `updated_at` was set at queue time under
             # the caller's lock.
             with perf.timed("session.tail_persist.write_full"):
-                self._root_repository.write_root(
+                wrote = self._write_root_snapshot(
+                    root_id,
                     sess,
+                    expected_seq=copied_seq,
                     bump_updated_at=False,
                     preserve_projection_fields=True,
                     already_persistable=True,
                 )
-            self._note_root_file_written(root_id)
+            if wrote:
+                self._note_root_file_written(root_id)
+            else:
+                perf.record_count("session.tail_persist.superseded")
         except Exception:
             failed = True
             logger.exception(
@@ -4162,6 +4269,10 @@ class SessionManager:
             persist.last_at.pop(root_id, None)
             persist.cancel_active_claim_unlocked(root_id)
             persist._release_root_if_quiescent_unlocked(root_id)
+        # A claim that already copied its snapshot is past every check
+        # above — invalidate it at the write-ordering layer so its
+        # write CAS-fails instead of resurrecting the deleted state.
+        self._advance_root_write_seq(root_id)
 
     def flush_pending_persists(self) -> None:
         """Best-effort drain of pending tail flushes. Called from:
@@ -4189,7 +4300,7 @@ class SessionManager:
                         continue
                     persist.last_at[rid] = time.monotonic()
                 try:
-                    self._root_repository.write_root(
+                    self._write_root_current(
                         sess,
                         bump_updated_at=False,
                         preserve_projection_fields=True,
@@ -4266,16 +4377,28 @@ class SessionManager:
                     sess = self._root_repository.copy_persistable_root(
                         claim.live_root,
                     )
+                    copied_seq = self._root_write_seq(root_id)
                 finally:
                     lock.release()
                 with perf.timed("session.flush_root.write"):
-                    self._root_repository.write_root(
+                    wrote = self._write_root_snapshot(
+                        root_id,
                         sess,
+                        expected_seq=copied_seq,
                         bump_updated_at=False,
                         preserve_projection_fields=True,
                         already_persistable=True,
                     )
-                self._note_root_file_written(root_id)
+                if wrote:
+                    self._note_root_file_written(root_id)
+                else:
+                    # Superseded by a newer locked write. That writer
+                    # holds `_lock_for_root` through its own durable
+                    # write — acquiring it here is the completion
+                    # barrier that keeps this method's durability
+                    # contract without re-writing anything.
+                    with self._lock_for_root(root_id):
+                        pass
             except Exception:
                 failed = True
                 raise
@@ -4517,7 +4640,7 @@ class SessionManager:
                 orchestration_mode=orchestration_mode,
             )
             self._index_root(cached_root)
-            self._root_repository.write_root(cached_root, bump_updated_at=False)
+            self._write_root_current(cached_root, bump_updated_at=False)
             self._note_root_file_written(rid)
             self._fire(
                 child["id"],
@@ -4579,7 +4702,7 @@ class SessionManager:
                 harness_profile_id=harness_profile_id,
             )
             self._index_root(cached_root)
-            self._root_repository.write_root(cached_root, bump_updated_at=False)
+            self._write_root_current(cached_root, bump_updated_at=False)
             self._note_root_file_written(rid)
             self._fire(
                 child["id"],
@@ -4652,7 +4775,7 @@ class SessionManager:
             # Synchronous (not debounced): fork durability is part of the
             # contract — the caller gets a fork already on disk.
             self._index_root(cached_root)
-            self._root_repository.write_root(cached_root, bump_updated_at=True)
+            self._write_root_current(cached_root, bump_updated_at=True)
             self._note_root_file_written(rid)
             # Fire INSIDE the lock for ordering parity with `_run` —
             # otherwise a `forked` frame could broadcast before an
@@ -4809,12 +4932,12 @@ class SessionManager:
             evidence_paths: list[Path] = []
             try:
                 if sid == rid:
-                    if not self._root_repository.delete_root(sid):
+                    if not self._delete_root_ordered(sid):
                         return False, []
                 else:
                     if not session_store.splice_fork(updated_root, sid):
                         return False, []
-                    self._root_repository.write_root(updated_root, bump_updated_at=True)
+                    self._write_root_current(updated_root, bump_updated_at=True)
                 evidence_paths = self._commit_deletion_evidence_locked(
                     deleted_sids,
                     rid,
@@ -4823,7 +4946,7 @@ class SessionManager:
             except Exception:
                 logger.exception("session deletion persistence failed for %s", sid)
                 try:
-                    self._root_repository.write_root(original_root, bump_updated_at=False)
+                    self._write_root_current(original_root, bump_updated_at=False)
                 except Exception:
                     logger.exception("session deletion rollback failed for %s", sid)
                 for path in evidence_paths:
@@ -7943,7 +8066,7 @@ class SessionManager:
             src.pop("source", None)
             session_store.assign_message_seq(y, src)
             y["messages"].append(src)
-        self._root_repository.write_root(y, bump_updated_at=True)
+        self._write_root_current(y, bump_updated_at=True)
 
         # Register in cache so subsequent get/mutate calls land.
         yid = y["id"]
