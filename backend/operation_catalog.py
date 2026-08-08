@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import inspect
@@ -26,6 +26,10 @@ _ARTIFACT_DIGEST_CACHE: dict[str, tuple[str, str]] = {}
 _GENERATED_ARTIFACT_PATH_PARTS = frozenset(
     {".venv", ".venvs", "__pycache__", "node_modules", ".claude"}
 )
+# Sentinel for a not-yet-computed artifact digest (see `register_capability`
+# and `_resolve_pending_artifact_digests`). Never a real value: a sha256
+# hexdigest is 64 lowercase hex characters, which this deliberately is not.
+_PENDING_ARTIFACT_DIGEST = "<pending>"
 
 
 class OperationArtifactError(RuntimeError):
@@ -198,7 +202,14 @@ class CatalogBuilder:
             policy=policy or OperationPolicy.compatibility(),
             artifact_root=str(artifact_root),
             artifact_identity=artifact_identity,
-            artifact_digest=_artifact_digest(artifact_root),
+            # Deferred: `_artifact_digest` walks and hashes the whole
+            # artifact root (thousands of files for the repo root), and
+            # almost every action registered here shares that same root.
+            # Computing it eagerly per action made a ~150-call registration
+            # burst (one process importing every capability module) redo
+            # the identical walk ~150 times. `publish()` resolves this once
+            # per unique root instead — see `_resolve_pending_artifact_digests`.
+            artifact_digest=_PENDING_ARTIFACT_DIGEST,
             handler_identity=f"{handler.__module__}:{handler.__qualname__}",
         )
         self._descriptors[key] = descriptor
@@ -210,8 +221,9 @@ class CatalogBuilder:
             raise KeyError((capability, action))
 
     def publish(self) -> PublishedCatalog:
+        resolved = _resolve_pending_artifact_digests(self._descriptors)
         registry = OperationRegistry()
-        for descriptor in sorted(self._descriptors.values(), key=lambda item: item.key):
+        for descriptor in sorted(resolved.values(), key=lambda item: item.key):
             registry.register(
                 Operation(
                     name=descriptor.key,
@@ -224,7 +236,7 @@ class CatalogBuilder:
                 )
             )
         snapshot = registry.snapshot()
-        descriptors = MappingProxyType(dict(self._descriptors))
+        descriptors = MappingProxyType(resolved)
         operation_schema_json = MappingProxyType(
             {
                 operation.name: json.dumps(
@@ -295,7 +307,7 @@ class CatalogManager:
             descriptors.pop(operation_key(capability, action), None)
             self._builder = CatalogBuilder(descriptors)
             self._current = None
-            descriptor = self._builder.register_capability(
+            self._builder.register_capability(
                 capability,
                 action,
                 schema,
@@ -303,8 +315,12 @@ class CatalogManager:
                 policy=policy,
                 recovery_handler=recovery_handler,
             )
-            self.publish()
-            return descriptor
+            # `register_capability` defers the artifact digest (see the
+            # comment at its `artifact_digest=` assignment); `publish()`
+            # resolves it, so fetch the descriptor back out of the published
+            # catalog rather than returning the builder's own pending copy.
+            published = self.publish()
+            return published.capability_descriptor(capability, action)
 
     def remove_capability(self, capability: str, action: str) -> None:
         with self._lock:
@@ -453,6 +469,36 @@ def _artifact_root(path: Path, handler: Handler) -> tuple[Path, str]:
             return parent, f"extension:{parent.name}"
     package = handler.__module__.split(".", 1)[0]
     return path.parent, f"python-package:{package}"
+
+
+def _resolve_pending_artifact_digests(
+    descriptors: Mapping[str, OperationDescriptor],
+) -> dict[str, OperationDescriptor]:
+    """Fill in `_PENDING_ARTIFACT_DIGEST` placeholders, once per unique root.
+
+    `register_capability` defers the digest; `publish()` calls this so every
+    action sharing an artifact root (almost all of them share the repo root)
+    pays for exactly one walk+hash instead of one per action. Descriptors
+    carried over from a prior generation already have a real digest and are
+    returned unchanged — matches the pre-existing behavior of never
+    refreshing an already-published descriptor's digest on a later publish.
+    """
+    pending_roots = {
+        descriptor.artifact_root
+        for descriptor in descriptors.values()
+        if descriptor.artifact_digest == _PENDING_ARTIFACT_DIGEST
+    }
+    if not pending_roots:
+        return dict(descriptors)
+    digest_by_root = {root: _artifact_digest(Path(root)) for root in pending_roots}
+    return {
+        key: (
+            replace(descriptor, artifact_digest=digest_by_root[descriptor.artifact_root])
+            if descriptor.artifact_digest == _PENDING_ARTIFACT_DIGEST
+            else descriptor
+        )
+        for key, descriptor in descriptors.items()
+    }
 
 
 def _artifact_digest(root: Path) -> str:

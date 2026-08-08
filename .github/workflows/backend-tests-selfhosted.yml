@@ -131,16 +131,30 @@ jobs:
           # Measured 2026-08-08: a shard of ~450 files hung at xdist's
           # "bringing up nodes..." for over two hours and never started a
           # test. Cause is collection cost, not a deadlock — EVERY xdist
-          # worker independently imports and collects the whole shard, and
-          # collection alone across this many files (heavy transitive
-          # imports: onnxruntime, model2vec, tokenizers) was separately
-          # measured at ~16 minutes single-process. N workers each paying
-          # that, inside an N-CPU cap, is strictly slower than one process.
+          # worker independently imports and collects the whole shard.
+          # Root cause found the same day (see backend/operation_catalog.py):
+          # `import main` alone cost ~65s single-process, ~50s of it inside
+          # capability_api.py — every one of its ~150 capability
+          # registrations eagerly walked+hashed the whole repo tree
+          # (operation_catalog.register_capability's per-action artifact
+          # digest check), even though nearly all of them share one artifact
+          # root, so the same multi-thousand-file walk ran ~150 times in a
+          # row. N xdist workers each independently paying that cost, inside
+          # an N-CPU cap, is strictly slower than one process. Fixed by
+          # deferring the digest to `publish()`, which resolves it once per
+          # unique root instead of once per action — `import main` dropped
+          # to ~20s single-process in the same environment. (The earlier
+          # theory that heavy transitive ML imports — onnxruntime, model2vec,
+          # tokenizers — drove the ~16-minute single-process collection
+          # number did not hold up on inspection: project_match/embedding.py
+          # already imports those lazily, only inside the function that
+          # needs them, so they were never the actual cause.)
           # xdist stays on locally because collection there is cheap:
           # targeted runs are a handful of files, and a 10-file local run
           # measured faster with 3 workers than without.
-          # Re-enable here only after per-file collection cost is fixed;
-          # until then more shards (less collection per job) is the lever.
+          # Re-enable here only after re-measuring per-shard collection cost
+          # with this fix; until then more shards (less collection per job)
+          # is the lever.
           if [ "${{ runner.arch }}" = "ARM64" ]; then
             echo "BETTER_AGENT_TEST_CPUS=3" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
