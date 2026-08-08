@@ -4903,16 +4903,23 @@ def test_run_records_scan_stays_off_loop() -> None:
     for handler_source in (lifecycle_source, fact_source):
         assert "await asyncio.to_thread(store_access.list_run_records)" in handler_source
         assert "store_access.list_run_records()" not in handler_source
+        # Scan + broadcast serialize on one lock so the two handlers can't
+        # interleave and broadcast a stale RunRecord after a newer one.
+        assert "async with self._scan_broadcast_lock:" in handler_source
     api_source = (ROOT / "adapter_api.py").read_text(encoding="utf-8")
-    assert "result = await asyncio.to_thread(runs.list_runs, session_id, page_cursor)" in api_source
-    assert "result = await asyncio.to_thread(runs.run_detail, run_id)" in api_source
-    # The whole v2 REST read plane dispatches adapter reads off-loop — no
-    # route may call a surface method synchronously (2026-08-08:
+    # The v2 REST read plane dispatches sessions/runs/providers/system
+    # reads off-loop on the dedicated surface-read pool (2026-08-08:
     # list_sessions deep-copied the organization store per session on the
-    # loop for 40s+ stalls).
-    assert "result = _require_" not in api_source
+    # loop for 40s+ stalls). Chat-surface reads deliberately stay ON the
+    # loop: chat_index shares one sqlite connection per surface with the
+    # loop-side turn fold, and the compact fast paths are O(window).
+    assert "from hot_path_executor import surface_read_path" in api_source
+    for surface_name in ("_require_sessions()", "_require_runs()", "_require_system()", "_require_providers()"):
+        assert f"result = {surface_name}." not in api_source, surface_name
     assert "_envelope(_require_providers().model_catalog(" not in api_source
-    assert "_envelope(_require_providers().runtime_profiles()" not in api_source
+    assert "_envelope(_require_providers().runtime_profiles(" not in api_source
+    assert api_source.count("await surface_read_path.run(") >= 19
+    assert "result = _require_chat().open_session(session_id)" in api_source
 
 
 if __name__ == "__main__":

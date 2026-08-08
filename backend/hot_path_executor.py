@@ -50,12 +50,14 @@ class HotPathExecutor:
 
 
 # Separate pools so slow session-list work cannot starve session-detail
-# requests, and neither can starve the general hot path.
+# requests, and neither can starve the general hot path. surface_read_path
+# isolates v2 surface read-plane store scans from the default to_thread pool.
 hot_path = HotPathExecutor("hot-path", 8)
 session_detail_path = HotPathExecutor("session-detail", 4)
 session_list_path = HotPathExecutor("session-list", 4)
+surface_read_path = HotPathExecutor("surface-read", 4)
 
-_ALL = (hot_path, session_detail_path, session_list_path)
+_ALL = (hot_path, session_detail_path, session_list_path, surface_read_path)
 
 
 def shutdown_all() -> None:

@@ -253,6 +253,11 @@ class RunsSurfaceAdapter(RunsSurface):
     def __init__(self) -> None:
         self._projection = BusBoundProjection()
         self._live: dict[str, _LiveRunState] = {}
+        # Serializes the off-loop record scan + broadcast across both bus
+        # handlers: without it two handlers' scans can resolve out of
+        # dispatch order and a stale RunRecord snapshot would be broadcast
+        # after a newer one.
+        self._scan_broadcast_lock = asyncio.Lock()
 
     def bind(self) -> None:
         self._projection.bind([
@@ -474,25 +479,26 @@ class RunsSurfaceAdapter(RunsSurface):
             return
         # list_run_records walks the runs ledger with per-row stat calls —
         # sync filesystem work that must not run on the event-loop thread.
-        records = await asyncio.to_thread(store_access.list_run_records)
-        record = next(
-            (
-                r for r in records
-                if r.session_id == session_id and r.turn_id == turn_id
-            ),
-            None,
-        )
-        if record is None:
-            # The run directory for this turn hasn't appeared on disk yet
-            # (admission can race ahead of the runner creating
-            # `turns/<turn_id>/`) — no push now, rather than misattribute
-            # to a different run. The terminal lifecycle event for this
-            # SAME turn fires later, by which point the runner has always
-            # written its turn directory, so the live feed catches up; a
-            # `list_runs()`/`run_detail()` pull always sees the truth
-            # regardless.
-            return
-        self._broadcast_summary(record)
+        async with self._scan_broadcast_lock:
+            records = await asyncio.to_thread(store_access.list_run_records)
+            record = next(
+                (
+                    r for r in records
+                    if r.session_id == session_id and r.turn_id == turn_id
+                ),
+                None,
+            )
+            if record is None:
+                # The run directory for this turn hasn't appeared on disk
+                # yet (admission can race ahead of the runner creating
+                # `turns/<turn_id>/`) — no push now, rather than
+                # misattribute to a different run. The terminal lifecycle
+                # event for this SAME turn fires later, by which point the
+                # runner has always written its turn directory, so the live
+                # feed catches up; a `list_runs()`/`run_detail()` pull
+                # always sees the truth regardless.
+                return
+            self._broadcast_summary(record)
 
     async def _on_run_state_fact(self, event: BusEvent) -> None:
         """Folds one `run.state.*` fact (turn_manager.py — see that
@@ -539,8 +545,9 @@ class RunsSurfaceAdapter(RunsSurface):
                 # currently-projected effect of "retrying".
                 pass
 
-        records = await asyncio.to_thread(store_access.list_run_records)
-        record = next((r for r in records if r.run_id == run_id), None)
-        if record is None:
-            return
-        self._broadcast_summary(record)
+        async with self._scan_broadcast_lock:
+            records = await asyncio.to_thread(store_access.list_run_records)
+            record = next((r for r in records if r.run_id == run_id), None)
+            if record is None:
+                return
+            self._broadcast_summary(record)
