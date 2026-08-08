@@ -27,11 +27,14 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-worker-event-")
@@ -56,11 +59,39 @@ from session_manager import manager as session_manager  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
 
-config_store.get_default_provider = lambda: {
-    "id": "test-claude",
-    "kind": "claude",
-    "default_model": "sonnet",
-}
+_ORIGINAL_GET_DEFAULT_PROVIDER = config_store.get_default_provider
+
+
+def _stub_default_provider() -> dict:
+    return {
+        "id": "test-claude",
+        "kind": "claude",
+        "default_model": "sonnet",
+    }
+
+
+@contextlib.contextmanager
+def _default_provider_stub():
+    """Scoped `config_store.get_default_provider` stub.
+
+    Restores the real function on exit — an unrestored module-level
+    monkeypatch here previously leaked "test-claude" as a permanent
+    fake default-provider record for the rest of the pytest process
+    (module import happens once at collection time), so any later test
+    file that resolved a provider via `config_store.get_default_provider()`
+    (e.g. `provider.default_provider()`) got `KeyError: 'test-claude'`
+    when it tried to actually look that id up."""
+    config_store.get_default_provider = _stub_default_provider
+    try:
+        yield
+    finally:
+        config_store.get_default_provider = _ORIGINAL_GET_DEFAULT_PROVIDER
+
+
+@pytest.fixture(autouse=True)
+def _patched_default_provider():
+    with _default_provider_stub():
+        yield
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -1065,6 +1096,11 @@ def test_q_codex_envelopes_gated_like_claude_sidecars() -> bool:
 # ─── runner ───────────────────────────────────────────────────────
 
 def main() -> int:
+    with _default_provider_stub():
+        return _run_all()
+
+
+def _run_all() -> int:
     try:
         results = [
             test_a_routes_to_panel_not_manager(),
