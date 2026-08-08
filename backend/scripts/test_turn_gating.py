@@ -26,7 +26,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc_test_gating_")
@@ -62,6 +62,31 @@ _T = TypeVar("_T")
 def check(name: str, ok: bool) -> None:
     print(("  PASS" if ok else "  FAIL") + f": {name}")
     assert ok, name
+
+
+def _hook_run_state_begin_retry(tm: TurnManager) -> asyncio.Event:
+    """Patch `tm.run_state_begin_retry` to signal the instant the drive
+    loop reaches a retry wait.
+
+    `_drive_cli_run`'s rate-limit/transient branches `await
+    self.run_state_begin_retry(...)` immediately before `await
+    asyncio.wait_for(cancel_event.wait(), timeout=wait_s)` — this is the
+    exact call site tests need to synchronize on instead of a blind sleep.
+    `_run_state[app_session_id]` itself is not usable as the signal here:
+    these tests call `_drive_cli_run` directly (bypassing the `run_turn`
+    wrapper that calls `run_state_add`), so `_run_state` never gets an
+    entry and `run_state_begin_retry`'s internal mutations are no-ops.
+    Hooking the method call itself is the real, harness-independent event.
+    """
+    entered = asyncio.Event()
+    original = tm.run_state_begin_retry
+
+    async def _begin_retry(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        entered.set()
+
+    tm.run_state_begin_retry = _begin_retry
+    return entered
 
 
 def _run_with_lifecycle(
@@ -755,8 +780,9 @@ def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
     async def _ws(e):
         ws_events.append(e)
 
-    async def _go() -> tuple[bool, bool, bool, dict]:
+    async def _go() -> tuple[bool, bool, bool, bool, dict]:
         ev = asyncio.Event()
+        entered_wait = _hook_run_state_begin_retry(tm)
         task = asyncio.create_task(tm._drive_cli_run(
             prompt="p",
             cwd="/tmp",
@@ -770,7 +796,11 @@ def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
             turn_run_id="turn-rl-cancel",
             lifecycle_message_id="lifecycle-rl-cancel",
         ))
-        await asyncio.sleep(0.2)
+        try:
+            await asyncio.wait_for(entered_wait.wait(), timeout=4)
+            retrying = True
+        except asyncio.TimeoutError:
+            retrying = False
         no_terminal = not any(e.get("type") == "complete" for e in ws_events)
         active = bool(tm.active_run_ids.get("sid-rl-cancel"))
         pid_cleared = all(
@@ -778,15 +808,16 @@ def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:
         )
         ev.set()
         result = await asyncio.wait_for(task, timeout=3)
-        return no_terminal, active, pid_cleared, result
+        return retrying, no_terminal, active, pid_cleared, result
 
-    no_terminal, active, pid_cleared, result = _run_drive_with_lifecycle(
+    retrying, no_terminal, active, pid_cleared, result = _run_drive_with_lifecycle(
         tm,
         _go,
         session_id="sid-rl-cancel",
         turn_run_id="turn-rl-cancel",
         lifecycle_message_id="lifecycle-rl-cancel",
     )
+    check("drive loop reached retry wait", retrying)
     check("no complete emitted during retry wait", no_terminal)
     check("active run id retained during retry wait", active)
     check("dead attempt pid cleared during retry wait", pid_cleared)
@@ -884,6 +915,7 @@ def test_rate_limit_wait_can_continue_immediately() -> None:
     async def _go() -> dict:
         ev = asyncio.Event()
         tm.cancel_events[sid] = ev
+        entered_wait = _hook_run_state_begin_retry(tm)
         task = asyncio.create_task(tm._drive_cli_run(
             prompt="p",
             cwd="/tmp",
@@ -897,14 +929,18 @@ def test_rate_limit_wait_can_continue_immediately() -> None:
             turn_run_id="turn-rl-continue",
             lifecycle_message_id="lifecycle-rl-continue",
         ))
-        await asyncio.sleep(0.2)
+        try:
+            await asyncio.wait_for(entered_wait.wait(), timeout=4)
+            retrying = True
+        except asyncio.TimeoutError:
+            retrying = False
         landed = tm.request_immediate_continuation(
             sid,
             "p",
             reason="rate_limit_provider_switch",
         )
         result = await asyncio.wait_for(task, timeout=3)
-        return {"landed": landed, **result}
+        return {"retrying": retrying, "landed": landed, **result}
 
     result = _run_drive_with_lifecycle(
         tm,
@@ -913,6 +949,7 @@ def test_rate_limit_wait_can_continue_immediately() -> None:
         turn_run_id="turn-rl-continue",
         lifecycle_message_id="lifecycle-rl-continue",
     )
+    check("drive loop reached retry wait", result.get("retrying") is True)
     check("immediate continuation landed", result.get("landed") is True)
     check("turn succeeds after continuation", result.get("success") is True)
     check("fresh prompt is continuation-wrapped", "Previous provider session ids: agent-rate-limited" in provider.prompts[-1])

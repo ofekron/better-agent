@@ -116,8 +116,13 @@ async def test_scheduler_executor_isolated_and_bounded() -> None:
     try:
         tasks = [asyncio.create_task(extension_api._run_scheduler_read(str(i))) for i in range(10)]
         assert await asyncio.to_thread(entered.wait, 1)
-        await asyncio.sleep(0.15)
-        rejected = [task for task in tasks if task.done() and isinstance(task.exception(), AdmissionOverloaded)]
+        rejected: list = []
+        deadline = time.perf_counter() + 5
+        while time.perf_counter() < deadline:
+            rejected = [task for task in tasks if task.done() and isinstance(task.exception(), AdmissionOverloaded)]
+            if len(rejected) >= 2:
+                break
+            await asyncio.sleep(0.01)
         assert len(rejected) == 2, len(rejected)
         ticks = 0
         deadline = time.perf_counter() + 0.05
@@ -466,7 +471,13 @@ async def test_auth_executor_is_bounded() -> None:
     try:
         tasks = [asyncio.create_task(coordinator.resolve_principal_async(f"invalid-{i}")) for i in range(18)]
         assert await asyncio.to_thread(entered.wait, 1)
-        await asyncio.sleep(0.15)
+        # Only over-bound tasks can finish before release.set() (admitted
+        # tasks block inside `blocked()`); wait for both of them to land
+        # instead of guessing how long admission takes under load.
+        deadline = time.perf_counter() + 5
+        while time.perf_counter() < deadline and sum(task.done() for task in tasks) < 2:
+            await asyncio.sleep(0.01)
+        assert sum(task.done() for task in tasks) == 2
         release.set()
         results = await asyncio.gather(*tasks, return_exceptions=True)
         assert sum(isinstance(item, AdmissionOverloaded) for item in results) == 2

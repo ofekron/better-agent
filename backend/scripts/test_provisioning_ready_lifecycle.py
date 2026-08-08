@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 from pathlib import Path
 
 
@@ -143,7 +144,12 @@ async def _run_tests() -> None:
         first = asyncio.create_task(manager.run(spec, "concurrent-1"))
         await asyncio.sleep(0)
         second = asyncio.create_task(manager.ensure_warm_base(spec, spec.build_config()))
-        await asyncio.sleep(0.05)
+        # Wait for the concurrent callers to actually reach the coordinator
+        # (coalesced into one call) instead of guessing how long scheduling
+        # takes under load.
+        deadline = time.monotonic() + 5
+        while coordinator.init_calls < 3 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         assert coordinator.init_calls == 3
         coordinator.block_init.set()
         result, base_id = await asyncio.gather(first, second)

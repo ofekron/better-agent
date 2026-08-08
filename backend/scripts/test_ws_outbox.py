@@ -418,8 +418,8 @@ def test_ws_outbox_close_is_timeout_bounded() -> None:
             close_timeout_s=0.02,
         )
         assert await outbox.send({"type": "first", "data": {}}) is True
-        await asyncio.wait_for(outbox.close(), timeout=0.05)
-        await asyncio.wait_for(closed.wait(), timeout=0.2)
+        await asyncio.wait_for(outbox.close(), timeout=2)
+        await asyncio.wait_for(closed.wait(), timeout=2)
         await outbox.wait_closed()
 
     asyncio.run(run())

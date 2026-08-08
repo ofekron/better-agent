@@ -293,12 +293,13 @@ def test_run_cancel_waits_for_inflight_host_work():
     async def caller():
         task = asyncio.ensure_future(h.run(factory))
         assert await _await_cross_thread_event(entered)  # factory blocked on gate
-        # Release the gate from a background thread so the shield await is
-        # genuinely pending when cancellation arrives.
+        # Cancel while factory is still provably blocked on the gate (we just
+        # confirmed it entered and the gate hasn't been touched yet), then
+        # release the gate from a background thread — the shield must keep
+        # the host work running no matter when the gate opens after that.
+        task.cancel()
         releaser = threading.Thread(target=lambda: (time.sleep(0.05), gate.set()))
         releaser.start()
-        await asyncio.sleep(0.02)
-        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
@@ -331,10 +332,11 @@ def test_run_cancel_logs_when_host_work_fails(caplog):
     async def caller():
         task = asyncio.ensure_future(h.run(factory))
         assert await _await_cross_thread_event(entered)
+        # Cancel while factory is still provably blocked on the gate, then
+        # release it — see the sibling test above for why ordering matters.
+        task.cancel()
         releaser = threading.Thread(target=lambda: (time.sleep(0.05), gate.set()))
         releaser.start()
-        await asyncio.sleep(0.02)
-        task.cancel()
         try:
             await task
         except asyncio.CancelledError:
