@@ -70,7 +70,7 @@ async def _blocked_loop_eventual_exactly_once() -> None:
     worker = threading.Thread(target=enqueue_during_stall)
     worker.start()
     started = time.monotonic()
-    time.sleep(0.25)
+    worker.join(timeout=2)
     assert finished.is_set()
     assert time.monotonic() - started < 0.5
     assert calls == [], "dispatcher ran while the event loop was blocked"

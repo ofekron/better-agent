@@ -93,8 +93,11 @@ def test_cancel_does_not_abandon_in_flight_work() -> None:
     state = {"finished": False}
     try:
         async def scenario():
+            started = threading.Event()
+
             async def work():
                 def blocking():
+                    started.set()
                     time.sleep(0.6)
                     state["finished"] = True
                     return "done"
@@ -102,7 +105,7 @@ def test_cancel_does_not_abandon_in_flight_work() -> None:
                 return await asyncio.to_thread(blocking)
 
             task = asyncio.create_task(manager.run(work))
-            await asyncio.sleep(0.15)
+            await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)
             task.cancel()
             try:
                 await task

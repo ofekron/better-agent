@@ -36,6 +36,16 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+async def _wait_for(predicate, *, timeout: float = 5.0, interval: float = 0.01) -> bool:
+    """Poll `predicate()` until it is truthy or `timeout` elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return predicate()
+
+
 def _make_tailer(name: str = "x") -> ClaudeJsonlTailer:
     return ClaudeJsonlTailer(
         path=Path(_BC_HOME) / f"{name}.jsonl",
@@ -60,7 +70,7 @@ async def _scenario() -> None:
     d_ok = asyncio.create_task(ok())
     d_boom = asyncio.create_task(boom())
     p = asyncio.create_task(pending())
-    await asyncio.sleep(0.05)   # let the two finish
+    await asyncio.gather(d_ok, d_boom, return_exceptions=True)
 
     t._sub_tasks = [d_ok, d_boom, p]
     t._prune_done_sub_tasks()
@@ -69,7 +79,7 @@ async def _scenario() -> None:
 
     # Simulate many completed subagents across turns → must stay bounded.
     extra = [asyncio.create_task(ok()) for _ in range(200)]
-    await asyncio.sleep(0.05)
+    await asyncio.gather(*extra)
     t._sub_tasks = [p, *extra]
     t._prune_done_sub_tasks()
     assert t._sub_tasks == [p], \
@@ -107,7 +117,8 @@ async def _duplicate_spawn_scenario() -> None:
     try:
         first._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
         second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
-        await asyncio.sleep(0.05)
+        assert await _wait_for(lambda: started >= 1), \
+            f"expected one active sub-tailer, started={started}"
         assert started == 1, f"expected one active sub-tailer, started={started}"
         assert len(first._sub_tasks) == 1 and not second._sub_tasks, (
             f"duplicate task retained: "
@@ -118,11 +129,11 @@ async def _duplicate_spawn_scenario() -> None:
             await first._sub_tasks[0]
         except BaseException:
             pass
-        await asyncio.sleep(0.05)
-        assert not ClaudeJsonlTailer._active_sub_tailer_keys, \
+        assert await _wait_for(lambda: not ClaudeJsonlTailer._active_sub_tailer_keys), \
             "active sub-tailer key not released after spawn task ended"
         second._spawn_sub_tailer("a", jsonl_path, "tool-1", "general-purpose")
-        await asyncio.sleep(0.05)
+        assert await _wait_for(lambda: started >= 2), \
+            f"respawn after release failed: started={started}"
         assert started == 2 and len(second._sub_tasks) == 1, \
             f"respawn after release failed: started={started}"
     finally:
