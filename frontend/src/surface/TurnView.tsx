@@ -5,6 +5,7 @@
 // extended (chat-panel.md's on-demand-expansion rule).
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { RunWire } from "../adapter/wire";
 import type { SurfaceStore, TurnEntry } from "./state";
 import { bodyItemsOf, isLivePhase } from "./state";
@@ -47,6 +48,7 @@ export function TurnView({
    * session's latest turn). */
   isLatestTurn?: boolean;
 }) {
+  const { t } = useTranslation();
   const [manuallyExtended, setManuallyExtended] = useState(false);
   const live = isLivePhase(entry.phase);
   const wantBody = live || manuallyExtended;
@@ -67,6 +69,21 @@ export function TurnView({
       data-phase={entry.phase ?? "unknown"}
       data-live={live ? "true" : undefined}
     >
+      {/* Team-vs-native orchestration-mode chip — legacy `MessageBubble`'s
+       * `primaryEntityLabel`/manager-scope chip (deleted `frontend/tests/
+       * primary-entity-label.test.tsx` parity: `.role-label-manager
+       * .role-chip` textContent "Team" for team turns; the element is
+       * absent entirely for native/unset turns, never rendered empty).
+       * Sourced from `entry.turn.orchestration_mode` — the backend's
+       * per-turn, session-record-frozen fact (nodes.py's `Node.
+       * orchestration_mode`), not live session state. */}
+      {entry.turn.orchestration_mode === "team" && (
+        <div className="manager-scope" data-testid="surface-turn-team-scope">
+          <div className="role-label role-label-manager">
+            <span className="role-chip">{t("message.teamModeLabel")}</span>
+          </div>
+        </div>
+      )}
       {entry.runtimeChange && (
         entry.runtimeChange.kind === "model_change" ? (
           <ModelChangeView node={entry.runtimeChange} />

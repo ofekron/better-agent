@@ -44,6 +44,21 @@ def _ordered(nodes: list[Node]) -> list[Node]:
     return sorted(nodes, key=lambda n: (n.ts, n.seq))
 
 
+def _time_range(nodes: list[Node]) -> tuple[float | None, float | None]:
+    """(earliest, latest) member `ts` — the ONE place every `ChildManifest`
+    construction site derives its started_ts/ended_ts span from, so a
+    group/container's time-range chip data is computed identically
+    regardless of which container kind (Explanation, Turn, SubAgentTurn
+    family) is being built. `min`/`max` rather than `nodes[0]`/`nodes[-1]`:
+    not every caller's list is guaranteed pre-sorted by `ts` (e.g.
+    `derive_turn`'s body+result concatenation), so this stays correct
+    either way. `(None, None)` for an empty group — never a guessed 0.0."""
+    if not nodes:
+        return None, None
+    timestamps = [n.ts for n in nodes]
+    return min(timestamps), max(timestamps)
+
+
 def _is_marked_final(n: Node) -> bool:
     return n.kind == NodeKind.RESULT and n.payload is not None and n.payload.result_kind == ResultKind.PROVIDER
 
@@ -124,6 +139,7 @@ def derive_body(nodes: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv
         first = partition[0]
         explanation_id = _explanation_node_id(first)
         renderable = sum(1 for n in partition if n.kind not in _NON_RENDERABLE_KINDS)
+        started_ts, ended_ts = _time_range(partition)
         body.append(
             Node(
                 cv=cv,
@@ -136,7 +152,10 @@ def derive_body(nodes: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv
                 seq=first.seq,
                 status=None,
                 payload=None,
-                child_manifest=ChildManifest(renderable_child_count=renderable, has_children=bool(partition)),
+                child_manifest=ChildManifest(
+                    renderable_child_count=renderable, has_children=bool(partition),
+                    started_ts=started_ts, ended_ts=ended_ts,
+                ),
             )
         )
         membership[explanation_id] = tuple(partition)
@@ -158,7 +177,11 @@ def derive_body(nodes: list[Node], *, surface_id: SurfaceId, turn_id: TurnId, cv
 
 def child_manifest(nodes: list[Node]) -> ChildManifest:
     renderable = sum(1 for n in nodes if n.kind not in _NON_RENDERABLE_KINDS)
-    return ChildManifest(renderable_child_count=renderable, has_children=bool(nodes))
+    started_ts, ended_ts = _time_range(nodes)
+    return ChildManifest(
+        renderable_child_count=renderable, has_children=bool(nodes),
+        started_ts=started_ts, ended_ts=ended_ts,
+    )
 
 
 def compaction_child_manifest(children: tuple[Node, ...]) -> ChildManifest:
@@ -169,7 +192,11 @@ def compaction_child_manifest(children: tuple[Node, ...]) -> ChildManifest:
     THERE it's normally a turn's own anchoring prompt, not renderable
     content of its own turn). That exclusion doesn't apply to a
     compaction's children, so nothing is excluded here."""
-    return ChildManifest(renderable_child_count=len(children), has_children=bool(children))
+    started_ts, ended_ts = _time_range(list(children))
+    return ChildManifest(
+        renderable_child_count=len(children), has_children=bool(children),
+        started_ts=started_ts, ended_ts=ended_ts,
+    )
 
 
 def extract_compaction_children(
@@ -529,13 +556,17 @@ def build_subagent_panel_container(
         TargetRef(session_id=worker_session_id, turn_id=target_turn_id)
         if worker_session_id else None
     )
+    started_ts, ended_ts = _time_range(ordered)
     return Node(
         cv=cv, node_id=container_id, parent_id=None, turn_id=turn_id, surface_id=surface_id,
         kind=kind, ts=earliest.ts, seq=earliest.seq, status=None,
         payload=SubAgentTurnPayload(label=worker_description, created=created),
         target_ref=target_ref,
         sidecar_ref=worker_session_id,
-        child_manifest=ChildManifest(renderable_child_count=len(ordered), has_children=True),
+        child_manifest=ChildManifest(
+            renderable_child_count=len(ordered), has_children=True,
+            started_ts=started_ts, ended_ts=ended_ts,
+        ),
         usage=usage_from_raw(token_usage_raw),
     )
 
@@ -588,9 +619,17 @@ def build_subagent_turns_for_panels(
 
 
 def derive_turn(
-    turn_id: TurnId, nodes: list[Node], *, surface_id: SurfaceId, cv: int
+    turn_id: TurnId, nodes: list[Node], *, surface_id: SurfaceId, cv: int,
+    orchestration_mode: str | None = None,
 ) -> dict[str, object]:
-    """deriveTurn(turn) — {turn, prompt, body, result} per chat-panel.md."""
+    """deriveTurn(turn) — {turn, prompt, body, result} per chat-panel.md.
+
+    `orchestration_mode`: the owning session's frozen orchestration mode
+    ("team" | "native"), passed in by the caller (`chat_adapter.py`, which
+    resolves it once via `store_access.get_session_record` — this pure
+    module never reaches for store state itself) and stamped onto the
+    TURN node verbatim. None when the caller couldn't resolve a session
+    record — never guessed."""
     items = _ordered(nodes)
     prompt = next((n for n in items if n.kind == NodeKind.TYPED_PROMPT), None)
 
@@ -614,6 +653,7 @@ def derive_turn(
         status=None,
         payload=None,
         child_manifest=manifest,
+        orchestration_mode=orchestration_mode,
     )
 
     return {

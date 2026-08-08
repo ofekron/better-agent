@@ -1268,6 +1268,7 @@
   "message.workerTurnLabel": "Воркер",
   "message.subSessionTurnLabel": "Подсессия",
   "message.sessionTurnLabel": "Сессия",
+  "message.teamModeLabel": "Команда",
   "message.eventsCount_one": "{{count}} событие",
   "message.eventsCount_few": "{{count}} события",
   "message.eventsCount_many": "{{count}} событий",

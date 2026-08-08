@@ -14328,6 +14328,19 @@ button.run-badge-clickable:focus-visible {
   margin: 0;
 }
 
+/* Count + time-range chip row (`ExplanationMetaChip`) — right-aligned atop
+   the box, same as `.auto-action-group-header`'s own grid places its
+   `.auto-action-group-meta` column. Explanation has no button/grid header
+   of its own (unlike `AutoActionGroup`) to hang the chip off of, so this
+   is a thin new positioning wrapper; the chip's own look is 100% the
+   reused `.auto-action-group-count`/`.auto-action-group-time` rules. */
+.surface-explanation-meta {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .surface-explanation {
     transition: none;

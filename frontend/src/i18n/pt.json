@@ -1266,6 +1266,7 @@
   "message.workerTurnLabel": "Trabalhador",
   "message.subSessionTurnLabel": "Subsessão",
   "message.sessionTurnLabel": "Sessão",
+  "message.teamModeLabel": "Equipe",
   "message.eventsCount_one": "{{count}} evento",
   "message.eventsCount_other": "{{count}} eventos",
   "newSession.machineVersionMismatch": "versão diferente",

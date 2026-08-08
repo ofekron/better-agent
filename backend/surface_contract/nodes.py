@@ -383,6 +383,17 @@ class UnknownPayload:
 class ChildManifest:
     renderable_child_count: int
     has_children: bool
+    # Legacy `AutoActionGroup`'s count/time chip carried a client-computed
+    # count + the LEAD action's own timestamp only (grouping was purely
+    # client-side there). The server-grouped Explanation/SubAgentTurn/Turn
+    # containers this contract builds have no such client pass to derive a
+    # chip from, so the backend computes and carries the full span instead —
+    # the group's earliest and latest member `ts` (epoch seconds, same unit
+    # as `Node.ts`), from `derive.py`'s own already-collected member list at
+    # container-build time. Both None only when the container has no
+    # children at all (`has_children=False`) — never a guessed/zero ts.
+    started_ts: float | None = None
+    ended_ts: float | None = None
 
 
 # Single source of truth for a turn/panel's token-usage overlay — used by
@@ -502,6 +513,18 @@ class Node:
     # members once their owning delegation reaches a terminal fact; None
     # otherwise (never a guessed/zero Usage). See `usage_from_raw`.
     usage: Usage | None = None
+    # Team-vs-plain-turn chip source — populated only for NodeKind.TURN,
+    # from that turn's owning session's `orchestration_mode` ("team" |
+    # "native"), via `store_access.get_session_record`
+    # (`backend/adapters/derive.py::derive_turn`). `orchestration_mode` is
+    # FROZEN at session creation (`session_detail_api.py`'s PATCH handler
+    # rejects any change; see `session_manager.set_selectors`'s docstring) —
+    # it never changes mid-session, so reading the CURRENT session record at
+    # turn-derive time is the single honest source for what mode a turn ran
+    # under; no retroactive relabeling risk exists because there is nothing
+    # to retroactively relabel. None when the owning session record can't be
+    # resolved (never guessed) or for every non-TURN kind.
+    orchestration_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

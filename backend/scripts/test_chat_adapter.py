@@ -871,9 +871,9 @@ def test_older_only_builds_the_requested_page_not_every_turn() -> None:
     built_turn_ids: list[str] = []
     original = chat_adapter_mod._build_turn_view
 
-    def counting(surface_id, turn_id, rows, produced_by_row, prompt_meta=None):
+    def counting(surface_id, turn_id, rows, produced_by_row, prompt_meta=None, orchestration_mode=None):
         built_turn_ids.append(turn_id)
-        return original(surface_id, turn_id, rows, produced_by_row, prompt_meta)
+        return original(surface_id, turn_id, rows, produced_by_row, prompt_meta, orchestration_mode)
 
     chat_adapter_mod._build_turn_view = counting
     try:
@@ -1522,7 +1522,14 @@ def test_open_session_groups_worker_facts_into_worker_turn() -> None:
     assert container.target_ref.turn_id is None
     assert container.usage.input_tokens == 12
     assert container.usage.total_tokens == 20
-    assert container.child_manifest == ChildManifest(renderable_child_count=3, has_children=True)
+    # Real journal ingestion timestamps aren't fixed values to assert
+    # exactly — structural correctness (count/has_children, a real
+    # started_ts<=ended_ts span) is what this test can check.
+    assert container.child_manifest.renderable_child_count == 3
+    assert container.child_manifest.has_children is True
+    assert container.child_manifest.started_ts is not None
+    assert container.child_manifest.ended_ts is not None
+    assert container.child_manifest.started_ts <= container.child_manifest.ended_ts
 
     # The trailing delegation's own facts ARE eagerly included...
     trailing_facts = [

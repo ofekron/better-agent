@@ -1266,6 +1266,7 @@
   "message.workerTurnLabel": "워커",
   "message.subSessionTurnLabel": "서브 세션",
   "message.sessionTurnLabel": "세션",
+  "message.teamModeLabel": "팀",
   "message.eventsCount_one": "이벤트 {{count}}개",
   "message.eventsCount_other": "이벤트 {{count}}개",
   "newSession.machineVersionMismatch": "버전 불일치",
