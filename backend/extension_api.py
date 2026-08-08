@@ -291,17 +291,20 @@ def _projection_response_cache_get(name: str, key: tuple[Any, ...]) -> Response 
     return _json_projection_response(cached[1])
 
 
-def _projection_response_cache_put(
-    name: str,
-    key: tuple[Any, ...],
-    value: dict[str, Any],
-) -> Response:
-    content = json.dumps(
+def _serialize_projection_content(value: dict[str, Any]) -> bytes:
+    return json.dumps(
         value,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _projection_response_cache_store(
+    name: str,
+    key: tuple[Any, ...],
+    content: bytes,
+) -> Response:
     if len(_projection_response_cache) >= 16:
         oldest = min(
             _projection_response_cache,
@@ -310,6 +313,19 @@ def _projection_response_cache_put(
         _projection_response_cache.pop(oldest, None)
     _projection_response_cache[(name, key)] = (time.monotonic(), content)
     return _json_projection_response(content)
+
+
+def _projection_response_cache_put(
+    name: str,
+    key: tuple[Any, ...],
+    value: dict[str, Any],
+) -> Response:
+    return _projection_response_cache_store(name, key, _serialize_projection_content(value))
+
+
+def _build_and_serialize_projection(build: Callable[[], dict[str, Any]]) -> bytes:
+    """Build + JSON-serialize a projection in one worker-thread hop."""
+    return _serialize_projection_content(build())
 
 
 def _projection_response_inflight_state() -> tuple[
@@ -372,9 +388,9 @@ async def _cached_json_projection_response_threaded(
         task = inflight.get(cache_key)
         if task is None:
             async def _build_and_cache() -> bytes:
-                value = await asyncio.to_thread(build)
-                response = _projection_response_cache_put(name, key, value)
-                return bytes(response.body)
+                content = await asyncio.to_thread(_build_and_serialize_projection, build)
+                _projection_response_cache_store(name, key, content)
+                return content
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(_build_and_cache())
@@ -389,6 +405,13 @@ async def _cached_json_projection_response_threaded(
     return _json_projection_response(content)
 
 
+def _list_extensions_build_and_serialize(include_hidden: bool) -> tuple[bytes, bool]:
+    extensions, changed = extension_store.list_extensions_with_reconciliation(
+        include_hidden=include_hidden,
+    )
+    return _serialize_projection_content({"extensions": extensions}), changed
+
+
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
     try:
@@ -399,13 +422,12 @@ async def list_extensions(include_hidden: bool = Query(default=False)):
     cached = _projection_response_cache_get("list", cache_key)
     if cached is not None:
         return cached
-    extensions, changed = await asyncio.to_thread(
-        extension_store.list_extensions_with_reconciliation,
-        include_hidden=include_hidden,
+    content, changed = await asyncio.to_thread(
+        _list_extensions_build_and_serialize, include_hidden,
     )
     if changed:
         await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
-    return _projection_response_cache_put("list", cache_key, {"extensions": extensions})
+    return _projection_response_cache_store("list", cache_key, content)
 
 
 @router.get("/daemons/state")

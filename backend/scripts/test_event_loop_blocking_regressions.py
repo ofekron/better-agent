@@ -4561,9 +4561,18 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
     assert "fingerprint = await _extension_store_fingerprint_async()" in route_source
     assert "cache_key = (fingerprint, include_hidden)" in route_source
     assert '_projection_response_cache_get("list", cache_key)' in route_source
-    assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
+    # Build (reconciliation) and JSON serialization run in the SAME worker-thread
+    # hop via `_list_extensions_build_and_serialize`, so the dumps+encode never
+    # lands back on the event loop after the build's own off-loop hop.
+    assert "await asyncio.to_thread(\n        _list_extensions_build_and_serialize, include_hidden,\n    )" in route_source
     assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
-    assert '_projection_response_cache_put("list", cache_key, {"extensions": extensions})' in route_source
+    assert '_projection_response_cache_store("list", cache_key, content)' in route_source
+
+    helper_start = source.index("def _list_extensions_build_and_serialize(")
+    helper_end = source.index("@router.get(\"\")", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "extension_store.list_extensions_with_reconciliation(" in helper_source
+    assert "_serialize_projection_content({\"extensions\": extensions})" in helper_source
 
 
 def test_internal_communication_worker_lookup_is_off_loop() -> None:

@@ -544,15 +544,22 @@ async def get_session_stats(session_id: str):
 
 
 async def get_communications(
+    request: Request,
     session_id: str | None = Query(None),
     limit: int = Query(default=200, ge=1, le=500),
 ):
     import communication_log
 
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         communication_log.list_communications,
         session_id=session_id or "",
         limit=limit,
+    )
+    return await session_list_cache.json_response_off_loop(
+        result,
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
     )
 
 
@@ -682,6 +689,7 @@ async def get_session(
 
 
 async def get_older_messages(
+    request: Request,
     session_id: str,
     before_seq: int = Query(...),
     limit: int = Query(default=50, ge=1, le=200),
@@ -704,7 +712,12 @@ async def get_older_messages(
     )
     if result is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    return result
+    return await session_list_cache.json_response_off_loop(
+        result,
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
+    )
 
 
 @router.get("/api/sessions/{session_id}/messages/{message_id}/events")
@@ -2141,7 +2154,7 @@ async def get_session_details(request: Request, session_id: str):
 @router.get("/api/sessions/{session_id}/changes")
 
 
-async def get_session_changes(session_id: str):
+async def get_session_changes(request: Request, session_id: str):
     """Every file edit made in this session + the reasoning that preceded
     each, projected from the provenance log and grouped by the user→assistant
     turn that produced them. Backend owns the filter (file-edit detection
@@ -2157,7 +2170,12 @@ async def get_session_changes(session_id: str):
         return provenance_store.group_changes_by_turn(messages, changes)
 
     turns = await asyncio.to_thread(_build)
-    return {"session_id": session_id, "turns": turns}
+    return await session_list_cache.json_response_off_loop(
+        {"session_id": session_id, "turns": turns},
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
+    )
 
 
 @router.post("/api/sessions/{session_id}/seen")

@@ -274,6 +274,11 @@ async def _incompatible_orchestration_mode_handler(_request, exc):
 
 _COMMAND_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 _COMMAND_JOURNAL_EXCLUDED_SUFFIXES = ("/draft",)
+# Below this size, json.loads() is cheap enough that parsing inline on the
+# loop beats the asyncio.to_thread hop (thread-pool submission + the shared
+# default executor's own queueing); above it, the parse's own CPU cost
+# outweighs the hop and off-loading wins.
+_COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES = 64 * 1024
 
 
 def _extract_command_sid(path: str) -> Optional[str]:
@@ -362,7 +367,10 @@ async def ingest_command_received(request, call_next):
     payload: Any
     if body_bytes:
         try:
-            payload = json.loads(body_bytes)
+            if len(body_bytes) <= _COMMAND_BODY_INLINE_PARSE_LIMIT_BYTES:
+                payload = json.loads(body_bytes)
+            else:
+                payload = await asyncio.to_thread(json.loads, body_bytes)
         except Exception:
             payload = {"_raw": body_bytes.decode("utf-8", errors="replace")}
     else:
