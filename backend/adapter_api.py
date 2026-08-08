@@ -446,7 +446,8 @@ def _require_system() -> SystemSurface:
 @router.get(f"{_REST_PREFIX}/sessions/{{session_id}}/snapshot")
 async def get_snapshot(session_id: str) -> JSONResponse:
     session_id = _validate_id(session_id, field="session_id")
-    result = _require_chat().open_session(session_id)
+    surface = _require_chat()
+    result = await asyncio.to_thread(surface.open_session, session_id)
     return JSONResponse(_result_body(result))
 
 
@@ -454,7 +455,8 @@ async def get_snapshot(session_id: str) -> JSONResponse:
 async def get_children(session_id: str, node_id: str, at_render_rev: int) -> JSONResponse:
     session_id = _validate_id(session_id, field="session_id")
     node_id = _validate_id(node_id, field="node_id")
-    result = _require_chat().children(session_id, node_id, at_render_rev)
+    surface = _require_chat()
+    result = await asyncio.to_thread(surface.children, session_id, node_id, at_render_rev)
     return JSONResponse(_result_body(result))
 
 
@@ -464,14 +466,16 @@ async def get_older(session_id: str, cursor: str) -> JSONResponse:
     page_cursor = _decode_cursor(cursor)
     if page_cursor.surface_id != session_id:
         raise HTTPException(status_code=400, detail="cursor session mismatch")
-    result = _require_chat().older(page_cursor)
+    surface = _require_chat()
+    result = await asyncio.to_thread(surface.older, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/sessions/{{session_id}}/search")
 async def get_search(session_id: str, q: str = "") -> JSONResponse:
     session_id = _validate_id(session_id, field="session_id")
-    result = _require_chat().search(session_id, q)
+    surface = _require_chat()
+    result = await asyncio.to_thread(surface.search, session_id, q)
     return JSONResponse(_result_body(result))
 
 
@@ -509,25 +513,29 @@ async def list_sessions(
         filters = SessionSearchFilters(
             folder_ref=folder_ref, tag_refs=tuple(tag_ref), tag_match=tag_match,
         )
-    result = _require_sessions().list_sessions(page_cursor, q, filters)
+    surface = _require_sessions()
+    result = await asyncio.to_thread(surface.list_sessions, page_cursor, q, filters)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/projects")
 async def list_projects() -> JSONResponse:
-    result = _require_sessions().projects()
+    surface = _require_sessions()
+    result = await asyncio.to_thread(surface.projects)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/folders")
 async def list_folders(project_ref: str | None = None) -> JSONResponse:
-    result = _require_sessions().list_folders(project_ref)
+    surface = _require_sessions()
+    result = await asyncio.to_thread(surface.list_folders, project_ref)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/tags")
 async def list_tags(project_ref: str | None = None) -> JSONResponse:
-    result = _require_sessions().list_tags(project_ref)
+    surface = _require_sessions()
+    result = await asyncio.to_thread(surface.list_tags, project_ref)
     return JSONResponse(_result_body(result))
 
 
@@ -547,12 +555,16 @@ async def list_installable_providers() -> JSONResponse:
 @router.get(f"{_REST_PREFIX}/providers/{{provider_id}}/models")
 async def get_provider_models(provider_id: str) -> JSONResponse:
     provider_id = _validate_id(provider_id, field="provider_id")
-    return JSONResponse(_envelope(_require_providers().model_catalog(provider_id)))
+    surface = _require_providers()
+    catalog = await asyncio.to_thread(surface.model_catalog, provider_id)
+    return JSONResponse(_envelope(catalog))
 
 
 @router.get(f"{_REST_PREFIX}/runtime-profiles")
 async def list_runtime_profiles() -> JSONResponse:
-    return JSONResponse(_envelope(_require_providers().runtime_profiles()))
+    surface = _require_providers()
+    profiles = await asyncio.to_thread(surface.runtime_profiles)
+    return JSONResponse(_envelope(profiles))
 
 
 @router.get(f"{_REST_PREFIX}/runs")
@@ -578,48 +590,55 @@ async def get_run_detail(run_id: str) -> JSONResponse:
 @router.get(f"{_REST_PREFIX}/extension-config/{{extension_id}}")
 async def get_extension_config(extension_id: str) -> JSONResponse:
     extension_id = _validate_id(extension_id, field="extension_id")
-    result = _require_system().extension_config(extension_id)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.extension_config, extension_id)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/extension-config")
 async def list_extension_configs(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_extension_configs(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_extension_configs, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/harness-profiles")
 async def list_harness_profiles(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_harness_profiles(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_harness_profiles, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/extension-ui")
 async def list_extension_ui(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_extension_ui(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_extension_ui, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/extension-catalog")
 async def list_extension_catalog(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_extension_catalog(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_extension_catalog, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/marketplace-bridge")
 async def get_marketplace_bridge() -> JSONResponse:
-    result = _require_system().marketplace_bridge_state()
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.marketplace_bridge_state)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/marketplace-intents")
 async def list_marketplace_intents(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_marketplace_intents(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_marketplace_intents, page_cursor)
     return JSONResponse(_result_body(result))
 
 
@@ -628,40 +647,46 @@ async def list_schedules(session_id: str | None = None, cursor: str | None = Non
     if session_id is not None:
         session_id = _validate_id(session_id, field="session_id")
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_schedules(session_id, page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_schedules, session_id, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/host-startup-tasks")
 async def get_host_startup_tasks() -> JSONResponse:
-    result = _require_system().host_startup_tasks()
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.host_startup_tasks)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/installation-capabilities")
 async def list_installation_capabilities() -> JSONResponse:
-    result = _require_system().list_installation_capabilities()
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_installation_capabilities)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/machines")
 async def list_machines(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_machines(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_machines, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/machines/{{node_id}}/provider-credentials")
 async def get_node_provider_credentials(node_id: str) -> JSONResponse:
     node_id = _validate_id(node_id, field="node_id")
-    result = _require_system().node_provider_credentials(node_id)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.node_provider_credentials, node_id)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/node-registrations")
 async def list_node_registrations(cursor: str | None = None) -> JSONResponse:
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_system().list_node_registrations(page_cursor)
+    surface = _require_system()
+    result = await asyncio.to_thread(surface.list_node_registrations, page_cursor)
     return JSONResponse(_result_body(result))
 
 

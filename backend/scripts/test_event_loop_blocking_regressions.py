@@ -4906,8 +4906,13 @@ def test_run_records_scan_stays_off_loop() -> None:
     api_source = (ROOT / "adapter_api.py").read_text(encoding="utf-8")
     assert "result = await asyncio.to_thread(runs.list_runs, session_id, page_cursor)" in api_source
     assert "result = await asyncio.to_thread(runs.run_detail, run_id)" in api_source
-    assert "result = _require_runs().list_runs(" not in api_source
-    assert "result = _require_runs().run_detail(" not in api_source
+    # The whole v2 REST read plane dispatches adapter reads off-loop — no
+    # route may call a surface method synchronously (2026-08-08:
+    # list_sessions deep-copied the organization store per session on the
+    # loop for 40s+ stalls).
+    assert "result = _require_" not in api_source
+    assert "_envelope(_require_providers().model_catalog(" not in api_source
+    assert "_envelope(_require_providers().runtime_profiles()" not in api_source
 
 
 if __name__ == "__main__":
