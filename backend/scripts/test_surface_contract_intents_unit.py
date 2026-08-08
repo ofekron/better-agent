@@ -1,12 +1,14 @@
 """Dedicated authoritative owner for `surface_contract/intents.py` (ADR 0006 §5).
 
 The module is the closed command-plane contract: the SendTargetKind enum, the
-SendTarget/IntentBase bases, twenty intent dataclasses grouped into three
-disjoint intent unions (Chat/Provider/Session), and the TransportAck pair.
-Importing the module executes every definition (so incidental line coverage
-reads ~100% via the package __init__ transitive import — LESSON 49), but
-nothing asserts the contract. This owner locks every invariant so a dropped
-intent, a drifted union member, or a broken frozen/slots guarantee is caught.
+SendTarget/IntentBase bases, fifty-one intent dataclasses grouped into four
+disjoint intent unions (Chat/Provider/Session/System), the UserInteraction
+response union (ApprovalResponse/ChoiceResponse/InputResponse), and the
+TransportAck pair. Importing the module executes every definition (so
+incidental line coverage reads ~100% via the package __init__ transitive
+import — LESSON 49), but nothing asserts the contract. This owner locks every
+invariant so a dropped intent, a drifted union member, or a broken
+frozen/slots guarantee is caught.
 
 Run: ./scripts/run-backend-tests.sh -- --cov=backend.surface_contract.intents
     --cov-branch scripts/test_surface_contract_intents_unit.py
@@ -30,43 +32,77 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc-test-surface-contract-intents-unit-")
 
 from backend.surface_contract.intents import (  # noqa: E402
-    Approve,
+    ApprovalResponse,
     ArchiveSession,
+    AssignFolder,
     AssignProject,
+    AssignTags,
     BeginLogin,
     CancelLogin,
     ChatIntent,
+    ChoiceResponse,
+    CreateFolder,
     CreateProject,
     CreateProvider,
+    CreateSchedule,
+    CreateTag,
+    DecideMarketplaceIntent,
+    DeleteFolder,
+    DeleteHarnessProfile,
     DeleteProject,
     DeleteProvider,
     DeleteQueued,
     DeleteRuntimeProfile,
+    DeleteSchedule,
+    DeleteTag,
+    DisableExtension,
     EditQueued,
+    EnableExtension,
+    FolderDeleteMode,
+    InputResponse,
+    InstallExtension,
     IntentAccepted,
     IntentBase,
     IntentRejected,
+    InteractionResponse,
+    MarketplaceDecision,
     MarkOpened,
+    MoveFolder,
+    NodeRegistrationDecisionValue,
     ProviderIntent,
+    RecolorTag,
     RefreshModels,
+    RemoveNode,
+    RenameFolder,
     RenameProject,
     RenameSession,
-    Rearrange,
+    RenameTag,
+    ResolveInteraction,
+    ResolveNodeRegistration,
     RetryCredential,
+    RevokeMarketplaceDevice,
     Rewind,
+    SaveHarnessProfile,
     SaveRuntimeProfile,
     SendMode,
     SendPrompt,
     SendTarget,
     SendTargetKind,
     SessionIntent,
+    SetDefaultHarnessProfile,
+    SetInstallationCapability,
     SetSelectors,
     Stop,
     SuspendProvider,
+    SyncNodeProviders,
+    SystemIntent,
     TransportAck,
+    UninstallExtension,
+    UpdateExtension,
+    UpdateExtensionConfig,
     UpdateProvider,
 )
-from backend.surface_contract.nodes import Attachment  # noqa: E402
+from backend.surface_contract.nodes import ApprovalDecision, Attachment  # noqa: E402
 
 
 def _field_names(cls: type) -> list[str]:
@@ -138,14 +174,88 @@ def test_intent_base_frozen_and_slots():
 
 
 # --------------------------------------------------------------------------- #
+# resolve_interaction's typed response union
+# --------------------------------------------------------------------------- #
+
+
+def test_approval_response_fields_frozen_slots():
+    assert _field_names(ApprovalResponse) == ["decision"]
+    assert ApprovalResponse.__dataclass_params__.frozen is True
+    assert "__slots__" in ApprovalResponse.__dict__
+    r = ApprovalResponse(decision=ApprovalDecision.APPROVE)
+    assert r.decision is ApprovalDecision.APPROVE
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        r.decision = ApprovalDecision.DENY  # type: ignore[misc]
+
+
+def test_choice_response_fields_and_none_allowed():
+    assert _field_names(ChoiceResponse) == ["picked_ref"]
+    assert _defaults(ChoiceResponse) == {}
+    c = ChoiceResponse(picked_ref=None)
+    assert c.picked_ref is None
+
+
+def test_input_response_fields():
+    assert _field_names(InputResponse) == ["response"]
+    r = InputResponse(response={"answer": "yes"})
+    assert r.response == {"answer": "yes"}
+
+
+def test_interaction_response_union_membership():
+    assert set(typing.get_args(InteractionResponse)) == {
+        ApprovalResponse,
+        ChoiceResponse,
+        InputResponse,
+    }
+
+
+def test_resolve_interaction_construction_and_immutable():
+    ri = ResolveInteraction(
+        cv=1,
+        intent_id="i",
+        session_id="s",
+        interaction_ref="tool_approval:abc",
+        response=ApprovalResponse(decision=ApprovalDecision.DENY),
+    )
+    assert ri.interaction_ref == "tool_approval:abc"
+    assert isinstance(ri.response, ApprovalResponse)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ri.interaction_ref = "x"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# ADR 0011 System-plane enums
+# --------------------------------------------------------------------------- #
+
+
+def test_folder_delete_mode_exact_membership_and_values():
+    assert {m.name for m in FolderDeleteMode} == {"UNASSIGN", "DELETE_SESSIONS"}
+    assert FolderDeleteMode.UNASSIGN.value == "unassign"
+    assert FolderDeleteMode.DELETE_SESSIONS.value == "delete_sessions"
+
+
+def test_marketplace_decision_exact_membership_and_values():
+    assert {m.name for m in MarketplaceDecision} == {"APPROVE", "REJECT"}
+    assert MarketplaceDecision.APPROVE.value == "approve"
+    assert MarketplaceDecision.REJECT.value == "reject"
+
+
+def test_node_registration_decision_value_exact_membership_and_values():
+    assert {m.name for m in NodeRegistrationDecisionValue} == {"APPROVED", "DENIED"}
+    assert NodeRegistrationDecisionValue.APPROVED.value == "approved"
+    assert NodeRegistrationDecisionValue.DENIED.value == "denied"
+
+
+# --------------------------------------------------------------------------- #
 # Per-subclass field-name + default + frozen + slots contract (class-level)
 # --------------------------------------------------------------------------- #
 
 # (cls, extra_field_names, defaults_dict)
 _INTENT_SPECS: list[tuple[type, list[str], dict[str, object]]] = [
+    # ---- Chat plane ----
     (SendPrompt, ["text", "attachments", "send_mode", "target"], {}),
     (Stop, ["turn_id"], {}),
-    (Approve, ["approval_ref", "decision", "scope"], {}),
+    (ResolveInteraction, ["interaction_ref", "response"], {}),
     (EditQueued, ["node_id", "text"], {}),
     (DeleteQueued, ["node_id"], {}),
     (
@@ -161,6 +271,7 @@ _INTENT_SPECS: list[tuple[type, list[str], dict[str, object]]] = [
         },
     ),
     (Rewind, ["node_id"], {}),
+    # ---- Provider plane ----
     (CreateProvider, ["kind", "config"], {}),
     (UpdateProvider, ["provider_id", "config_patch"], {}),
     (DeleteProvider, ["provider_id"], {}),
@@ -171,14 +282,63 @@ _INTENT_SPECS: list[tuple[type, list[str], dict[str, object]]] = [
     (RefreshModels, ["provider_id"], {}),
     (SaveRuntimeProfile, ["profile"], {}),
     (DeleteRuntimeProfile, ["runtime_profile_id"], {}),
+    # ---- Session plane ----
     (ArchiveSession, ["archived"], {}),
     (RenameSession, ["title"], {}),
     (AssignProject, ["project_ref"], {}),
-    (CreateProject, ["name"], {}),
+    (CreateProject, ["name", "path"], {}),
     (RenameProject, ["project_ref", "name"], {}),
     (DeleteProject, ["project_ref"], {}),
-    (Rearrange, ["ordering_patch"], {}),
     (MarkOpened, [], {}),
+    (CreateFolder, ["project_ref", "name", "parent_folder_ref"], {"parent_folder_ref": None}),
+    (RenameFolder, ["folder_ref", "name"], {}),
+    (MoveFolder, ["folder_ref", "parent_folder_ref"], {}),
+    (DeleteFolder, ["folder_ref", "mode"], {}),
+    (CreateTag, ["name", "project_ref", "color"], {"project_ref": None, "color": None}),
+    (RenameTag, ["tag_ref", "name"], {}),
+    (RecolorTag, ["tag_ref", "color"], {}),
+    (DeleteTag, ["tag_ref"], {}),
+    (AssignFolder, ["folder_ref"], {}),
+    (
+        AssignTags,
+        ["source", "add_tag_refs", "remove_tag_refs", "sync_tag_refs"],
+        {
+            "source": "manual",
+            "add_tag_refs": None,
+            "remove_tag_refs": None,
+            "sync_tag_refs": None,
+        },
+    ),
+    # ---- System plane (ADR 0011) ----
+    (UpdateExtensionConfig, ["extension_id", "section", "patch"], {}),
+    (
+        SaveHarnessProfile,
+        ["harness_profile_id", "config", "revision", "writes"],
+        {"revision": None, "writes": ()},
+    ),
+    (DeleteHarnessProfile, ["harness_profile_id", "revision"], {"revision": None}),
+    (SetDefaultHarnessProfile, ["harness_profile_id"], {}),
+    (InstallExtension, ["extension_id", "source"], {}),
+    (UpdateExtension, ["extension_id"], {}),
+    (UninstallExtension, ["extension_id"], {}),
+    (EnableExtension, ["extension_id"], {}),
+    (DisableExtension, ["extension_id"], {}),
+    (DecideMarketplaceIntent, ["marketplace_intent_id", "decision"], {}),
+    (RevokeMarketplaceDevice, ["device_ref"], {}),
+    (CreateSchedule, ["target_session_id", "prompt", "cadence"], {}),
+    (DeleteSchedule, ["schedule_id"], {}),
+    (
+        SetInstallationCapability,
+        ["capability_id", "enabled", "confirm_cancels_extension_work"],
+        {"confirm_cancels_extension_work": False},
+    ),
+    (RemoveNode, ["node_id"], {}),
+    (
+        SyncNodeProviders,
+        ["node_id", "include_secrets", "provider_ids"],
+        {"include_secrets": False, "provider_ids": ()},
+    ),
+    (ResolveNodeRegistration, ["node_id", "decision"], {}),
 ]
 
 
@@ -214,8 +374,20 @@ def test_subclass_requires_base_args(cls, extra, defaults):
         cls()  # type: ignore[call-arg]
 
 
+def test_intent_specs_cover_every_union_member_exactly_once():
+    spec_classes = {cls for cls, _, _ in _INTENT_SPECS}
+    assert len(spec_classes) == len(_INTENT_SPECS)
+    union_classes = (
+        set(typing.get_args(ChatIntent))
+        | set(typing.get_args(ProviderIntent))
+        | set(typing.get_args(SessionIntent))
+        | set(typing.get_args(SystemIntent))
+    )
+    assert spec_classes == union_classes
+
+
 # --------------------------------------------------------------------------- #
-# Representative instances: construction + immutability across the 3 planes
+# Representative instances: construction + immutability across the 4 planes
 # --------------------------------------------------------------------------- #
 
 
@@ -258,6 +430,40 @@ def test_session_plane_construction():
     assert s.session_id == "s1"
 
 
+def test_create_project_requires_path():
+    p = CreateProject(cv=1, intent_id="i", session_id=None, name="proj", path="/tmp/proj")
+    assert p.name == "proj"
+    assert p.path == "/tmp/proj"
+    with pytest.raises(TypeError):
+        CreateProject(cv=1, intent_id="i", session_id=None, name="proj")  # type: ignore[call-arg]
+
+
+def test_folder_and_tag_plane_construction():
+    f = CreateFolder(cv=1, intent_id="i", session_id=None, project_ref="/p", name="Work")
+    assert f.parent_folder_ref is None
+    t = AssignTags(cv=1, intent_id="i", session_id="s1", add_tag_refs=("t1", "t2"))
+    assert t.source == "manual"
+    assert t.add_tag_refs == ("t1", "t2")
+    assert t.remove_tag_refs is None
+    assert t.sync_tag_refs is None
+
+
+def test_system_plane_construction():
+    sh = SaveHarnessProfile(
+        cv=1, intent_id="i", session_id=None, harness_profile_id=None, config={"x": 1}
+    )
+    assert sh.revision is None
+    assert sh.writes == ()
+    d = DecideMarketplaceIntent(
+        cv=1,
+        intent_id="i",
+        session_id=None,
+        marketplace_intent_id="m1",
+        decision=MarketplaceDecision.APPROVE,
+    )
+    assert d.decision is MarketplaceDecision.APPROVE
+
+
 def test_mark_opened_has_no_extra_fields():
     m = MarkOpened(cv=1, intent_id="i", session_id="s")
     assert _field_names(MarkOpened) == ["cv", "intent_id", "session_id"]
@@ -265,7 +471,7 @@ def test_mark_opened_has_no_extra_fields():
 
 
 # --------------------------------------------------------------------------- #
-# ChatIntent / ProviderIntent / SessionIntent unions
+# ChatIntent / ProviderIntent / SessionIntent / SystemIntent unions
 # --------------------------------------------------------------------------- #
 
 
@@ -273,7 +479,7 @@ def test_chat_intent_union_membership():
     assert set(typing.get_args(ChatIntent)) == {
         SendPrompt,
         Stop,
-        Approve,
+        ResolveInteraction,
         EditQueued,
         DeleteQueued,
         SetSelectors,
@@ -304,18 +510,53 @@ def test_session_intent_union_membership():
         CreateProject,
         RenameProject,
         DeleteProject,
-        Rearrange,
         MarkOpened,
+        CreateFolder,
+        RenameFolder,
+        MoveFolder,
+        DeleteFolder,
+        CreateTag,
+        RenameTag,
+        RecolorTag,
+        DeleteTag,
+        AssignFolder,
+        AssignTags,
     }
 
 
-def test_three_intent_unions_are_pairwise_disjoint():
+def test_system_intent_union_membership():
+    assert set(typing.get_args(SystemIntent)) == {
+        UpdateExtensionConfig,
+        SaveHarnessProfile,
+        DeleteHarnessProfile,
+        SetDefaultHarnessProfile,
+        InstallExtension,
+        UpdateExtension,
+        UninstallExtension,
+        EnableExtension,
+        DisableExtension,
+        DecideMarketplaceIntent,
+        RevokeMarketplaceDevice,
+        CreateSchedule,
+        DeleteSchedule,
+        SetInstallationCapability,
+        RemoveNode,
+        SyncNodeProviders,
+        ResolveNodeRegistration,
+    }
+
+
+def test_four_intent_unions_are_pairwise_disjoint():
     chat = set(typing.get_args(ChatIntent))
     provider = set(typing.get_args(ProviderIntent))
     session = set(typing.get_args(SessionIntent))
+    system = set(typing.get_args(SystemIntent))
     assert chat.isdisjoint(provider)
     assert chat.isdisjoint(session)
+    assert chat.isdisjoint(system)
     assert provider.isdisjoint(session)
+    assert provider.isdisjoint(system)
+    assert session.isdisjoint(system)
 
 
 def test_all_intent_subclasses_extend_intentbase():
@@ -323,6 +564,7 @@ def test_all_intent_subclasses_extend_intentbase():
         set(typing.get_args(ChatIntent))
         | set(typing.get_args(ProviderIntent))
         | set(typing.get_args(SessionIntent))
+        | set(typing.get_args(SystemIntent))
     )
     for cls in union:
         assert issubclass(cls, IntentBase), cls

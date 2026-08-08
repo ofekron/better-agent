@@ -1,11 +1,13 @@
 """Dedicated authoritative owner for `surface_contract/frames.py` (ADR 0006 §4;
 ADRs 0007-0009 companion surfaces).
 
-The module is a pure type-contract surface: two StrEnums, a `Usage` dataclass,
-a `FrameBase`, nine surface-bound chat frames, two control-scope frames, and
-two union aliases. This owner locks every contract property rather than merely
-importing the names — most importantly the ADR 0006 §4/§5 split: surface-bound
-frames subclass `FrameBase` and carry a snapshot identity, control-scope frames
+The module is a pure type-contract surface: two StrEnums, a `FrameBase`, nine
+surface-bound chat frames, two control-scope frames, and two union aliases.
+`Usage` and `UserInteraction` are defined in `nodes.py` and re-exported here
+for `TurnLifecycle.usage` and `UserInteractionUpsert.user_interaction`. This
+owner locks every contract property rather than merely importing the names —
+most importantly the ADR 0006 §4/§5 split: surface-bound frames subclass
+`FrameBase` and carry a snapshot identity, control-scope frames
 (`SessionCreated`, `ResyncRequired`) do neither.
 
 Run: ./scripts/run-backend-tests.sh -- --cov=surface_contract.frames --cov-branch
@@ -29,7 +31,6 @@ import _test_home  # noqa: E402
 _test_home.isolate("bc-test-surface-contract-frames-unit-")
 
 from backend.surface_contract.frames import (  # noqa: E402
-    ApprovalUpsert,
     ChatFrame,
     ControlFrame,
     FrameBase,
@@ -46,19 +47,21 @@ from backend.surface_contract.frames import (  # noqa: E402
     TurnLifecycle,
     TurnPhase,
     Usage,
+    UserInteractionUpsert,
 )
 from backend.surface_contract.identity import (  # noqa: E402
     SessionSelectors,
     SnapshotIdentity,
 )
 from backend.surface_contract.nodes import (  # noqa: E402
-    Approval,
-    ApprovalState,
     ContentStatus,
     Node,
     NodeKind,
     Run,
     Sidecar,
+    UserInteraction,
+    UserInteractionKind,
+    UserInteractionState,
 )
 
 
@@ -97,13 +100,12 @@ def _run() -> Run:
     )
 
 
-def _approval() -> Approval:
-    return Approval(
-        approval_ref="a1",
-        subject="run bash",
-        summary="ls",
-        risk_scope="bash",
-        state=ApprovalState.PENDING,
+def _user_interaction() -> UserInteraction:
+    return UserInteraction(
+        interaction_ref="a1",
+        kind=UserInteractionKind.APPROVAL,
+        request={"subject": "run bash", "summary": "ls", "risk_scope": "bash"},
+        state=UserInteractionState.PENDING,
     )
 
 
@@ -126,13 +128,15 @@ def _selectors() -> SessionSelectors:
 
 
 def test_turn_phase_has_exactly_the_expected_members():
+    # AWAITING_INTERACTION covers a turn paused on ANY UserInteraction kind
+    # (approval, choice, or input) — one phase, not one per kind.
     assert {
         member.name for member in TurnPhase
     } == {
         "QUEUED",
         "STARTING",
         "RUNNING",
-        "AWAITING_APPROVAL",
+        "AWAITING_INTERACTION",
         "RECONNECTING",
         "STOPPING",
         "COMPLETED",
@@ -143,7 +147,7 @@ def test_turn_phase_has_exactly_the_expected_members():
 
 def test_turn_phase_values_match_the_wire_strings():
     assert TurnPhase.QUEUED.value == "queued"
-    assert TurnPhase.AWAITING_APPROVAL.value == "awaiting_approval"
+    assert TurnPhase.AWAITING_INTERACTION.value == "awaiting_interaction"
     assert TurnPhase.COMPLETED.value == "completed"
     assert TurnPhase.FAILED.value == "failed"
 
@@ -173,14 +177,26 @@ def test_terminal_reason_values_match_the_wire_strings():
     assert TerminalReason.UNKNOWN_AFTER_RECOVERY.value == "unknown_after_recovery"
 
 
-# ── Usage dataclass ──────────────────────────────────────────────────────
+# ── Usage dataclass (defined in nodes.py, re-exported here) ──────────────
 
 
-def test_usage_stores_all_three_token_counts():
+def test_usage_fields_are_in_order():
+    assert [f.name for f in dataclasses.fields(Usage)] == [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+
+
+def test_usage_stores_all_token_counts():
     usage = Usage(input_tokens=7, output_tokens=11, total_tokens=18)
     assert usage.input_tokens == 7
     assert usage.output_tokens == 11
     assert usage.total_tokens == 18
+    assert usage.cache_creation_input_tokens is None
+    assert usage.cache_read_input_tokens is None
 
 
 def test_usage_accepts_all_none():
@@ -188,6 +204,20 @@ def test_usage_accepts_all_none():
     assert usage.input_tokens is None
     assert usage.output_tokens is None
     assert usage.total_tokens is None
+    assert usage.cache_creation_input_tokens is None
+    assert usage.cache_read_input_tokens is None
+
+
+def test_usage_carries_cache_token_counts():
+    usage = Usage(
+        input_tokens=1,
+        output_tokens=2,
+        total_tokens=3,
+        cache_creation_input_tokens=4,
+        cache_read_input_tokens=5,
+    )
+    assert usage.cache_creation_input_tokens == 4
+    assert usage.cache_read_input_tokens == 5
 
 
 # ── FrameBase ────────────────────────────────────────────────────────────
@@ -227,7 +257,7 @@ _SURFACE_FRAMES = [
     NodeStatus,
     TurnLifecycle,
     RunUpsert,
-    ApprovalUpsert,
+    UserInteractionUpsert,
     SidecarUpsert,
     SessionState,
     Notice,
@@ -285,9 +315,11 @@ def test_run_upsert_carries_a_run():
     assert frame.run.run_ref == "r1"
 
 
-def test_approval_upsert_carries_an_approval():
-    frame = ApprovalUpsert(cv=1, surface_id="s1", snapshot=_snap(), approval=_approval())
-    assert frame.approval.state is ApprovalState.PENDING
+def test_user_interaction_upsert_carries_a_user_interaction():
+    frame = UserInteractionUpsert(
+        cv=1, surface_id="s1", snapshot=_snap(), user_interaction=_user_interaction()
+    )
+    assert frame.user_interaction.state is UserInteractionState.PENDING
 
 
 def test_sidecar_upsert_carries_a_sidecar():
