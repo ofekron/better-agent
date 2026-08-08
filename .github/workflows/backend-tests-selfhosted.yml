@@ -127,18 +127,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Whole-CPU budgets so each cap matches its xdist worker count
-          # exactly — one worker per whole CPU (see the rationale above
-          # for why the two runner classes get different budgets).
+          # xdist is DISABLED in CI (=1) despite being the local default.
+          # Measured 2026-08-08: a shard of ~450 files hung at xdist's
+          # "bringing up nodes..." for over two hours and never started a
+          # test. Cause is collection cost, not a deadlock — EVERY xdist
+          # worker independently imports and collects the whole shard, and
+          # collection alone across this many files (heavy transitive
+          # imports: onnxruntime, model2vec, tokenizers) was separately
+          # measured at ~16 minutes single-process. N workers each paying
+          # that, inside an N-CPU cap, is strictly slower than one process.
+          # xdist stays on locally because collection there is cheap:
+          # targeted runs are a handful of files, and a 10-file local run
+          # measured faster with 3 workers than without.
+          # Re-enable here only after per-file collection cost is fixed;
+          # until then more shards (less collection per job) is the lever.
           if [ "${{ runner.arch }}" = "ARM64" ]; then
             echo "BETTER_AGENT_TEST_CPUS=3" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=6g" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_CPU_SHARES=512" >> "$GITHUB_ENV"
-            echo "BETTER_AGENT_TEST_XDIST=3" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_XDIST=1" >> "$GITHUB_ENV"
           else
             echo "BETTER_AGENT_TEST_CPUS=5" >> "$GITHUB_ENV"
             echo "BETTER_AGENT_TEST_MEMORY=5g" >> "$GITHUB_ENV"
-            echo "BETTER_AGENT_TEST_XDIST=5" >> "$GITHUB_ENV"
+            echo "BETTER_AGENT_TEST_XDIST=1" >> "$GITHUB_ENV"
           fi
       - name: Run backend test shard ${{ matrix.shard }}/2
         shell: bash
