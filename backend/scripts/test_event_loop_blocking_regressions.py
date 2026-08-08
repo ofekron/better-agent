@@ -4386,12 +4386,22 @@ def test_extension_backend_invoke_has_split_perf_timers() -> None:
         "extension.backend.invoke.handle",
         "extension.backend.invoke.timeout",
         "extension.backend.invoke.roundtrip",
-        "extension.backend.invoke.decode",
-        "extension.backend.invoke.response",
     ):
         assert timer in invoke_source
     assert "body_b64 = (" in invoke_source
     assert "if body_bytes" in invoke_source
+    # decode/response are instrumented in `_build_backend_response` — split out
+    # so a large response's decode can be offloaded to a thread without also
+    # offloading the (cheap) common path.
+    build_response_start = source.index("async def _build_backend_response(")
+    build_response_end = source.index("async def _acquire_bulkhead(", build_response_start)
+    build_response_source = source[build_response_start:build_response_end]
+    for timer in (
+        "extension.backend.invoke.decode",
+        "extension.backend.invoke.response",
+    ):
+        assert timer in build_response_source
+    assert "_build_backend_response(roundtrip)" in invoke_source
     dispatch_start = source.index("async def dispatch_extension_backend_request(")
     dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
     dispatch_source = source[dispatch_start:dispatch_end]

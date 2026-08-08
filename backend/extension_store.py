@@ -2794,6 +2794,21 @@ def _record_slow_call_threshold(record: dict[str, Any], route_path: str) -> floa
     )
 
 
+def _validate_backend_max_concurrency(raw: Any) -> int | None:
+    """Per-extension bulkhead: cap on concurrent in-flight backend calls the
+    host will dispatch to this extension's child process. ``None`` means the
+    host default applies. Protects the child, not the caller — an extension
+    with a heavier backend can declare a smaller cap; fail closed on a
+    malformed entry rather than silently falling back to the default."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ExtensionError("entrypoints.backend_max_concurrency must be an integer")
+    if raw <= 0:
+        raise ExtensionError("entrypoints.backend_max_concurrency must be a positive integer")
+    return raw
+
+
 def _validate_backend_retry_on_exit(raw: Any) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -2885,6 +2900,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "backend_timeouts": _validate_backend_timeouts(entrypoints_raw.get("backend_timeouts")),
         "backend_retry_on_exit": _validate_backend_retry_on_exit(
             entrypoints_raw.get("backend_retry_on_exit")
+        ),
+        "backend_max_concurrency": _validate_backend_max_concurrency(
+            entrypoints_raw.get("backend_max_concurrency")
         ),
         "daemons": _validate_daemons(entrypoints_raw.get("daemons"), extension_id=extension_id),
     }
@@ -7374,6 +7392,7 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
         "entrypoint_kind": entrypoint_kind,
         "backend_timeouts": dict(entrypoints.get("backend_timeouts") or {}),
         "backend_retry_on_exit": list(entrypoints.get("backend_retry_on_exit") or []),
+        "backend_max_concurrency": entrypoints.get("backend_max_concurrency"),
         "prefix": f"/api/extensions/{manifest['id']}/backend",
         "permissions": dict(manifest.get("permissions") or {}),
         "effective_permissions": effective_permissions(record),
@@ -7386,6 +7405,18 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
             "commit_sha": str(record["source"].get("commit_sha") or ""),
         },
     }
+
+
+def has_pending_health_decision(extension_id: str) -> bool:
+    """Cheap read: is this extension currently awaiting a user health
+    decision (repeated slow calls / timeouts)? While pending, the backend
+    dispatcher fast-fails new requests instead of burning resources on a
+    quarantine candidate — `resolve_health_decision` alone still governs
+    re-enable/disable."""
+    record = get_extension(extension_id)
+    if not record:
+        return False
+    return isinstance(record.get("pending_health_decision"), dict)
 
 
 def backend_surface_status(extension_id: str) -> str:

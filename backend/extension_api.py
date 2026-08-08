@@ -546,16 +546,6 @@ async def dispatch_backend_extension(extension_id: str, path: str, request: Requ
                 backend_spec = await _backend_entrypoint_spec_async(extension_id)
             except AdmissionOverloaded as exc:
                 raise HTTPException(status_code=503, detail="extension projection is busy; retry shortly") from exc
-        with perf.timed("extension.backend.core_after_spec"):
-            core_response = await _dispatch_core_builtin_backend(
-                extension_id,
-                path,
-                request,
-                backend_spec=backend_spec,
-            )
-        if core_response is not None:
-            response_source = "core_after_spec"
-            return core_response
         with perf.timed("extension.backend.dispatch"):
             response_source = "extension"
             return await extension_backend_loader.dispatch_extension_backend_request(
@@ -581,12 +571,8 @@ async def _dispatch_core_builtin_backend(
     extension_id: str,
     path: str,
     request: Request,
-    *,
-    backend_spec: dict[str, Any] | None = None,
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
-    if backend_spec is not None:
-        return None
     try:
         roles, enabled = await _CORE_ROLE_EXECUTOR.run(
             _core_routing_projection,

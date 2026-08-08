@@ -962,6 +962,12 @@ async def on_shutdown():
     except Exception:
         logger.exception("requirements extension reconciler did not quiesce")
     await extension_api.shutdown_hot_path_executors()
+    try:
+        import extension_backend_loader
+
+        await asyncio.to_thread(extension_backend_loader.shutdown_persistent_backends)
+    except Exception:
+        logger.exception("on_shutdown: extension backend loader shutdown failed")
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()
     try:

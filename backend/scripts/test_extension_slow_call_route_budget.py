@@ -217,10 +217,13 @@ def test_invoke_backend_attributes_the_route_it_dispatched() -> None:
         "backend_timeouts": {"post-turn": _LONG_ROUTE_BUDGET, "ping": _STRICT_ROUTE_BUDGET},
     }
     original_roundtrip = extension_backend_loader._roundtrip
-    original_get_handle = extension_backend_loader._get_handle
 
-    def stub_roundtrip(*_args, **_kwargs):
-        # Transport stub only: a child that reports 1.0s of its own ASGI time.
+    async def stub_roundtrip(*_args, **_kwargs):
+        # Transport stub: a real ~0.6s host-observed delay (the breaker judges
+        # host-observed elapsed, not the child's self-reported ASGI time), on
+        # a child that additionally reports 1.0s of its own ASGI time — the
+        # child's number must NOT be what gets attributed.
+        await asyncio.sleep(0.6)
         rid = "route-attribution"
         envelope = {
             "id": rid,
@@ -255,7 +258,6 @@ def test_invoke_backend_attributes_the_route_it_dispatched() -> None:
         )
 
     extension_backend_loader._roundtrip = stub_roundtrip
-    extension_backend_loader._get_handle = lambda _spec: None
     try:
         # 1.0s on the 360s route is never an incident, however many times.
         for _ in range(4):
@@ -269,7 +271,6 @@ def test_invoke_backend_attributes_the_route_it_dispatched() -> None:
             asyncio.run(dispatch("ping"))
     finally:
         extension_backend_loader._roundtrip = original_roundtrip
-        extension_backend_loader._get_handle = original_get_handle
     if not (extension_store.get_extension("probe.declared-strict") or {}).get("pending_health_decision"):
         raise AssertionError("dispatch did not attribute the incident to the strict route")
 
