@@ -223,8 +223,19 @@ def _ba_managed_native_ids() -> set[str]:
             # forked_from_supervisor_agent_sid isn't in the summary — both would
             # be dead/wrong here. The prior supervisor sid is captured anyway via
             # its run dir / the durable ledger.)
-            for k in ("agent_session_id", "supervisor_agent_session_id",
-                      "forked_from_agent_sid"):
+            keys = ("agent_session_id", "supervisor_agent_session_id",
+                    "forked_from_agent_sid")
+            if s.get("source") == "import":
+                # An imported root carries the native sid in
+                # `agent_session_id` purely so the next turn resumes the
+                # provider-side conversation (see `import_session`) — it
+                # did NOT spawn that session. Counting it here would hide
+                # every imported conversation from enumeration forever and
+                # shadow the import registry, which is the single source of
+                # truth for "already imported". Its own spawned
+                # supervisor/fork sids still count.
+                keys = tuple(k for k in keys if k != "agent_session_id")
+            for k in keys:
                 v = s.get(k)
                 if isinstance(v, str) and v:
                     ids.add(v)
@@ -1032,9 +1043,12 @@ def _import_session_locked(sess: NativeSession) -> str:
     # Continuation wiring: agent_session_id is the field turn dispatch
     # resolves resume_sid from, so stamping the native sid here makes the
     # next BA turn resume the provider-side conversation instead of
-    # starting fresh. Also marks the native session BA-managed, dropping
-    # it from future enumeration. Resume derives the transcript location
-    # from the session's cwd + provider config_dir, both stamped above.
+    # starting fresh. Resume derives the transcript location from the
+    # session's cwd + provider config_dir, both stamped above. This does
+    # NOT make the native session BA-managed — `_ba_managed_native_ids`
+    # ignores `agent_session_id` on import-sourced roots so enumeration
+    # keeps offering it and the registry stays the one authority on
+    # "already imported".
     if sess.native_id and sess.provider_kind in _RESUMABLE_KINDS:
         session_manager.set_agent_sid(
             root_id,

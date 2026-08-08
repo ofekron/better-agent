@@ -40,6 +40,7 @@ from event_journal import (  # noqa: E402
 from event_bus_subscribers import (  # noqa: E402
     _SESSION_PROJECTION_DISPATCHER,
     _refresh_session_content_projection,
+    await_session_content_projection,
 )
 from session_manager import manager as session_manager  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
@@ -111,7 +112,11 @@ async def _duplicate_ack_is_not_projected_twice() -> None:
             message_id="msg-dup",
             bus_instance=bus,
         )
-        await _SESSION_PROJECTION_DISPATCHER.barrier(sid)
+        # The drainer's own `barrier` is sync (awaiting it raises), and on
+        # its own it cannot see rows whose `EVENT_JOURNAL_WRITTEN` hop has
+        # not landed yet. Go through the public barrier, which drains the
+        # writer first and targets the fold at the durable seq.
+        await await_session_content_projection(sid)
         rows = event_journal_reader.read_message_events(sid, "msg-dup")
         msg = session_manager.get_message_full(sid, "msg-dup") or {}
         assert first.seq > 0

@@ -178,20 +178,84 @@ class SessionProjectionDrainer:
                 _projection_command_is_applicable(command),
             )
             perf.record_count("session_projection.highwater", state.target)
-            if state.active:
-                return True
-            if state.parked:
-                # Already queued for a slot; state.target is already the
-                # highwater above, so the parked entry will fold to it once
-                # promoted — no need to enqueue a second time.
-                return True
-            if self._active_roots >= self._max_active_roots:
-                state.parked = True
-                self._parked_roots.append(command.root_id)
-                perf.record_count("session_projection.parked")
-                return True
-            self._activate_locked(command.root_id, state)
+            self._ensure_draining_locked(command.root_id, state)
             return True
+
+    def require(self, root_id: str, seq: int) -> None:
+        """Raise a root's fold target to a durable journal seq, with no
+        command behind it. Must hold nothing; takes `self._lock`.
+
+        `submit` is driven by the asynchronous `EVENT_JOURNAL_WRITTEN`
+        hop, which lands strictly AFTER a synchronous journal write
+        returns to its caller (`EventJournalWriter._schedule_written`
+        hands the publish to the bound loop fire-and-forget). A caller
+        that just journaled rows and now wants them folded therefore
+        cannot rely on the command having arrived — `barrier` would find
+        no state for the root and return having waited for nothing. This
+        is the seq-addressed entry point that closes that window: the
+        drainer reads rows from the durable journal by seq anyway, so a
+        target raised directly from the writer's high-water mark folds
+        exactly the same rows the pending commands would have. Those
+        commands still arrive and coalesce into a no-op.
+        """
+        if seq <= 0:
+            return
+        with self._lock:
+            if not self._accepting:
+                return
+            state = self._states.get(root_id)
+            if state is None:
+                # No fold pass has ever run for this root in this process,
+                # so the durable fold watermark is the only record of how
+                # far it got. Seeding `cursor` from `seq - 1` the way
+                # `submit` does would silently declare every earlier row
+                # already folded — `submit` gets away with it because its
+                # commands arrive one per row from seq 1 up; a target
+                # pulled straight from the writer's high-water mark skips
+                # to the end.
+                #
+                # The watermark reads 0 for a root that is not resident,
+                # so an evicted root re-folds its whole journal here. That
+                # is the same cold-start re-fold the drainer already does
+                # after a restart (idempotent by uuid dedup, with side
+                # effects re-armed against a 0 watermark) — deliberately
+                # preferred over seeding the cursor too high, which would
+                # silently drop unfolded rows.
+                folded_through = self._get_watermark(root_id)
+                if seq <= folded_through:
+                    return
+                state = _ProjectionRootState(
+                    cursor=folded_through,
+                    target=seq,
+                    queued_at=time.perf_counter(),
+                    expected_applicability={},
+                )
+                self._states[root_id] = state
+            elif seq > state.target:
+                state.target = seq
+            if state.cursor >= state.target:
+                return
+            perf.record_count("session_projection.highwater", state.target)
+            self._ensure_draining_locked(root_id, state)
+
+    def _ensure_draining_locked(
+        self, root_id: str, state: _ProjectionRootState,
+    ) -> None:
+        """Make sure a drain pass is scheduled for `root_id`. Must hold
+        `self._lock`."""
+        if state.active:
+            return
+        if state.parked:
+            # Already queued for a slot; state.target is already the
+            # highwater, so the parked entry will fold to it once
+            # promoted — no need to enqueue a second time.
+            return
+        if self._active_roots >= self._max_active_roots:
+            state.parked = True
+            self._parked_roots.append(root_id)
+            perf.record_count("session_projection.parked")
+            return
+        self._activate_locked(root_id, state)
 
     def _activate_locked(
         self, root_id: str, state: _ProjectionRootState,
@@ -639,14 +703,30 @@ def shutdown_session_content_projection() -> None:
 
 
 async def await_session_content_projection(root_id: str) -> None:
+    """Block until every journal row durable for `root_id` has been
+    folded into the render tree.
+
+    Draining the writer first is what makes this deterministic rather
+    than a race. The drainer is normally fed by `EVENT_JOURNAL_WRITTEN`,
+    which a synchronous journal write publishes onto the bound loop
+    fire-and-forget — so it reliably lands only AFTER the writing thread
+    has moved on and called this. Barriering the drainer alone would
+    then find no state for the root and return having waited for
+    nothing. The writer barrier yields the durable high-water seq, and
+    `require` targets the drain at it directly, so the fold covers every
+    row on disk whether or not its command has arrived yet.
+    """
+    durable_seq = await event_journal_writer.barrier(root_id)
+    _SESSION_PROJECTION_DISPATCHER.require(root_id, durable_seq)
     await asyncio.to_thread(_SESSION_PROJECTION_DISPATCHER.barrier, root_id)
 
 
 def await_session_content_projection_sync(root_id: str) -> None:
     """Blocking counterpart of `await_session_content_projection` for
     callers with no running event loop (e.g. `native_import.py`'s
-    background import thread). Blocks until every journal row queued
-    for `root_id` has been folded into the render tree."""
+    background import thread)."""
+    durable_seq = event_journal_writer.barrier_sync(root_id)
+    _SESSION_PROJECTION_DISPATCHER.require(root_id, durable_seq)
     _SESSION_PROJECTION_DISPATCHER.barrier(root_id)
 
 
