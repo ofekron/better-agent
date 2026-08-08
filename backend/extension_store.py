@@ -3173,9 +3173,17 @@ def _scrub(text: str) -> str:
 
 
 def _git(args: list[str], *, cwd: Path | None = None) -> str:
+    # Never inherit the ambient process cwd: even repo-independent commands
+    # (clone, ls-remote) run git's startup repo discovery, and a broken
+    # checkout at the cwd — e.g. a git-worktree .git file whose target path
+    # is not visible inside a container bind mount — aborts them before the
+    # command executes. Default to an extension-store-owned neutral dir.
+    if cwd is None:
+        cwd = ba_home() / "extensions" / "tmp"
+        cwd.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         ["git", *args],
-        cwd=str(cwd) if cwd else None,
+        cwd=str(cwd),
         check=False,
         capture_output=True,
         text=True,

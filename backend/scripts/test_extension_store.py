@@ -3551,6 +3551,58 @@ def test_update_installed_extensions_updates_git_record_and_preserves_enabled() 
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_git_operations_survive_broken_worktree_cwd() -> None:
+    # A git-worktree checkout bind-mounted into a container has a .git FILE
+    # whose gitdir target (main repo's .git/worktrees/<name>) does not exist
+    # in the container's filesystem view. git aborts startup repo discovery
+    # on such a cwd for EVERY command, including repo-independent clone and
+    # ls-remote. extension_store._git must therefore never inherit the
+    # ambient process cwd.
+    work = _private_monorepo_test_work()
+    old_cwd = os.getcwd()
+    try:
+        repo, first_commit = _make_repo(work, extension_id="ofek.worktree-cwd")
+        broken = work / "broken-worktree-checkout"
+        broken.mkdir()
+        (broken / ".git").write_text(
+            f"gitdir: {work / 'missing' / '.git' / 'worktrees' / 'agent-x'}\n",
+            encoding="utf-8",
+        )
+        os.chdir(broken)
+        record = extension_store.install_from_repo(
+            repo_url=repo.as_uri(),
+            extension_path="extensions/requirements",
+        )
+        if record["source"]["commit_sha"] != first_commit:
+            raise AssertionError(record["source"])
+
+        manifest_path = repo / "extensions" / "requirements" / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "2.0.0"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(repo, "add", "extensions/requirements/better-agent-extension.json")
+        _git(repo, "commit", "-m", "update extension")
+        second_commit = _git(repo, "rev-parse", "HEAD")
+
+        result = extension_store.update_installed_extensions()
+        row = next(
+            (item for item in result["results"] if item["extension_id"] == "ofek.worktree-cwd"),
+            None,
+        )
+        if not row or row.get("updated") is not True:
+            raise AssertionError(result)
+        updated = extension_store.get_extension("ofek.worktree-cwd")
+        if updated["source"]["commit_sha"] != second_commit:
+            raise AssertionError(updated["source"])
+    finally:
+        os.chdir(old_cwd)
+        try:
+            extension_store.uninstall("ofek.worktree-cwd")
+        except extension_store.ExtensionError:
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _write_signed_artifact(package: Path, artifact: Path, extension_id: str, version: str, key: Ed25519PrivateKey) -> dict[str, str]:
     with tarfile.open(artifact, "w:gz") as archive:
         for path in sorted(package.rglob("*")):
@@ -5038,7 +5090,11 @@ def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
         raise AssertionError("project-updates MCP should come from installed private extension")
 
 
-def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
+def test_private_requirements_mcp_requires_resolvable_internal_llm() -> None:
+    # Contract (locked by test_internal_llm_task_readiness.py): a task on
+    # Inherit IS ready when a default provider resolves it. The requirements
+    # MCP is therefore gated on requirement_analysis being RESOLVABLE — not
+    # on an explicit per-task assignment existing.
     import config_store
 
     config_store.set_internal_llm_assignments({})
@@ -5111,46 +5167,51 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
     )
     extension_store._save(data)  # type: ignore[attr-defined]
 
-    configs = extension_store.runtime_mcp_server_configs(
-        {
-            "mode": "native",
-            "app_session_id": "s1",
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "secret",
-        },
-        user_facing=True,
-        bare=False,
-    )
-    if "better-agent-requirements" in configs:
-        raise AssertionError("requirements MCP active before requirement_analysis default is configured")
+    def _configs() -> dict:
+        return extension_store.runtime_mcp_server_configs(
+            {
+                "mode": "native",
+                "app_session_id": "s1",
+                "backend_url": "http://127.0.0.1:8000",
+                "internal_token": "secret",
+            },
+            user_facing=True,
+            bare=False,
+        )
 
+    # Phase 1: no providers configured (a fresh install before provider
+    # setup) — requirement_analysis is unresolvable (Inherit has no default
+    # provider to fall back to), so the MCP must be withheld.
+    saved_fields = (
+        "providers",
+        "default_provider_id",
+        "runtime_profiles",
+        "default_runtime_profile_id",
+    )
+    state = config_store._load_state()  # type: ignore[attr-defined]
+    saved = {field: state.get(field) for field in saved_fields}
+    state["providers"] = []
+    state["default_provider_id"] = None
+    state["runtime_profiles"] = []
+    state["default_runtime_profile_id"] = None
+    config_store._save_state(state)  # type: ignore[attr-defined]
+    try:
+        if "better-agent-requirements" in _configs():
+            raise AssertionError("requirements MCP active while requirement_analysis is unresolvable")
+    finally:
+        state = config_store._load_state()  # type: ignore[attr-defined]
+        for field in saved_fields:
+            state[field] = saved[field]
+        config_store._save_state(state)  # type: ignore[attr-defined]
+
+    # Phase 2: with a default provider restored, Inherit resolves — the MCP
+    # must be exposed without any explicit per-task assignment.
+    if "better-agent-requirements" not in _configs():
+        raise AssertionError("requirements MCP inactive despite Inherit resolving via the default provider")
+
+    # Phase 3: an explicit requirement_analysis assignment keeps it exposed.
     _configure_internal_llm_defaults("requirement_analysis")
-    configs = extension_store.runtime_mcp_server_configs(
-        {
-            "mode": "native",
-            "app_session_id": "s1",
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "secret",
-        },
-        user_facing=True,
-        bare=False,
-    )
-    if "better-agent-requirements" in configs:
-        raise AssertionError("requirements MCP active before requirement_analysis package exists")
-
-    (package / "requirement_analysis").mkdir()
-    (package / "requirement_analysis" / "__init__.py").write_text("", encoding="utf-8")
-    configs = extension_store.runtime_mcp_server_configs(
-        {
-            "mode": "native",
-            "app_session_id": "s1",
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "secret",
-        },
-        user_facing=True,
-        bare=False,
-    )
-    if "better-agent-requirements" not in configs:
+    if "better-agent-requirements" not in _configs():
         raise AssertionError("requirements MCP inactive after requirement_analysis default is configured")
 
 
@@ -5561,6 +5622,10 @@ def test_local_refresh_recovery_rolls_back_exact_quarantine_on_reconcile_failure
 
 
 def test_required_marketplace_extension_auto_installs_from_private_repo() -> None:
+    # get_extension is a pure cached read — auto-install happens on store
+    # reconciliation. Trigger it explicitly so the test is self-contained
+    # instead of depending on an earlier test's reconcile side effect.
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     if record is None:
         raise AssertionError("marketplace extension was not auto-installed")
