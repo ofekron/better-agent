@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+if str(_REPO_ROOT) not in sys.path:  # pragma: no cover (import-time sys.path bootstrap; backend is already on sys.path in every runtime/test entry)
+    sys.path.insert(0, str(_REPO_ROOT))  # pragma: no cover
 
 from daemonhost.host import scrubbed_env  # noqa: E402
 from daemonhost.jsonio import read_json, write_json  # noqa: E402
