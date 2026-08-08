@@ -11,7 +11,7 @@ import { resolveVenvPython } from "./harness/venv";
 import { buildBackendEnv, makeGroupKiller, waitUntilHealthyOrExit } from "./harness/process-utils";
 
 // Validates scenario 3 ("Restore") from the repo root CLAUDE.md's "Session
-// event ingestion — three scenarios MUST converge": the detached runner and
+// event ingestion — four scenarios MUST converge": the detached runner and
 // the real provider CLI subprocess it spawned keep running even though the
 // backend process itself just died. On restart, `recover_all_in_flight`
 // (backend/provider.py) + `integrate_recovered_runs` (backend/run_recovery.py)

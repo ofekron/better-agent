@@ -10,7 +10,7 @@ import type { FullStackBackend } from "./backend";
  * process dies, its already-spawned real provider CLI subprocess is left
  * running/orphaned) followed by a fresh backend process picking the same
  * isolated home + port back up — exactly scenario 3 ("Restore") from the
- * repo root CLAUDE.md's "Session event ingestion — three scenarios MUST
+ * repo root CLAUDE.md's "Session event ingestion — four scenarios MUST
  * converge" section.
  *
  * `startFullStackBackend` (harness/backend.ts) does not expose the spawned
