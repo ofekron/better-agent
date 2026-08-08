@@ -27,7 +27,9 @@ Pins:
      ``nodes`` -> empty).
   4. ``Topology``: ``all_nodes`` includes primary, ``get`` hit + ``KeyError``.
   5. ``local_node_id``: default ``primary``, explicit declared node, and
-     undeclared id -> ``TopologyError``.
+     undeclared id -> ``TopologyError``. ``local_node_id_or_primary``: no
+     env -> ``primary``, env-but-missing-file -> ``primary``, present ->
+     delegates to ``local_node_id``.
   6. ``remove_node``: missing file -> False, node absent -> False, valid
      removal (rewrite + cache invalidation), non-mapping top level ->
      ``TopologyError``, malformed yaml -> ``TopologyError``, non-mapping
@@ -305,6 +307,29 @@ def test_local_node_id_undeclared_raises(monkeypatch, tmp_path):
     monkeypatch.setenv(ENV_NODE, "ghost")
     with pytest.raises(TopologyError, match="not declared in"):
         topology.local_node_id()
+
+
+# --------------------------------------------------------------------------- #
+# local_node_id_or_primary
+# --------------------------------------------------------------------------- #
+def test_local_node_id_or_primary_no_env_returns_primary():
+    # Topology env var unset entirely -> single-machine default, no file read.
+    assert topology.local_node_id_or_primary() == "primary"
+
+
+def test_local_node_id_or_primary_missing_file_returns_primary(monkeypatch, tmp_path):
+    _point_env(monkeypatch, str(tmp_path / "absent.yaml"))
+    assert topology.local_node_id_or_primary() == "primary"
+
+
+def test_local_node_id_or_primary_delegates_when_present(monkeypatch, tmp_path):
+    _write_yaml(
+        tmp_path / "t.yaml",
+        _minimal_topology(nodes={"linux": {"address": "linux.local"}}),
+    )
+    _point_env(monkeypatch, str(tmp_path / "t.yaml"))
+    monkeypatch.setenv(ENV_NODE, "linux")
+    assert topology.local_node_id_or_primary() == "linux"
 
 
 # --------------------------------------------------------------------------- #
