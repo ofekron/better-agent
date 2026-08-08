@@ -581,3 +581,51 @@ def test_disk_snapshot_skips_entry_stat_oserror(tmp_path: Path, monkeypatch):
     o.start(); o.wait_ready(3)
     assert (real / "ok.json") not in o._known   # stat failed -> excluded
     o.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Cycle lifecycle edges: mid-cycle re-poll, scanner teardown, completed-snapshot
+# commit, replay-during-commit, and reconcile rejection.
+# --------------------------------------------------------------------------- #
+
+def test_stop_closes_open_cycle_scanner_and_repolls_mid_cycle(tmp_path: Path):
+    # max_entries < file count leaves the scandir iterator open between polls;
+    # the second poll re-enters with _cycle_dirs already initialized, and stop()
+    # must close the still-open scanner.
+    d = tmp_path / "d"; d.mkdir()
+    for i in range(3):
+        (d / f"f{i}.json").write_text("{}")
+    o = _owner(tmp_path / "w.sqlite3", (d,), lambda c: None, max_entries_per_tick=1)
+    o._wal.open()  # drive the cycle manually, without the background thread
+    assert o.poll_once() == 1          # 1st poll: init cycle_dirs, process f0
+    assert o._cycle_scanner is not None
+    assert o.poll_once() == 1          # 2nd poll: cycle_dirs already set, process f1
+    assert o._cycle_scanner is not None and o._cycle_dir_index == 0  # dir not exhausted
+    o.stop()                           # no thread -> straight to scanner-close path
+    assert o._cycle_scanner is None
+
+
+def test_poll_once_commits_pending_completed_snapshot(tmp_path: Path):
+    # A completed snapshot left pending at poll entry is committed (replaying any
+    # unconsumed WAL entries first) and poll_once returns 0 without re-scanning.
+    d = tmp_path / "d"; d.mkdir()
+    pre = RootChangeWal(tmp_path / "w.sqlite3")
+    pre.open()
+    pre.append_many((("upsert", "r", Path("a.json"), (1, 2, 3, 4, 5)),))
+    pre.close()
+    o = _owner(tmp_path / "w.sqlite3", (d,), lambda c: None)
+    o._wal.open()
+    o._completed_snapshot = {}         # a prior cycle finished; commit still pending
+    assert o.poll_once() == 0          # commits the cycle (replays a.json), returns 0
+    assert o._completed_snapshot is None
+
+
+def test_reconcile_snapshot_raises_when_apply_rejects(tmp_path: Path):
+    # A disk/known divergence produces a change; if apply rejects it (returns
+    # False) reconciliation fails closed with RuntimeError.
+    d = tmp_path / "d"; d.mkdir()
+    o = _owner(tmp_path / "w.sqlite3", (d,), lambda c: False)
+    o._wal.open()
+    o._known = {Path("gone.json"): ("r", (1, 2, 3, 4, 5))}
+    with pytest.raises(RuntimeError, match="root change projection rejected"):
+        o._reconcile_snapshot({})      # empty disk -> delete gone.json -> apply False
