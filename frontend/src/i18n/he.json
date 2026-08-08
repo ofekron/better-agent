@@ -1297,6 +1297,8 @@
   "message.workerTurnLabel": "Worker",
   "message.subSessionTurnLabel": "תת-סשן",
   "message.sessionTurnLabel": "סשן",
+  "message.eventsCount_one": "אירוע {{count}}",
+  "message.eventsCount_other": "{{count}} אירועים",
   "newSession.machineVersionMismatch": "גרסה לא תואמת",
   "newSession.machineDirty": "שינויים מקומיים",
   "rateLimit.continueOnAnotherProvider": "המשך בספק אחר",

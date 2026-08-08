@@ -283,7 +283,11 @@ export function TypedPromptView({
 
   if (payload.origin === "supervisor") {
     return (
-      <div className="surface-prompt" data-testid="surface-typed-prompt" data-origin={payload.origin}>
+      <div
+        className="surface-prompt message-box user-message-box"
+        data-testid="surface-typed-prompt"
+        data-origin={payload.origin}
+      >
         {altering && onAlter ? (
           <AlterEditor text={payload.text} onAlter={onAlter} onDone={() => setAltering(false)} />
         ) : (
@@ -299,7 +303,11 @@ export function TypedPromptView({
   }
 
   return (
-    <div className="surface-prompt" data-testid="surface-typed-prompt" data-origin={payload.origin}>
+    <div
+      className="surface-prompt message-box user-message-box"
+      data-testid="surface-typed-prompt"
+      data-origin={payload.origin}
+    >
       <div className="message-box-header-row">
         {payload.origin === "user" ? (
           <PlainUserHeader userDisplayName={userDisplayName} />

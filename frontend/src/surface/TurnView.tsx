@@ -60,7 +60,13 @@ export function TurnView({
   const runKind = useRunSummaryByTurn(live ? entry.turn.surface_id : undefined, live ? entry.turnId : undefined)?.kind;
 
   return (
-    <div className="surface-turn" data-testid="surface-turn" data-turn-id={entry.turnId} data-phase={entry.phase ?? "unknown"}>
+    <div
+      className="surface-turn"
+      data-testid="surface-turn"
+      data-turn-id={entry.turnId}
+      data-phase={entry.phase ?? "unknown"}
+      data-live={live ? "true" : undefined}
+    >
       {entry.runtimeChange && (
         entry.runtimeChange.kind === "model_change" ? (
           <ModelChangeView node={entry.runtimeChange} />
@@ -81,47 +87,56 @@ export function TurnView({
           onAlter={canAlter ? (text) => store.sendPrompt(text, [], "alter") : undefined}
         />
       )}
-      {live && <RunningIndicator kind={runKind} />}
+      {/* `.surface-turn-body` — chat-panel grammar's "the rest of the turn,
+       * below its prompt": running indicator, body, stopped notice,
+       * result, usage. Legacy's `.turn-group-children` analog (same
+       * connector-line/spacing role, `globals.css`'s shared
+       * `.turn-group-children`/`.surface-turn-body` rule) — one wrapper so
+       * the connector line has a single owning box, same as legacy drew it
+       * from the prompt down to the final result rather than per-item. */}
+      <div className="surface-turn-body">
+        {live && <RunningIndicator kind={runKind} />}
 
-      {live ? (
-        children && <TurnBodyRows nodes={children} store={store} runsById={runsById} mode="live" />
-      ) : manuallyExtended ? (
-        children && <TurnBodyRows nodes={children} store={store} runsById={runsById} mode="extended" />
-      ) : (
-        <>
-          {/* lifecycle_notice/diagnostic "render at their occurrence"
-           * per backend's derive.py (_NON_RENDERABLE_KINDS) — never
-           * hidden behind the ellipsis, even fully collapsed. Reads
-           * whatever `children` already has passively cached (the
-           * `useChildren` call above returns cached content regardless
-           * of `wantBody` — see useChildren.ts); never fetches on its
-           * own. `failure` is excluded on purpose (see isAlwaysInPlaceKind). */}
-          {children &&
-            bodyItemsOf(children)
-              .filter((n) => isAlwaysInPlaceKind(n.kind))
-              .map((n) => <NodeView key={n.node_id} node={n} />)}
-          {entry.manifest.renderable_child_count > 0 && (
-            <Ellipsis count={entry.manifest.renderable_child_count} onExpand={() => setManuallyExtended(true)} />
-          )}
-          {/* Boundary-inline collapsed-content preview — the SAME
-           * `CollapsedPreview`/`lastPreviewCandidate` mechanism
-           * Container.tsx's SubAgentTurnView uses for its own collapse,
-           * applied here to the turn's own body (chat-panel grammar +
-           * legacy's `SubAgentBlock` boundary-inline preview, previously
-           * wired only for nested containers). Reads only what `children`
-           * already has cached; triggers no fetch of its own. */}
-          <CollapsedPreview
-            node={children ? lastPreviewCandidate(bodyItemsOf(children)) : null}
-            store={store}
-            runsById={runsById}
-            testId="surface-turn-preview"
-          />
-        </>
-      )}
-      {entry.phase === "stopped" && <StoppedIndicator reason={entry.reason} />}
+        {live ? (
+          children && <TurnBodyRows nodes={children} store={store} runsById={runsById} mode="live" />
+        ) : manuallyExtended ? (
+          children && <TurnBodyRows nodes={children} store={store} runsById={runsById} mode="extended" />
+        ) : (
+          <>
+            {/* lifecycle_notice/diagnostic "render at their occurrence"
+             * per backend's derive.py (_NON_RENDERABLE_KINDS) — never
+             * hidden behind the ellipsis, even fully collapsed. Reads
+             * whatever `children` already has passively cached (the
+             * `useChildren` call above returns cached content regardless
+             * of `wantBody` — see useChildren.ts); never fetches on its
+             * own. `failure` is excluded on purpose (see isAlwaysInPlaceKind). */}
+            {children &&
+              bodyItemsOf(children)
+                .filter((n) => isAlwaysInPlaceKind(n.kind))
+                .map((n) => <NodeView key={n.node_id} node={n} />)}
+            {entry.manifest.renderable_child_count > 0 && (
+              <Ellipsis count={entry.manifest.renderable_child_count} onExpand={() => setManuallyExtended(true)} />
+            )}
+            {/* Boundary-inline collapsed-content preview — the SAME
+             * `CollapsedPreview`/`lastPreviewCandidate` mechanism
+             * Container.tsx's SubAgentTurnView uses for its own collapse,
+             * applied here to the turn's own body (chat-panel grammar +
+             * legacy's `SubAgentBlock` boundary-inline preview, previously
+             * wired only for nested containers). Reads only what `children`
+             * already has cached; triggers no fetch of its own. */}
+            <CollapsedPreview
+              node={children ? lastPreviewCandidate(bodyItemsOf(children)) : null}
+              store={store}
+              runsById={runsById}
+              testId="surface-turn-preview"
+            />
+          </>
+        )}
+        {entry.phase === "stopped" && <StoppedIndicator reason={entry.reason} />}
 
-      <ResultRow results={entry.results} runsById={runsById} />
-      <UsageSummary usage={entry.usage} />
+        <ResultRow results={entry.results} runsById={runsById} />
+        <UsageSummary usage={entry.usage} />
+      </div>
     </div>
   );
 }

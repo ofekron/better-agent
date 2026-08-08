@@ -214,7 +214,9 @@ export function SubAgentTurnView({ node, store, containerMode, runsById }: Conta
         {badgeText}
       </span>
       {live && <RunningIndicator />}
-      {count > 0 && <span className="sub-agent-collapsed-count">{count}</span>}
+      {count > 0 && (
+        <span className="sub-agent-collapsed-count">{t("message.eventsCount", { count })}</span>
+      )}
     </span>
   );
   const targetLink = node.target_ref ? <SubAgentTargetLink targetRef={node.target_ref} /> : null;
