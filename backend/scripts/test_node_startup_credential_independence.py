@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 import config_store
+import local_machine_identity
 import main_node
 
 
@@ -125,7 +126,16 @@ def test_execution_default_resolution_still_reads_credentials() -> None:
     assert requests == [("read", "zai")]
 
 
-def test_node_startup_prunes_without_instantiating_provider() -> None:
+def test_node_startup_prunes_without_instantiating_provider(monkeypatch) -> None:
+    # local_machine_identity._local_machine_id is a process-global singleton
+    # with no test-home reset hook: initialize_local_machine_id() raises if
+    # it's already set to a DIFFERENT node_id than the one being initialized
+    # now. Any earlier test/module in the same pytest process that already
+    # initialized it (to a node_id other than "lenovo" below) would make
+    # main_node._on_startup()'s own initialization call raise here. This
+    # test is specifically about a from-scratch startup, so clear it first.
+    monkeypatch.setattr(local_machine_identity, "_local_machine_id", None)
+
     class Client:
         async def start(self) -> None:
             started.append(True)
