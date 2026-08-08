@@ -174,6 +174,7 @@ else
   docker_test_snapshot_context "$REPO_ROOT" "$SNAPSHOT_PATH" \
     "$REPO_ROOT/.dockerignore" \
     "$DOCKERFILE" \
+    "$REPO_ROOT/docker/entrypoint-test.sh" \
     "$REPO_ROOT/sdk/runtime-requirements.txt" \
     "$REPO_ROOT/vendor" \
     "$REPO_ROOT/backend/requirements.txt" \
@@ -182,6 +183,7 @@ else
   IMAGE_FINGERPRINT="$(docker_test_fingerprint "$SNAPSHOT_PATH" \
     "$SNAPSHOT_PATH/.dockerignore" \
     "$SNAPSHOT_PATH/docker/Dockerfile.test" \
+    "$SNAPSHOT_PATH/docker/entrypoint-test.sh" \
     "$SNAPSHOT_PATH/sdk/runtime-requirements.txt" \
     "$SNAPSHOT_PATH/vendor" \
     "$SNAPSHOT_PATH/backend/requirements.txt" \

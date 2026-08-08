@@ -87,10 +87,16 @@ ENV BETTER_AGENT_HOME=/root/.better-agent-test-home
 
 WORKDIR /repo/backend
 
+# Wraps `python -m pytest` to fix up bind-mount output-artifact ownership
+# after the run (junit XML, --coverage dir) — see the script's own header
+# for why native Linux Docker needs this and Docker Desktop doesn't.
+COPY docker/entrypoint-test.sh /usr/local/bin/entrypoint-test.sh
+RUN chmod +x /usr/local/bin/entrypoint-test.sh
+
 # No RUN_LLM_TESTS here — that gate stays unset by default so live-LLM tests
 # self-skip; scripts/run-backend-tests.sh only forwards it if the caller's
 # shell already had it set (i.e. the user already approved that run).
-ENTRYPOINT ["python", "-m", "pytest"]
+ENTRYPOINT ["/usr/local/bin/entrypoint-test.sh"]
 CMD []
 
 # ---- full: deps + baked-in source, for the --ref (pinned-commit) path ----
