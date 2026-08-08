@@ -222,14 +222,30 @@ def test_source_change_during_clone_is_rejected() -> None:
         root = Path(raw)
         source = root / "provider"
         _write_executable(source, 1024 * 1024)
-        original_clone = getattr(provider_pinned_launch, helper_name)
 
         def clone_then_mutate(
             descriptor: int,
             target: Path,
             mode: int,
         ) -> None:
-            original_clone(descriptor, target, mode)
+            # Fabricate a successful clone via a plain byte-copy instead of
+            # calling the real clone syscall: on filesystems without
+            # reflink/clonefile support (e.g. this test image's overlayfs,
+            # where FICLONE fails ENOTSUP) the real clone raises before the
+            # mutation below ever runs, silently defeating this race
+            # scenario. The tamper check under test
+            # (`_verify_source_unchanged`) only cares that materialization
+            # completed and the source then changed underneath it — not
+            # which clone strategy produced the target — so this keeps the
+            # test deterministic across filesystems.
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            with target.open("wb") as handle:
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            target.chmod(mode)
             source.chmod(0o700)
             with source.open("r+b") as handle:
                 handle.write(b"changed")
