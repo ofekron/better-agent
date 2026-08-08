@@ -11,7 +11,6 @@ extraction) and is also called from not-yet-extracted routes.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -1707,7 +1706,7 @@ async def get_sessions(
         remote_sessions_cache.version() if connected else 0,
         session_list_cache._sessions_list_cache_version(search_query, effective_search_fields),
     )
-    cached_response = session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)
+    cached_response = await session_list_cache._sessions_list_cache_get(cache_key, accept_encoding)
     if cached_response is not None:
         perf.record("sessions.list.response_cache.hit", 1.0)
         return cached_response
@@ -1781,7 +1780,7 @@ async def get_sessions(
                 "status_sort": effective_status_sort,
             }
         )
-        return session_list_cache._sessions_list_response_maybe_cache(
+        return await session_list_cache._sessions_list_response_maybe_cache(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
@@ -1803,7 +1802,7 @@ async def get_sessions(
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
         })
-        return session_list_cache._sessions_list_response_maybe_cache(
+        return await session_list_cache._sessions_list_response_maybe_cache(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
@@ -1948,21 +1947,16 @@ async def get_sessions(
                         None,
                     )
                 session_list_cache._schedule_session_event_meta_warm(page)
-                return session_list_cache._json_response_maybe_gzip(
-                    json.dumps(
-                        {
-                            "sessions": page,
-                            "offset": offset,
-                            "limit": limit,
-                            "total": local_total,
-                            "has_more": end < local_total,
-                            "sort_by": effective_sort_by,
-                            "status_sort": effective_status_sort,
-                        },
-                        ensure_ascii=False,
-                        allow_nan=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8"),
+                return await session_list_cache.json_response_off_loop(
+                    {
+                        "sessions": page,
+                        "offset": offset,
+                        "limit": limit,
+                        "total": local_total,
+                        "has_more": end < local_total,
+                        "sort_by": effective_sort_by,
+                        "status_sort": effective_status_sort,
+                    },
                     accept_encoding,
                 )
         if may_include_virtual:
@@ -2061,7 +2055,7 @@ async def get_sessions(
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
         })
-        return session_list_cache._sessions_list_response_maybe_cache(
+        return await session_list_cache._sessions_list_response_maybe_cache(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
@@ -2092,7 +2086,7 @@ async def get_sessions(
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
         })
-        return session_list_cache._sessions_list_response_maybe_cache(
+        return await session_list_cache._sessions_list_response_maybe_cache(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
@@ -2206,16 +2200,11 @@ async def get_sessions(
         "status_sort": effective_status_sort,
     })
     if deferred_sidebar_projection:
-        return session_list_cache._json_response_maybe_gzip(
-            json.dumps(
-                response_payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
+        return await session_list_cache.json_response_off_loop(
+            response_payload,
             accept_encoding,
         )
-    return session_list_cache._sessions_list_response_maybe_cache(
+    return await session_list_cache._sessions_list_response_maybe_cache(
         cache_key,
         response_payload,
         cache_response=cache_response and response_payload.get("snapshot_complete") is True,
@@ -2724,7 +2713,7 @@ async def get_session_summaries(request: Request, ids: str = Query("")):
         tuple(requested_ids),
         session_store.summary_index_version(),
     )
-    cached_response = session_list_cache._session_summaries_cache_get(cache_key, accept_encoding)
+    cached_response = await session_list_cache._session_summaries_cache_get(cache_key, accept_encoding)
     if cached_response is not None:
         perf.record("sessions.summaries.response_cache.hit", 1.0)
         return cached_response
@@ -2745,7 +2734,7 @@ async def get_session_summaries(request: Request, ids: str = Query("")):
         tuple(requested_ids),
         session_store.summary_index_version(),
     )
-    return session_list_cache._session_summaries_cache_put(
+    return await session_list_cache._session_summaries_cache_put(
         final_cache_key,
         {"sessions": page},
         accept_encoding,

@@ -275,8 +275,14 @@ def route_ids(**params) -> list[str]:
     ]
     session_listing_api._sidebar_state_snapshot = lambda: SNAPSHOT
     session_listing_api._decorate_local_sidebar_sessions = lambda rows, _snapshot=None: list(rows)
-    session_list_cache._sessions_list_cache_get = lambda *a, **k: None
-    session_list_cache._sessions_list_response_maybe_cache = lambda _key, payload, **k: payload
+    async def _no_cached_response(*_a, **_k):
+        return None
+
+    async def _payload_passthrough(_key, payload, **_k):
+        return payload
+
+    session_list_cache._sessions_list_cache_get = _no_cached_response
+    session_list_cache._sessions_list_response_maybe_cache = _payload_passthrough
     session_list_cache._schedule_session_event_meta_warm = lambda _page: None
     route_args = dict(
         offset=0,

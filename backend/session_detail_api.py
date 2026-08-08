@@ -636,10 +636,10 @@ async def get_session(
         cached = _session_detail_cache_get(cache_key)
         if cached is not None:
             perf.record("sessions.detail.response_cache.hit", 1.0)
-            return await asyncio.to_thread(
-                session_list_cache._json_response_maybe_gzip,
+            return await session_list_cache.gzip_response_off_loop(
                 cached,
                 accept_encoding,
+                executor=session_detail_path,
                 perf_prefix="sessions.detail",
             )
     perf.record("sessions.detail.response_cache.miss", 1.0)
@@ -662,20 +662,18 @@ async def get_session(
             cache_key = cache_key_parts
     else:
         tree.pop("_detail_response_cache_key_parts", None)
-    if cache_key is not None:
-        content = await _session_detail_cache_put_async(cache_key, tree)
-    else:
-        content = (await asyncio.to_thread(
-            json.dumps,
+    if cache_key is None:
+        return await session_list_cache.json_response_off_loop(
             tree,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        )).encode("utf-8")
-    return await asyncio.to_thread(
-        session_list_cache._json_response_maybe_gzip,
+            accept_encoding,
+            executor=session_detail_path,
+            perf_prefix="sessions.detail",
+        )
+    content = await _session_detail_cache_put_async(cache_key, tree)
+    return await session_list_cache.gzip_response_off_loop(
         content,
         accept_encoding,
+        executor=session_detail_path,
         perf_prefix="sessions.detail",
     )
 
@@ -712,7 +710,7 @@ async def get_older_messages(
 @router.get("/api/sessions/{session_id}/messages/{message_id}/events")
 
 
-async def get_message_events(session_id: str, message_id: str):
+async def get_message_events(request: Request, session_id: str, message_id: str):
     """Lazy-expand fetch: return ONE message with its FULL events lists
     (Tier-1 lazy event fetch). The heavy load paths ship completed,
     non-latest assistant messages as stubs (`msg.stub`, empty events);
@@ -727,7 +725,12 @@ async def get_message_events(session_id: str, message_id: str):
     if msg is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     _strip_synthetic_events_from_message(msg)
-    return msg
+    return await session_list_cache.json_response_off_loop(
+        msg,
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
+    )
 
 
 def _resolve_session_node_id(body: dict) -> str:
@@ -1996,7 +1999,7 @@ async def list_processes():
 @router.get("/api/sessions/{session_id}/runs/{run_id}/details")
 
 
-async def get_run_details(session_id: str, run_id: str):
+async def get_run_details(request: Request, session_id: str, run_id: str):
     """Diagnostic snapshot for one in-flight run — answers "why is this
     still considered running?".
 
@@ -2048,28 +2051,33 @@ async def get_run_details(session_id: str, run_id: str):
 
     processes = await asyncio.to_thread(inspect_process_tree, pid, run_id)
 
-    return {
-        "run_id": run_id,
-        "app_session_id": session_id,
-        "kind": entry.get("kind"),
-        "target_message_id": entry.get("target_message_id"),
-        "delegation_id": entry.get("delegation_id"),
-        "pid": pid,
-        "started_at": entry.get("started_at"),
-        "last_event_at": entry.get("last_event_at"),
-        "provider_kind": entry.get("provider_kind"),
-        "startup_phase": entry.get("startup_phase"),
-        "startup_expected_activity": entry.get("startup_expected_activity"),
-        "startup_phase_started_at": entry.get("startup_phase_started_at"),
-        "startup_silence_threshold_seconds": entry.get(
-            "startup_silence_threshold_seconds"
-        ),
-        "stalled_at": entry.get("stalled_at"),
-        "last_activity_at": entry.get("last_activity_at"),
-        "last_activity_kind": entry.get("last_activity_kind"),
-        "provider": provider_info,
-        "processes": processes,
-    }
+    return await session_list_cache.json_response_off_loop(
+        {
+            "run_id": run_id,
+            "app_session_id": session_id,
+            "kind": entry.get("kind"),
+            "target_message_id": entry.get("target_message_id"),
+            "delegation_id": entry.get("delegation_id"),
+            "pid": pid,
+            "started_at": entry.get("started_at"),
+            "last_event_at": entry.get("last_event_at"),
+            "provider_kind": entry.get("provider_kind"),
+            "startup_phase": entry.get("startup_phase"),
+            "startup_expected_activity": entry.get("startup_expected_activity"),
+            "startup_phase_started_at": entry.get("startup_phase_started_at"),
+            "startup_silence_threshold_seconds": entry.get(
+                "startup_silence_threshold_seconds"
+            ),
+            "stalled_at": entry.get("stalled_at"),
+            "last_activity_at": entry.get("last_activity_at"),
+            "last_activity_kind": entry.get("last_activity_kind"),
+            "provider": provider_info,
+            "processes": processes,
+        },
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
+    )
 
 
 @router.post("/api/sessions/{session_id}/stop")
@@ -2088,7 +2096,7 @@ async def stop_session_turn(session_id: str):
 @router.get("/api/sessions/{session_id}/details")
 
 
-async def get_session_details(session_id: str):
+async def get_session_details(request: Request, session_id: str):
     """Session-level "Details" snapshot for the menu panel: the live
     monitoring state, the provenance log (what ran + WHY), and the
     escape-proof process tree across all of the session's runs.
@@ -2113,13 +2121,21 @@ async def get_session_details(session_id: str):
             "started_at": entry.get("started_at"),
             "processes": procs,
         })
-    return {
-        "session_id": session_id,
-        "monitoring_state": _coordinator().turn_manager.monitoring_state(session_id),
-        "tracking_guaranteed": containment().guaranteed,
-        "provenance": provenance_store.read(session_id, limit=500),
-        "runs": trees,
-    }
+    provenance = await asyncio.to_thread(
+        provenance_store.read, session_id, limit=500,
+    )
+    return await session_list_cache.json_response_off_loop(
+        {
+            "session_id": session_id,
+            "monitoring_state": _coordinator().turn_manager.monitoring_state(session_id),
+            "tracking_guaranteed": containment().guaranteed,
+            "provenance": provenance,
+            "runs": trees,
+        },
+        request.headers.get("accept-encoding", ""),
+        executor=session_detail_path,
+        perf_prefix="sessions.detail",
+    )
 
 
 @router.get("/api/sessions/{session_id}/changes")
