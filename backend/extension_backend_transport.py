@@ -17,6 +17,7 @@ from env_compat import dual_env_many
 from execution_environment import isolated_subprocess_environment
 import perf
 from paths import ba_home
+from thread_loop_host import ThreadLoopHost
 
 logger = logging.getLogger(__name__)
 
@@ -143,64 +144,52 @@ class RoundtripResult:
 _PERSISTENT_PROCS: dict[str, _BackendProc] = {}
 _PROCS_GUARD = threading.Lock()
 
-_IO_LOOP: asyncio.AbstractEventLoop | None = None
-_IO_LOOP_GUARD = threading.Lock()
+# One dedicated background loop owns every persistent extension backend
+# process's I/O (spawn, reader task, writes) — reused rather than
+# hand-rolled: `ThreadLoopHost` is this codebase's single implementation of
+# "a thread, a loop, cross-loop submission" (also used by
+# `extension_ui_manager`, `native_index_manager`, `recovery_manager`,
+# `file_delivery`). A dedicated loop thread (not a caller's transient loop)
+# is required here because two real caller shapes cannot supply a stable
+# loop of their own: `invoke_extension_backend_sync`'s callers
+# (`provider_transport.py`, `session_event_extensions.py`) run on dedicated
+# worker threads with no running loop at all, and both this repo's test
+# harnesses and this module's own test suite drive the async path through
+# many short-lived `asyncio.run()` calls while expecting ONE persistent
+# subprocess (and its reader task) to survive across all of them. Bridging
+# via `run_coroutine_threadsafe` + `wrap_future` never blocks a thread
+# either way, so a request-serving loop calling in pays no thread-blocking
+# cost regardless of which loop the transport itself runs on.
+_HOST = ThreadLoopHost(
+    name="extension-backend-io",
+    executor_workers=1,
+    io_thread_name_prefix="ext-backend-io",
+)
 
 
-def _ensure_io_loop() -> asyncio.AbstractEventLoop:
-    """Return the single background event loop that owns every persistent
-    extension backend process's I/O. A dedicated loop thread (not a caller's
-    transient loop) is required so a process's reader task and pending
-    requests stay alive across whichever request loop happens to call in —
-    FastAPI's uvicorn loop in production, a fresh loop per `asyncio.run()` in
-    tests. Callers bridge in via `run_coroutine_threadsafe`, which never
-    blocks a thread: it only registers a callback."""
-    global _IO_LOOP
-    with _IO_LOOP_GUARD:
-        if _IO_LOOP is not None and _IO_LOOP.is_running():
-            return _IO_LOOP
-        ready = threading.Event()
-        holder: dict[str, asyncio.AbstractEventLoop] = {}
-
-        def _run() -> None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            holder["loop"] = loop
-            ready.set()
-            try:
-                loop.run_forever()
-            finally:
-                loop.close()
-
-        threading.Thread(target=_run, name="ext-backend-io", daemon=True).start()
-        ready.wait()
-        _IO_LOOP = holder["loop"]
-        return _IO_LOOP
-
-
-def _stop_io_loop() -> None:
-    global _IO_LOOP
-    with _IO_LOOP_GUARD:
-        loop = _IO_LOOP
-        _IO_LOOP = None
-    if loop is not None and loop.is_running():
-        loop.call_soon_threadsafe(loop.stop)
+def _ensure_host_started() -> ThreadLoopHost:
+    if not _HOST.running:
+        _HOST.start()
+    return _HOST
 
 
 async def _bridge(coro: Any) -> Any:
-    """Run `coro` on the IO loop and await its result without blocking any
-    thread, regardless of which loop this coroutine itself runs on."""
-    loop = _ensure_io_loop()
-    concurrent_future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return await asyncio.wrap_future(concurrent_future)
+    """Run `coro` on the IO host loop and await its result without blocking
+    any thread, regardless of which loop this coroutine itself runs on."""
+    host = _ensure_host_started()
+
+    async def _factory() -> Any:
+        return await coro
+
+    return await host.run(_factory)
 
 
 def _bridge_blocking(coro: Any) -> Any:
     """Sync bridge for legacy sync call sites that are already off the event
     loop entirely (dedicated worker threads). Blocks only the calling thread —
-    never the IO loop or any request-serving loop."""
-    loop = _ensure_io_loop()
-    concurrent_future = asyncio.run_coroutine_threadsafe(coro, loop)
+    never the IO host loop or any request-serving loop."""
+    host = _ensure_host_started()
+    concurrent_future = asyncio.run_coroutine_threadsafe(coro, host.loop)
     return concurrent_future.result()
 
 
@@ -462,8 +451,9 @@ def evict_persistent_backend(extension_id: str) -> None:
 
 def shutdown_persistent_backends() -> None:
     """Kill every persistent backend process (app shutdown) and stop the IO
-    loop thread. Sync — safe to call from an async lifespan directly (wrap in
-    `asyncio.to_thread` to avoid blocking the caller's loop)."""
+    host thread. Sync and blocking (`ThreadLoopHost.stop` joins its thread) —
+    call via `asyncio.to_thread` from an async lifespan so it never blocks
+    the caller's loop."""
     for extension_id in list(_PERSISTENT_PROCS.keys()):
         evict_persistent_backend(extension_id)
-    _stop_io_loop()
+    _HOST.stop()
