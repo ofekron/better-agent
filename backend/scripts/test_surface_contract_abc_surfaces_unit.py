@@ -11,8 +11,9 @@ adapter:
   providers, sessions, runs, system); this file locks the ABC shape of the
   first four above plus the adapter's own field/slot contract, including its
   ``system`` seam (``system_surface.SystemSurface``, ADR 0011) as a
-  composition member — that surface's own ABC shape is out of this file's
-  scope and is behaviorally covered by ``test_adapter_system.py``.
+  composition member — that surface's own ABC shape is locked by
+  ``test_surface_contract_system_surface_unit.py`` and behaviorally covered
+  by ``test_adapter_system.py``.
 
 Importing the package executes every definition (so incidental line coverage
 reads ~100% via the package ``__init__`` transitive import), but nothing
