@@ -50,7 +50,7 @@ export function AssistantTextView({ node }: { node: NodeWire }) {
 export function ThinkingView({ node }: { node: NodeWire }) {
   const { t } = useTranslation();
   const payload = node.payload as ThinkingPayloadWire | null;
-  if (!payload) return null;
+  if (!payload || (!payload.text && !payload.redacted)) return null;
   if (payload.redacted) {
     return <div className="surface-thinking-redacted">{t("thinking.thinking")}</div>;
   }
