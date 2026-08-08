@@ -40,6 +40,7 @@ import threading
 import working_mode  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
+from _ws_bcast_support import CapturingCoordinator  # noqa: E402
 
 
 # file_editor.start became async (file-editing-on-remote-node support).
@@ -286,15 +287,10 @@ def test_ws_broadcasts_working_mode_meta() -> bool:
     r = file_editor.start(str(a), cwd=str(d))
     sid = r["session_id"]
 
+    # _dispatch fans out via coordinator.schedule_global (not the async
+    # broadcast_global wrapper) — see _ws_bcast_support.py.
     captured: list = []
-
-    class FakeCoord:
-        # _dispatch calls broadcast_global(event_type, data) — mirror
-        # the real Coordinator.broadcast_global signature.
-        async def broadcast_global(self, event_type, data):
-            captured.append({"type": event_type, "data": data})
-
-    b = SessionWSBroadcaster(FakeCoord())
+    b = SessionWSBroadcaster(CapturingCoordinator(captured))
 
     async def drive():
         # on_change reads the ENRICHED fields the real mutator ships

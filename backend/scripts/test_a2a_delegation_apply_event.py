@@ -18,7 +18,12 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home
-_test_home.isolate("bc-test-a2a-delegation-")
+# _mk_session() below creates sessions with orchestration_mode="manager",
+# which — since "Add selective installation runtime profiles" — requires an
+# active, bootstrap-ready installation profile with integrations enabled.
+# `isolate_installed()` seeds one; bare `isolate()` would make every such
+# create() raise IncompatibleOrchestrationMode.
+_test_home.isolate_installed("bc-test-a2a-delegation-")
 
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402

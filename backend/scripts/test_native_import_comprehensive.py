@@ -40,7 +40,10 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
+# session_manager.create() defaults to orchestration_mode="team", which —
+# since "Add selective installation runtime profiles" — requires an active,
+# bootstrap-ready installation profile with integrations enabled.
+_TMP_HOME = _test_home.isolate_installed("bc-test-native-import-comprehensive-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 from _projection_fold import start_projection_fold  # noqa: E402
@@ -1221,15 +1224,56 @@ def _poll_done(timeout: float) -> dict:
 
 def test_unknown_kind_not_enumerated() -> None:
     # Only the 4 supported kinds enumerate; an unknown kind yields nothing.
-    prov = config_store.add_provider({"name": "future-cli", "kind": "future-cli", "mode": "subscription"})
-    pid = prov["id"]
+    # config_store.add_provider() AND _save_state() now reject unsupported
+    # kinds outright (dependency_plan.assert_provider_supported /
+    # assert_state_supported, added by "Add selective installation runtime
+    # profiles") — correct for every write path, but this test needs a
+    # provider record with a kind native_import has never heard of (e.g.
+    # one written by an older/newer version, or a deprecated kind still on
+    # disk after a downgrade). That scenario is "the file already has it",
+    # not "the API let one in", so write the config file directly,
+    # bypassing config_store's write-side validation entirely; read-side
+    # (_load_state) has no such gate.
+    import provider_sync_authority
+
+    pid = str(uuid.uuid4())
+    path = config_store._config_path()
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["providers"].append({
+        "generation": str(uuid.uuid4()),
+        "revision": 0,
+        "execution_revision": 0,
+        "id": pid,
+        "name": "future-cli",
+        "nickname": "",
+        "kind": "future-cli",
+        "mode": "subscription",
+        "base_url": "",
+        "config_dir": "",
+        "custom_models": [],
+        "default_permission": {},
+        "suspended": False,
+        "allowed_sinks": [],
+        "capabilities": {},
+    })
+    # _load_state()'s canonical-shape check verifies provider_state_authority's
+    # digest against the current providers list — recompute it for the
+    # mutated list, same as _save_state() would.
+    state["provider_state_authority"] = provider_sync_authority.new_authority(
+        state.get("default_provider_id"), state["providers"],
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+    config_store._state_cache = None
     try:
         check(native_import.enumerate_native_sessions([pid]) == [], "unknown kind not enumerated (scoped)")
     finally:
-        try:
-            config_store.delete_provider(pid)
-        except Exception:
-            pass
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["providers"] = [p for p in state["providers"] if p.get("id") != pid]
+        state["provider_state_authority"] = provider_sync_authority.new_authority(
+            state.get("default_provider_id"), state["providers"],
+        )
+        path.write_text(json.dumps(state), encoding="utf-8")
+        config_store._state_cache = None
 
 
 # --------------------------------------------------------------------------- #

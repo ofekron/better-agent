@@ -39,12 +39,15 @@ PROVIDER_GENERATION = "9b5a6f36-d44c-4c3c-b54f-39554003065d"
 STATE_GENERATION = "778b9bea-b654-4e4b-8799-496d34445062"
 
 
-def _provider(config_dir: Path, revision: int = 7) -> dict:
+def _provider(
+    config_dir: Path, revision: int = 7, execution_revision: int = 3,
+) -> dict:
     return {
         "id": PROVIDER_ID,
         "kind": "codex",
         "generation": PROVIDER_GENERATION,
         "revision": revision,
+        "execution_revision": execution_revision,
         "config_dir": str(config_dir),
         "base_url": "",
         "mode": "subscription",
@@ -124,6 +127,7 @@ def test_schema3_round_trip_binds_existing_authorities_without_secrets() -> None
             "id": PROVIDER_ID,
             "generation": PROVIDER_GENERATION,
             "revision": 7,
+            "execution_revision": 3,
         }
         assert persisted["authority"]["provider_state"] == _state_authority()
         assert (

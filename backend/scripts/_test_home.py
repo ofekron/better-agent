@@ -269,6 +269,21 @@ def _reset_loaded_home_owners() -> None:
     project_update_store = _loaded("project_update_store")
     if project_update_store is not None:
         project_update_store.reset_for_test_home()
+    # All three caches below key on content fingerprints (extension_store /
+    # config_store file hashes), not on the state-root path — a fresh test
+    # home that happens to start byte-identical to a prior one (the common
+    # case: every isolate() begins from the same empty skeleton) produces
+    # the SAME cache key, so a stale entry from an unrelated earlier test's
+    # home is silently served across the switch unless dropped here.
+    extension_store = _loaded("extension_store")
+    if extension_store is not None:
+        extension_store._clear_projection_cache()
+    harness_profile_resolver = _loaded("harness_profile_resolver")
+    if harness_profile_resolver is not None:
+        harness_profile_resolver.invalidate_cache()
+    installation_capabilities = _loaded("installation_capabilities")
+    if installation_capabilities is not None:
+        installation_capabilities.forget_active()
 
 
 # Crash-safety: never leave the prod home immutable if the process dies

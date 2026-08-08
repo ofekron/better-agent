@@ -26,7 +26,9 @@ def _record(extension_id: str, hooks: dict[str, str] | None = None) -> dict:
 
 
 def test_startup_schedules_readiness_refresh_without_awaiting_it() -> None:
-    source = (extension_store.Path(extension_store.__file__).with_name("main.py")).read_text(
+    # The startup task lives in app_lifecycle.py (extracted from main.py's
+    # lifespan by the main.py split, d41abd86a), not main.py itself.
+    source = (extension_store.Path(extension_store.__file__).with_name("app_lifecycle.py")).read_text(
         encoding="utf-8",
     )
     refresh_await = (

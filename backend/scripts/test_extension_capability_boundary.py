@@ -6,11 +6,25 @@ import sys
 import tempfile
 from pathlib import Path
 
-os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-capability-boundary-")
-
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "sdk"))
+
+# `_test_home.engage` (not a bare os.environ assignment) so conftest.py's
+# per-test `_ensure_ba_home_dirs` autouse fixture re-engages THIS module's
+# home before each of its tests, instead of falling back to the pytest
+# session root (which has no installed profile either, but is a different,
+# unregistered directory this module never touches again).
+import _test_home  # noqa: E402
+_HOME = _test_home.engage(tempfile.mkdtemp(prefix="ba-capability-boundary-"))
+
+# `/api/internal/capabilities` and `/api/internal/extension-settings` are
+# gated by installation_profile's INTEGRATIONS capability
+# (installation_admission.py's _INTEGRATION_PREFIXES) — without an active,
+# bootstrap-ready installation profile every request to them 404s before
+# routing even runs. Activate one (DEFAULT mode seeds integrations=True).
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_HOME))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

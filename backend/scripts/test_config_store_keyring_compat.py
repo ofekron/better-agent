@@ -40,6 +40,7 @@ def test_native_session_provider_kind_never_reads_keychain() -> None:
             "id": "provider-1",
             "generation": "00000000-0000-4000-8000-000000000001",
             "revision": 0,
+            "execution_revision": 0,
             "kind": "codex",
             "mode": "api_key",
         }],
@@ -51,6 +52,7 @@ def test_native_session_provider_kind_never_reads_keychain() -> None:
         assert native_session_miner._provider_kind({"provider_id": "provider-1"}) == "codex"
     finally:
         config_store._load_state = real_load
+        config_store._read_api_key = real_read
         config_store._read_api_key = real_read
 
 
@@ -216,7 +218,11 @@ def test_non_darwin_keyring_uses_noninteractive_environment_key() -> None:
     keyring.get_keyring = lambda: backend
     os.environ["KEYRING_PROPERTY_KEYRING_KEY"] = "headless-secret"
     try:
-        assert oskeychain._keyring() is backend
+        # `_keyring()` returns the `keyring` module itself (so callers chain
+        # .get_password()/.set_password() on it, see `store`/`get` above) —
+        # the noninteractive-key side effect it applies to the active
+        # backend is the actual behavior under test.
+        assert oskeychain._keyring() is keyring
         assert backend.keyring_key == "headless-secret"
     finally:
         keyring.get_keyring = real_get_keyring

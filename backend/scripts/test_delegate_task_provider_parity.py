@@ -68,6 +68,7 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         "folder_id",
         "tag_ids",
         "harness_profile_id",
+        "runtime_profile_id",
     }
     assert properties["target_session_id"]["type"] == "string"
     assert properties["provider_id"]["type"] == "string"
