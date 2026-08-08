@@ -22,6 +22,7 @@ called out inline as a `# gap:` comment rather than guessed at (CLAUDE.md:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -471,9 +472,12 @@ class RunsSurfaceAdapter(RunsSurface):
         turn_id = event.payload.get("execution_turn_id")
         if not isinstance(turn_id, str) or not turn_id:
             return
+        # list_run_records walks the runs ledger with per-row stat calls —
+        # sync filesystem work that must not run on the event-loop thread.
+        records = await asyncio.to_thread(store_access.list_run_records)
         record = next(
             (
-                r for r in store_access.list_run_records()
+                r for r in records
                 if r.session_id == session_id and r.turn_id == turn_id
             ),
             None,
@@ -535,9 +539,8 @@ class RunsSurfaceAdapter(RunsSurface):
                 # currently-projected effect of "retrying".
                 pass
 
-        record = next(
-            (r for r in store_access.list_run_records() if r.run_id == run_id), None,
-        )
+        records = await asyncio.to_thread(store_access.list_run_records)
+        record = next((r for r in records if r.run_id == run_id), None)
         if record is None:
             return
         self._broadcast_summary(record)

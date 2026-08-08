@@ -560,14 +560,16 @@ async def list_runs(session_id: str | None = None, cursor: str | None = None) ->
     if session_id is not None:
         session_id = _validate_id(session_id, field="session_id")
     page_cursor = _decode_cursor(cursor) if cursor else None
-    result = _require_runs().list_runs(session_id, page_cursor)
+    runs = _require_runs()
+    result = await asyncio.to_thread(runs.list_runs, session_id, page_cursor)
     return JSONResponse(_result_body(result))
 
 
 @router.get(f"{_REST_PREFIX}/runs/{{run_id}}")
 async def get_run_detail(run_id: str) -> JSONResponse:
     run_id = _validate_id(run_id, field="run_id")
-    result = _require_runs().run_detail(run_id)
+    runs = _require_runs()
+    result = await asyncio.to_thread(runs.run_detail, run_id)
     return JSONResponse(_result_body(result))
 
 

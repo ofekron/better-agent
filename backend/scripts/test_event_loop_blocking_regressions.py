@@ -4890,6 +4890,26 @@ def test_session_response_serialization_runs_off_loop() -> None:
     assert "session_list_cache._json_response_maybe_gzip(" not in route_source
 
 
+def test_run_records_scan_stays_off_loop() -> None:
+    """list_run_records stats every row of the runs ledger (3000+ dirs on a
+    long-lived install) — loop-pinned bus handlers and REST routes must
+    offload it (2026-08-08 boot death-spiral: run.state facts starved
+    /readyz during startup recovery, supervisors killed healthy boots)."""
+    adapter_source = (ROOT / "adapters" / "runs_adapter.py").read_text(encoding="utf-8")
+    lifecycle_start = adapter_source.index("async def _on_lifecycle(")
+    fact_start = adapter_source.index("async def _on_run_state_fact(")
+    lifecycle_source = adapter_source[lifecycle_start:fact_start]
+    fact_source = adapter_source[fact_start:]
+    for handler_source in (lifecycle_source, fact_source):
+        assert "await asyncio.to_thread(store_access.list_run_records)" in handler_source
+        assert "store_access.list_run_records()" not in handler_source
+    api_source = (ROOT / "adapter_api.py").read_text(encoding="utf-8")
+    assert "result = await asyncio.to_thread(runs.list_runs, session_id, page_cursor)" in api_source
+    assert "result = await asyncio.to_thread(runs.run_detail, run_id)" in api_source
+    assert "result = _require_runs().list_runs(" not in api_source
+    assert "result = _require_runs().run_detail(" not in api_source
+
+
 if __name__ == "__main__":
     test_model_refresh_credential_lookup_does_not_block_event_loop()
     test_model_refresh_cache_commit_does_not_block_event_loop()
@@ -5033,4 +5053,5 @@ if __name__ == "__main__":
     test_provider_start_run_is_off_loop_everywhere()
     test_startup_extension_package_resolution_stays_off_loop()
     test_session_response_serialization_runs_off_loop()
+    test_run_records_scan_stays_off_loop()
     print("PASS event loop blocking regressions")
