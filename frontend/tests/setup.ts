@@ -48,8 +48,22 @@ await i18n
     react: { useSuspense: false },
   });
 
-beforeEach(() => {
+beforeEach(async () => {
   installMemoryStorage();
+  // `utils/uiSelection.ts` holds module-level caches (selected project,
+  // remembered sessions, open tabs) — same singleton class as the
+  // `sessionSurfaceRegistry` stub below, but tests exercise its REAL
+  // behavior, so a reset hook replaces the stub pattern. Reseed from the
+  // fresh MemoryStorage just installed so one test's selection never leaks
+  // into the next.
+  // try/catch, not optional chaining: a test file that vi.mocks the module
+  // gets a mock that THROWS on accessing an export the factory didn't
+  // define — and a mock has no leaking real state to reset anyway.
+  try {
+    (await import("../src/utils/uiSelection")).__resetUiSelectionForTests();
+  } catch {
+    // module mocked by the current test file
+  }
   // Chat Surface Contract v2 (frontend/src/adapter/flag.ts) defaults ON.
   // The existing suite is written against the legacy render path, so pin
   // the kill-switch here globally; a v2-specific suite (e.g. flag.test.ts)
@@ -71,8 +85,20 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  // `utils/writeBacklog.ts`'s queue + in-flight sweep are module-level
+  // singletons: a PATCH queued in this test (e.g. uiSelection write-through)
+  // would otherwise fire during the next test's window and — landing between
+  // two renderApp() MockBackend installs — escape to the real fetch
+  // (happy-dom resolves it against http://localhost:3000). Abandon the sweep
+  // and clear the queue.
+  // Same vi.mock escape hatch as the uiSelection reset in beforeEach above.
+  try {
+    (await import("../src/utils/writeBacklog")).__resetWriteBacklogForTests();
+  } catch {
+    // module mocked by the current test file
+  }
   mockFoldersV2State = [];
   mockTagsV2State = [];
   mockModelFacetState = [];

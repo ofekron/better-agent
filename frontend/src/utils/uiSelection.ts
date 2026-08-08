@@ -176,6 +176,17 @@ function patch(body: unknown): void {
   });
 }
 
+/** Test-only. These module-level caches (selected project, remembered
+ * sessions, open tabs) survive across tests in a file; reseeds them from the
+ * current (fresh) localStorage. Wired into tests/setup.ts's global
+ * beforeEach, after the MemoryStorage swap. */
+export function __resetUiSelectionForTests(): void {
+  remembered = readRememberedLS();
+  selectedProject = readSelectedLS();
+  openSessionTabIds = readOpenSessionIdsLS();
+  openSessionTabJoinedAt = readOpenSessionJoinedAtLS(openSessionTabIds);
+}
+
 export function getSelectedProject(): SelectedProject {
   return selectedProject;
 }

@@ -6,7 +6,7 @@ import {
   setOpenSessionTabIds,
   setSelectedProject,
 } from "../src/utils/uiSelection";
-import { flushWriteBacklog } from "../src/utils/writeBacklog";
+import { __resetWriteBacklogForTests } from "../src/utils/writeBacklog";
 import i18n from "../src/i18n";
 
 async function waitFor(
@@ -35,14 +35,12 @@ describe("session tabs with paged sessions", () => {
     );
     setSelectedProject("", "primary");
     setOpenSessionTabIds([]);
-    // `writeBacklog`'s `backlog`/`inflight` are module-level singletons —
-    // without draining here, the write-through sweep these two calls just
-    // queued keeps running (unawaited) into the NEXT test's window. If that
-    // next test also queues a write while this stale sweep still holds
-    // `inflight`, `flushWriteBacklog()` returns the stale promise instead of
-    // starting a fresh sweep, so the next test's own write silently misses
-    // its assertion window (test pollution, not a product bug).
-    await flushWriteBacklog();
+    // Abandon the write-through sweep those two calls just queued instead of
+    // draining it: a drain (`await flushWriteBacklog()`) can join a sweep
+    // whose fetch is parked on a torn-down MockBackend and never settles —
+    // hook timeout. The global setup.ts afterEach resets too; this earlier
+    // reset just keeps every queued write inside the stubbed-fetch window.
+    __resetWriteBacklogForTests();
     vi.unstubAllGlobals();
     localStorage.removeItem("better-agent-open-session-ids");
     localStorage.removeItem("better-agent-open-session-joined-at");
@@ -1149,6 +1147,12 @@ describe("session tabs with paged sessions", () => {
   }, 10000);
 
   it("restamps a session tab when it reopens after being closed", () => {
+    // No renderApp() here, so no MockBackend is installed — stub fetch or
+    // the setter's write-through PATCH goes out over the real network.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
+    );
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     setOpenSessionTabIds(["reopened-session"]);
@@ -1160,6 +1164,12 @@ describe("session tabs with paged sessions", () => {
 
     expect(getOpenSessionTabJoinedAt()["reopened-session"]).toBe("2026-01-02T00:00:00.000Z");
     vi.useRealTimers();
+    // Abandon BEFORE unstubbing: this test body is synchronous, so the
+    // sweep those setters started resumes only after it returns — a
+    // follow-up re-sweep would otherwise dispatch against the restored
+    // real fetch, racing the afterEach reset.
+    __resetWriteBacklogForTests();
+    vi.unstubAllGlobals();
   });
 
   it("registers a newly created session in open tabs immediately", async () => {

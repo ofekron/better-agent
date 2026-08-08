@@ -102,6 +102,85 @@ describe("writeBacklog", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("reset drops queued writes so a later flush sends nothing", async () => {
+    const mod = await fresh();
+    const fail = vi.fn().mockResolvedValue(res(false, 503));
+    globalThis.fetch = fail as unknown as typeof globalThis.fetch;
+
+    mod.queueWrite({ method: "PATCH", url: "/u", body: { x: 1 }, key: "k" });
+    await mod.flushWriteBacklog(); // stays queued (503)
+
+    mod.__resetWriteBacklogForTests();
+    const ok = vi.fn().mockResolvedValue(res(true, 200));
+    globalThis.fetch = ok as unknown as typeof globalThis.fetch;
+    await mod.flushWriteBacklog();
+
+    expect(ok).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(BACKLOG_KEY) ?? "[]")).toEqual([]);
+  });
+
+  it("reset abandons an in-flight sweep: no further fetches are issued", async () => {
+    const mod = await fresh();
+    let resolveFirst!: (r: Response) => void;
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<Response>((r) => { resolveFirst = r; }),
+      )
+      .mockResolvedValue(res(true, 200));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    // First queueWrite starts a sweep whose snapshot holds only k1; k2 would
+    // normally be picked up by the follow-up sweep after k1's fetch settles.
+    mod.queueWrite({ method: "PATCH", url: "/a", body: {}, key: "k1" });
+    mod.queueWrite({ method: "PATCH", url: "/b", body: {}, key: "k2" });
+    const flush = mod.flushWriteBacklog();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    mod.__resetWriteBacklogForTests();
+    resolveFirst(res(true, 200));
+    await flush;
+
+    // The abandoned sweep never sent k2 and never re-swept.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(localStorage.getItem(BACKLOG_KEY) ?? "[]")).toEqual([]);
+  });
+
+  it("an abandoned sweep settling does not clear a newer sweep's shared slot", async () => {
+    const mod = await fresh();
+    let resolveOld!: (r: Response) => void;
+    let resolveNew!: (r: Response) => void;
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<Response>((r) => { resolveOld = r; }),
+      )
+      .mockImplementationOnce(
+        () => new Promise<Response>((r) => { resolveNew = r; }),
+      )
+      .mockResolvedValue(res(true, 200));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    mod.queueWrite({ method: "PATCH", url: "/old", body: {}, key: "old" });
+    const oldFlush = mod.flushWriteBacklog();
+
+    mod.__resetWriteBacklogForTests();
+    mod.queueWrite({ method: "PATCH", url: "/new", body: {}, key: "new" });
+    const newFlush = mod.flushWriteBacklog();
+
+    // Old sweep settles AFTER the new one started; joining now must attach
+    // to the live sweep, not start a third one (which would re-dispatch the
+    // still-queued "new" write — a third fetch).
+    resolveOld(res(true, 200));
+    await oldFlush;
+    void mod.flushWriteBacklog();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resolveNew(res(true, 200));
+    await newFlush;
+    expect(JSON.parse(localStorage.getItem(BACKLOG_KEY) ?? "[]")).toEqual([]);
+  });
+
   it("survives a reload: a persisted backlog drains on the next flush", async () => {
     const mod = await fresh();
     const fail = vi.fn().mockResolvedValue(res(false, 503));

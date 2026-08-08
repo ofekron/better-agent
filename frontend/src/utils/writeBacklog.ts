@@ -31,6 +31,9 @@ const BACKLOG_KEY = "better-agent-write-backlog";
 
 let backlog: QueuedWrite[] = loadBacklog();
 let inflight: Promise<void> | null = null;
+// Bumped only by the test reset hook; a sweep that observes a stale
+// generation stops issuing fetches and drops its results.
+let sweepGeneration = 0;
 
 function loadBacklog(): QueuedWrite[] {
   try {
@@ -52,6 +55,7 @@ function persistBacklog(): void {
 }
 
 async function sweep(): Promise<void> {
+  const generation = sweepGeneration;
   // Snapshot the pending writes BY IDENTITY. A write may be collapsed (replaced
   // by a newer same-key write) while its fetch is in flight; tracking identity
   // means a succeeded fetch only drops the exact object sent, leaving a newer
@@ -59,6 +63,7 @@ async function sweep(): Promise<void> {
   const pending = [...backlog];
   const succeeded = new Set<QueuedWrite>();
   for (const w of pending) {
+    if (generation !== sweepGeneration) return;
     try {
       const res = await fetch(`${API}${w.url}`, {
         method: w.method,
@@ -73,6 +78,7 @@ async function sweep(): Promise<void> {
       // Network failure / backend unreachable — leave for retry.
     }
   }
+  if (generation !== sweepGeneration) return;
   backlog = backlog.filter((w) => !succeeded.has(w));
   persistBacklog();
   // If new writes arrived during the sweep (not in this snapshot), sweep
@@ -95,10 +101,13 @@ export function queueWrite(write: QueuedWrite): void {
  * share one sweep. */
 export async function flushWriteBacklog(): Promise<void> {
   if (inflight) return inflight;
-  inflight = sweep().finally(() => {
-    inflight = null;
+  const run: Promise<void> = sweep().finally(() => {
+    // Identity-guarded: an abandoned sweep (test reset) must not clear a
+    // newer sweep's slot when it finally settles.
+    if (inflight === run) inflight = null;
   });
-  return inflight;
+  inflight = run;
+  return run;
 }
 
 /** Signal that the backend is reachable again — drain the backlog. Wire to
@@ -107,4 +116,16 @@ export async function flushWriteBacklog(): Promise<void> {
  * re-sent. */
 export function signalReconnect(): void {
   void flushWriteBacklog();
+}
+
+/** Test-only. The backlog and its in-flight sweep are module-level
+ * singletons, so a write queued in one test would otherwise fire during a
+ * later test's window — escaping that test's mock fetch. Abandons any
+ * in-flight sweep (no further fetches, results dropped) and clears the
+ * queue. Wired into tests/setup.ts's global afterEach. */
+export function __resetWriteBacklogForTests(): void {
+  sweepGeneration += 1;
+  backlog = [];
+  inflight = null;
+  persistBacklog();
 }
