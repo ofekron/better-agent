@@ -1266,6 +1266,7 @@
   "message.workerTurnLabel": "वर्कर",
   "message.subSessionTurnLabel": "उप-सत्र",
   "message.sessionTurnLabel": "सत्र",
+  "message.teamModeLabel": "टीम",
   "message.eventsCount_one": "{{count}} इवेंट",
   "message.eventsCount_other": "{{count}} इवेंट्स",
   "newSession.machineVersionMismatch": "वर्शन मेल नहीं खाता",

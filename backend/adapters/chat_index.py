@@ -182,12 +182,14 @@ from backend.surface_contract.nodes import (
 logger = logging.getLogger(__name__)
 
 SCHEME_COMPONENT = "chat_index"
-# v2: adds `headers.usage_json` (SubAgentTurn-family panel-level token
-# usage) — a new nullable column, so bumping this simply starts every
-# surface on a fresh index directory (per-surface path is `.../<sha256
-# (surface_id)>/index.sqlite3` under this version); the journal remains
-# the source of truth and rebuilds it losslessly (see module docstring).
-SCHEME_VERSION = 2
+# v3: adds `headers.manifest_started_ts`/`manifest_ended_ts` (ChildManifest's
+# group time-range chip data) and `headers.orchestration_mode` (TURN node's
+# Team/native chip source) — two new nullable columns, so bumping this
+# simply starts every surface on a fresh index directory (per-surface path
+# is `.../<sha256(surface_id)>/index.sqlite3` under this version); the
+# journal remains the source of truth and rebuilds it losslessly (see
+# module docstring). v2 added `headers.usage_json`.
+SCHEME_VERSION = 3
 _PREVIEW_CHARS = 240
 _DB_FILENAME = "index.sqlite3"
 
@@ -225,9 +227,12 @@ CREATE TABLE IF NOT EXISTS headers (
     target_ref_json TEXT,
     manifest_count INTEGER,
     manifest_has_children INTEGER,
+    manifest_started_ts REAL,
+    manifest_ended_ts REAL,
     preview TEXT,
     payload_json TEXT,
-    usage_json TEXT
+    usage_json TEXT,
+    orchestration_mode TEXT
 );
 CREATE INDEX IF NOT EXISTS headers_parent_order
     ON headers(parent_id, ts, seq);
@@ -389,9 +394,12 @@ def _node_to_row(node: Node) -> tuple:
         target_ref_json,
         manifest.renderable_child_count if manifest is not None else None,
         (1 if manifest.has_children else 0) if manifest is not None else None,
+        manifest.started_ts if manifest is not None else None,
+        manifest.ended_ts if manifest is not None else None,
         _preview_of(node),
         payload_json,
         usage_json,
+        node.orchestration_mode,
     )
 
 
@@ -493,6 +501,8 @@ def _row_to_node(surface_id: SurfaceId, row: sqlite3.Row) -> Node:
         manifest = ChildManifest(
             renderable_child_count=row["manifest_count"],
             has_children=bool(row["manifest_has_children"]),
+            started_ts=row["manifest_started_ts"],
+            ended_ts=row["manifest_ended_ts"],
         )
     kind = NodeKind(row["kind"])
     payload_dict = json.loads(row["payload_json"]) if row["payload_json"] is not None else None
@@ -517,6 +527,7 @@ def _row_to_node(surface_id: SurfaceId, row: sqlite3.Row) -> Node:
         target_ref=target_ref,
         child_manifest=manifest,
         usage=usage,
+        orchestration_mode=row["orchestration_mode"],
     )
 
 
@@ -575,7 +586,9 @@ def merge_settled_turn(
                 "INSERT OR REPLACE INTO headers("
                 "node_id, parent_id, turn_id, kind, ts, seq, status, run_ref, "
                 "sidecar_ref, target_ref_json, manifest_count, manifest_has_children, "
-                "preview, payload_json, usage_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "manifest_started_ts, manifest_ended_ts, "
+                "preview, payload_json, usage_json, orchestration_mode) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _node_to_row(node),
             )
             max_seq = max(max_seq, node.seq)

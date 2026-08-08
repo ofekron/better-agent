@@ -179,6 +179,25 @@ def test_derive_body_partitions_at_assistant_text_boundaries():
     assert [n.node_id for n in body.membership["explanation:txt2"]] == ["txt2", "t3"]
 
 
+def test_derive_body_explanation_carries_time_range_of_its_members():
+    """Explanation/group container chip data: `child_manifest.started_ts`/
+    `ended_ts` are the earliest/latest `ts` among the partition's own
+    members (legacy `AutoActionGroup`'s count+lead-time chip's backend-
+    sourced, richer counterpart — see ADR's explanation-chip ruling)."""
+    items = [
+        _text("txt1", 1.0, 1, "first explanation"),
+        _tool("t1", 2.0, 2),
+        _tool("t2", 5.0, 3),
+        _text("txt2", 6.0, 4, "second explanation"),
+        _tool("t3", 9.0, 5),
+    ]
+    body = derive_body(items, surface_id=SURFACE, turn_id=TURN, cv=1)
+    assert body.items[0].child_manifest.started_ts == 1.0
+    assert body.items[0].child_manifest.ended_ts == 5.0
+    assert body.items[1].child_manifest.started_ts == 6.0
+    assert body.items[1].child_manifest.ended_ts == 9.0
+
+
 def test_derive_body_actions_before_any_text_form_their_own_partition():
     items = [_tool("t1", 1.0, 1), _tool("t2", 2.0, 2), _text("txt1", 3.0, 3, "then text")]
     body = derive_body(items, surface_id=SURFACE, turn_id=TURN, cv=1)
@@ -211,6 +230,21 @@ def test_child_manifest_counts_renderable_content_items():
     empty_manifest = child_manifest([])
     assert empty_manifest.renderable_child_count == 0
     assert empty_manifest.has_children is False
+
+
+def test_child_manifest_time_range_uses_min_max_not_list_order():
+    """`child_manifest()` (the shared helper `derive_turn`/`build_subagent_
+    turns` use, unlike `derive_body`'s own inline construction) must derive
+    started_ts/ended_ts from min/max `ts`, not first/last LIST position —
+    its callers' node lists aren't guaranteed pre-sorted (e.g.
+    `derive_turn`'s body+result concatenation)."""
+    manifest = child_manifest([_tool("t2", 9.0, 2), _tool("t1", 3.0, 1)])
+    assert manifest.started_ts == 3.0
+    assert manifest.ended_ts == 9.0
+
+    empty_manifest = child_manifest([])
+    assert empty_manifest.started_ts is None
+    assert empty_manifest.ended_ts is None
 
 
 def test_child_manifest_excludes_in_place_notice_kinds():
@@ -417,6 +451,20 @@ def test_derive_turn_counts_one_renderable_item_per_subagent_turn():
     assert turn["turn"].child_manifest.renderable_child_count == 2  # task1 (result) + subagent turn
 
 
+def test_derive_turn_stamps_orchestration_mode_onto_turn_node_only():
+    """Team/native turn chip source: `derive_turn`'s `orchestration_mode`
+    kwarg is stamped verbatim onto the TURN node (never guessed/derived —
+    the caller, `chat_adapter.py`, resolves it from the owning session's
+    frozen `orchestration_mode` record field). Defaults to None when the
+    caller has none to offer (e.g. an unresolvable session record)."""
+    items = [_text("txt1", 1.0, 1, "hi")]
+    turn = derive_turn(TURN, items, surface_id=SURFACE, cv=1, orchestration_mode="team")
+    assert turn["turn"].orchestration_mode == "team"
+
+    turn_default = derive_turn(TURN, items, surface_id=SURFACE, cv=1)
+    assert turn_default["turn"].orchestration_mode is None
+
+
 # ---- compaction-children segregation (Item 3) ----
 
 def test_extract_compaction_children_no_compaction_is_a_noop():
@@ -534,7 +582,9 @@ def test_build_subagent_turns_for_panels_groups_one_delegation():
     # worker_complete for the positive case).
     assert container.target_ref.turn_id is None
     assert container.sidecar_ref == "sess-x"
-    assert container.child_manifest == ChildManifest(renderable_child_count=3, has_children=True)
+    assert container.child_manifest == ChildManifest(
+        renderable_child_count=3, has_children=True, started_ts=1.0, ended_ts=3.0,
+    )
     assert container.usage.input_tokens == 10
     assert container.usage.output_tokens == 5
     assert container.usage.total_tokens == 15

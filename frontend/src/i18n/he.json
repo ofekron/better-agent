@@ -1297,6 +1297,7 @@
   "message.workerTurnLabel": "Worker",
   "message.subSessionTurnLabel": "תת-סשן",
   "message.sessionTurnLabel": "סשן",
+  "message.teamModeLabel": "צוות",
   "message.eventsCount_one": "אירוע {{count}}",
   "message.eventsCount_other": "{{count}} אירועים",
   "newSession.machineVersionMismatch": "גרסה לא תואמת",

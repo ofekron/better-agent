@@ -12,7 +12,14 @@
 
 import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import type { NodeKindWire, NodeWire, RunWire, SubAgentTurnPayloadWire, TargetRefWire } from "../../adapter/wire";
+import type {
+  ChildManifestWire,
+  NodeKindWire,
+  NodeWire,
+  RunWire,
+  SubAgentTurnPayloadWire,
+  TargetRefWire,
+} from "../../adapter/wire";
 import type { SurfaceStore } from "../state";
 import { bodyItemsOf } from "../state";
 import { CollapsibleBlock, Ellipsis } from "../leaf/Collapsible";
@@ -23,6 +30,7 @@ import { buildNodeRows, type ListProps } from "./rows";
 import { RunningIndicator } from "../leaf/RunningIndicator";
 import { UsageSummary } from "../leaf/UsageSummary";
 import { navigateRoute, sessionPath } from "../../hooks/useRoute";
+import { fmtNodeTimestamp } from "../../utils/timestamp";
 
 export type RenderMode = "collapsed" | "extended" | "live";
 
@@ -71,6 +79,41 @@ interface ContainerProps {
   runsById: ReadonlyMap<string, RunWire>;
 }
 
+/** `started_ts`–`ended_ts` (backend `nodes.py`'s `ChildManifest` time
+ * range, epoch seconds) formatted for the group/container chip — a single
+ * time when the group spans one instant (or the two ends coincide), an
+ * en-dash range otherwise. Legacy `AutoActionGroup`'s own time chip only
+ * ever showed the LEAD action's timestamp (`fmtTime(lead.event._ts)`) —
+ * this container has richer backend-sourced data (both ends of the span),
+ * rendered with the same chip look. Null when the manifest carries no
+ * timestamp (an empty container). */
+function explanationTimeRangeLabel(manifest: ChildManifestWire | null | undefined): string | null {
+  if (!manifest || manifest.started_ts == null) return null;
+  const start = fmtNodeTimestamp(manifest.started_ts);
+  if (!start) return null;
+  if (manifest.ended_ts == null || manifest.ended_ts === manifest.started_ts) return start;
+  const end = fmtNodeTimestamp(manifest.ended_ts);
+  return end ? `${start}–${end}` : start;
+}
+
+/** Group count + time-range chip — legacy `AutoActionGroup`'s
+ * `.auto-action-group-meta`/`-count`/`-time` chip look, reused verbatim
+ * (same classes, same visual chrome) now driven by backend-computed data
+ * (`node.child_manifest`) instead of a client-side grouping pass. */
+function ExplanationMetaChip({ node }: { node: NodeWire }) {
+  const { t } = useTranslation();
+  const manifest = node.child_manifest;
+  const count = manifest?.renderable_child_count ?? 0;
+  if (count === 0) return null;
+  const timeLabel = explanationTimeRangeLabel(manifest);
+  return (
+    <div className="surface-explanation-meta" data-testid="surface-explanation-meta">
+      <span className="auto-action-group-count">{t("message.eventsCount", { count })}</span>
+      {timeLabel && <span className="auto-action-group-time">{timeLabel}</span>}
+    </div>
+  );
+}
+
 export function ExplanationView({ node, store, containerMode, runsById }: ContainerProps) {
   const [manuallyExtended, setManuallyExtended] = useState(false);
   const effectiveMode: RenderMode = containerMode === "live" ? "live" : manuallyExtended ? "extended" : "collapsed";
@@ -90,6 +133,7 @@ export function ExplanationView({ node, store, containerMode, runsById }: Contai
   if (effectiveMode !== "collapsed") {
     return (
       <div className="surface-explanation" data-testid="surface-explanation" data-mode={effectiveMode}>
+        <ExplanationMetaChip node={node} />
         {textNode && <NodeView node={textNode} />}
         <NodeList nodes={rest} store={store} runsById={runsById} mode={effectiveMode === "live" ? "live" : "extended"} />
       </div>
@@ -102,6 +146,7 @@ export function ExplanationView({ node, store, containerMode, runsById }: Contai
   const last = rest.length > 0 ? rest[rest.length - 1] : null;
   return (
     <div className="surface-explanation" data-testid="surface-explanation" data-mode="collapsed">
+      <ExplanationMetaChip node={node} />
       {textNode && <NodeView node={textNode} />}
       {hiddenCount > 0 && <Ellipsis count={hiddenCount} onExpand={() => setManuallyExtended(true)} />}
       {last && <NodeView node={last} containerMode="collapsed" store={store} runsById={runsById} />}

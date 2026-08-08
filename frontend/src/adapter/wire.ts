@@ -307,6 +307,17 @@ export type NodePayloadWire =
 export interface ChildManifestWire {
   renderable_child_count: number;
   has_children: boolean;
+  /** Group/container time-range chip data (backend `nodes.py`'s
+   * `ChildManifest.started_ts`/`ended_ts`, epoch seconds) — earliest/
+   * latest member `ts`, computed at container-build time
+   * (`derive.py`). Optional (not `field: number | null`) for the SAME
+   * reason `NodeWire.usage` is: a required field would break every
+   * pre-existing `ChildManifestWire` object literal outside this round's
+   * scope (tests, mocks) — the wire itself always sends both keys
+   * (`to_wire` serializes every dataclass field). Both null/undefined
+   * only when the container has no children at all. */
+  started_ts?: number | null;
+  ended_ts?: number | null;
 }
 
 /** Backend-issued, authorization-checked address of an embedded turn in
@@ -351,6 +362,11 @@ export interface NodeWire {
    * itself always sends the key (backend's `to_wire` serializes every
    * dataclass field regardless of Python-side default). */
   usage?: UsageWire | null;
+  /** Team-vs-native turn chip source (backend `nodes.py`'s
+   * `Node.orchestration_mode`) — populated only for `kind: "turn"`, from
+   * that turn's owning session's frozen `orchestration_mode`. Optional,
+   * same rationale as `usage` above. */
+  orchestration_mode?: string | null;
 }
 
 export interface RunWire {

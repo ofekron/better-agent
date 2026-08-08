@@ -36,6 +36,7 @@ import perf  # noqa: E402  (bare — matches every other perf-instrumented backe
 
 import backend.adapters.chat_adapter as chat_adapter_mod  # noqa: E402
 import backend.adapters.chat_index as chat_index_mod  # noqa: E402
+import backend.adapters.store_access as store_access_mod  # noqa: E402
 from backend.adapters.chat_adapter import ChatSurfaceAdapter  # noqa: E402
 from backend.event_bus import BusEvent, bus  # noqa: E402
 from backend.event_ingester import event_ingester  # noqa: E402
@@ -517,6 +518,73 @@ def test_index_served_matches_fresh_normalize_served() -> None:
     assert sorted(warm_children.value, key=lambda n: n.node_id) == sorted(cold_children.value, key=lambda n: n.node_id)
 
 
+class _FakeSessionRecord:
+    """Duck-typed stand-in for `store_access.SessionRecord` — only
+    `orchestration_mode` is read by `ChatSurfaceAdapter._session_
+    orchestration_mode`."""
+
+    def __init__(self, orchestration_mode: str | None) -> None:
+        self.orchestration_mode = orchestration_mode
+
+
+def test_settled_turn_orchestration_mode_and_manifest_time_range_round_trip() -> None:
+    """Both new backend-sourced chip fields must survive the chat_index
+    sqlite round trip: (1) `ChildManifest.started_ts`/`ended_ts` (the
+    Explanation group's count+time-range chip data, ADR 0006 explanation
+    chip ruling) and (2) `Node.orchestration_mode` (the Team/native turn
+    chip, sourced from the session record AT SETTLE TIME). A cold reload
+    with the live session record no longer resolvable (`get_session_
+    record` -> None) must still report the ORIGINAL stamped value — proof
+    it came from the persisted row, not a fresh store_access re-lookup."""
+    root_id = f"root-{uuid.uuid4().hex}"
+    original_get_session_record = store_access_mod.store_access.get_session_record
+    store_access_mod.store_access.get_session_record = lambda sid: _FakeSessionRecord("team")
+    try:
+        adapter = _adapter_with_bound_bus()
+        _ingest_prompt(root_id, "please do two things")
+        text_seq = _ingest_assistant_text(root_id, "on it")
+        _ingest_tool_use(root_id, str(uuid.uuid4()), name="Bash")
+        seq1 = _ingest_assistant_text(root_id, "done")
+        _publish_written(root_id, seq1)
+        seq2 = _ingest_prompt(root_id, "second turn closes the first")
+        _ingest_assistant_text(root_id, "second turn reply")
+        _publish_written(root_id, seq2)
+
+        warm_result = adapter.open_session(root_id)
+        assert isinstance(warm_result, Ok)
+        warm_turn = warm_result.value.turns[0]
+        assert warm_turn.turn.orchestration_mode == "team"
+
+        warm_children = adapter.children(root_id, warm_turn.turn.node_id, _render_rev(warm_result))
+        assert isinstance(warm_children, Ok)
+        warm_explanation = next(n for n in warm_children.value if n.kind == NodeKind.EXPLANATION)
+        assert warm_explanation.child_manifest.started_ts is not None
+        assert warm_explanation.child_manifest.ended_ts is not None
+        assert warm_explanation.child_manifest.started_ts <= warm_explanation.child_manifest.ended_ts
+        assert warm_explanation.child_manifest.renderable_child_count == 2
+    finally:
+        store_access_mod.store_access.get_session_record = original_get_session_record
+
+    # Cold reload, session record now UNRESOLVABLE — a fresh adapter must
+    # still see the values chat_index persisted at settle time.
+    store_access_mod.store_access.get_session_record = lambda sid: None
+    try:
+        cold_adapter = ChatSurfaceAdapter()
+        cold_result = cold_adapter.open_session(root_id)
+        assert isinstance(cold_result, Ok)
+        cold_turn = cold_result.value.turns[0]
+        assert cold_turn.turn.orchestration_mode == "team"
+
+        cold_children = cold_adapter.children(root_id, cold_turn.turn.node_id, _render_rev(cold_result))
+        assert isinstance(cold_children, Ok)
+        cold_explanation = next(n for n in cold_children.value if n.kind == NodeKind.EXPLANATION)
+        assert cold_explanation.child_manifest.started_ts == warm_explanation.child_manifest.started_ts
+        assert cold_explanation.child_manifest.ended_ts == warm_explanation.child_manifest.ended_ts
+        assert cold_explanation.child_manifest.renderable_child_count == 2
+    finally:
+        store_access_mod.store_access.get_session_record = original_get_session_record
+
+
 # ---------------------------------------------------------------------
 # 6. Monster-scale smoke: O(window) reads, not O(journal).
 # ---------------------------------------------------------------------
@@ -634,6 +702,7 @@ _TESTS = [
     test_rebuild_on_stale_falls_back_and_reindexes,
     test_watermark_advances_monotonically_and_resumes,
     test_index_served_matches_fresh_normalize_served,
+    test_settled_turn_orchestration_mode_and_manifest_time_range_round_trip,
     test_open_session_index_fast_path_is_o_window_not_o_journal,
 ]
 
