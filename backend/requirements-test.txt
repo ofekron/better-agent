@@ -5,11 +5,12 @@ pytest>=8.0.0,<9
 # the container runs with --rm.
 pytest-cov>=5.0.0
 coverage>=7.6.0
-# Opt-in parallelism for scripts/run-backend-tests.sh --parallel. Not used by
-# default: some backend/scripts integration tests spawn real subprocesses on
-# fixed resources, and forcing parallelism on suites never vetted for it
-# risks flaky cross-worker races rather than fixing anything.
-pytest-xdist>=3.6.0
+# Parallelism for scripts/run-backend-tests.sh --parallel / the
+# BETTER_AGENT_TEST_XDIST env knob. CI (backend-tests-selfhosted.yml) sets the
+# env knob by default with `--dist loadfile` (see docker_test_xdist_pytest_args
+# in lib/docker-test-lifecycle.sh for the isolation rationale); local dev
+# stays sequential unless the knob is set explicitly.
+pytest-xdist>=3.6.0,<4
 # Per-test timeout enforcement. Opt-in via BETTER_AGENT_TEST_TIMEOUT, plumbed
 # through scripts/run-backend-tests.sh as `--timeout`/`--timeout-method=signal`
 # (see that script's header). Guards against a single hung test silently

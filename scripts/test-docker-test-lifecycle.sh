@@ -187,6 +187,34 @@ docker_test_run "${RUN_ARGS_UNDER_TEST[@]}" example -k smoke
 assert_logged "run --name better-agent-test-backend-"
 assert_logged "--cpus=4 --memory=2g --memory-swap=2g example -k smoke"
 
+# xdist pytest args (docker_test_xdist_pytest_args): the knob passed as "" (the
+# local-dev default, whether from an unset --parallel or an unset
+# BETTER_AGENT_TEST_XDIST) must emit nothing so the pytest invocation stays
+# single-process; a set value must reach the actual docker invocation as
+# `-n <value> --dist loadfile` (loadfile is mandatory, never loadscope/load —
+# see the function's own header).
+[ -z "$(docker_test_xdist_pytest_args "")" ] \
+  || fail "docker_test_xdist_pytest_args emitted flags for an unset worker count"
+
+XDIST_ARGS_UNDER_TEST=()
+while IFS= read -r xdist_arg; do
+  XDIST_ARGS_UNDER_TEST+=("$xdist_arg")
+done < <(docker_test_xdist_pytest_args 4)
+[ "${XDIST_ARGS_UNDER_TEST[*]}" = "-n 4 --dist loadfile" ] \
+  || fail "docker_test_xdist_pytest_args did not produce expected pytest flags: ${XDIST_ARGS_UNDER_TEST[*]}"
+
+: > "$LOG"
+docker_test_run "${XDIST_ARGS_UNDER_TEST[@]}" example -k smoke
+assert_logged "run --name better-agent-test-backend-"
+assert_logged "-n 4 --dist loadfile example -k smoke"
+
+: > "$LOG"
+docker_test_run example -k smoke
+assert_not_logged "--dist loadfile"
+
+grep -F 'docker_test_xdist_pytest_args' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not forward docker_test_xdist_pytest_args into PYTEST_ARGS"
+
 # CPU shares is an independent, still-optional knob (relative weight, not a
 # hard ceiling) — absent unless explicitly set.
 shares_cap_args="$(BETTER_AGENT_TEST_CPU_SHARES=512 docker_test_resource_cap_args)"

@@ -481,6 +481,33 @@ docker_test_resource_cap_args() {
   return 0
 }
 
+# pytest-xdist args for the PYTEST INVOCATION itself (distinct from
+# docker_test_resource_cap_args above, which caps the CONTAINER). Takes the
+# resolved worker count as $1 — "" (unset knob, the local-dev default) emits
+# nothing, so a bare run stays single-process exactly as it always has.
+#
+# `--dist loadfile` is not optional once a worker count is set: it keeps
+# every test in one file on the SAME xdist worker process. This suite has a
+# documented history (three rounds of CI triage) of module-level state leaks
+# — a fixture that mutates a shared module attribute, or an unscoped
+# monkeypatch — bleeding from one test FILE into a LATER file collected in
+# the same pytest process (see e.g. the stores.worker_store leak that caused
+# 42% of one CI run's failures). `--dist loadfile` cannot make that class of
+# bug worse: each worker is its own OS process, so two files assigned to
+# different workers cannot share module state at all — strictly stronger
+# isolation than today's single sequential process, where every file shares
+# one process's module table for the whole run. `loadscope`/`load` are never
+# used here because either could split ONE file's tests across workers,
+# which the per-module home-isolation fixtures in backend/scripts/conftest.py
+# assume never happens (they assume serial, single-worker execution within a
+# module).
+docker_test_xdist_pytest_args() {
+  local workers="$1"
+  [ -n "$workers" ] || return 0
+  printf -- '-n\n%s\n--dist\nloadfile\n' "$workers"
+  return 0
+}
+
 # BETTER_AGENT_TEST_CHOWN forwards the invoking host's uid:gid into the
 # container as an env var, for docker/entrypoint-test.sh to chown its
 # bind-mounted /repo back to the invoking user after the test run (see that
