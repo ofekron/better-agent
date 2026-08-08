@@ -18,22 +18,46 @@
 #   ./scripts/run-backend-tests.sh --coverage /tmp/cov   # ...to a custom dir
 #   ./scripts/run-backend-tests.sh --parallel             # run via pytest-xdist, workers = nproc
 #   ./scripts/run-backend-tests.sh --parallel 4            # ...with an explicit worker count
+#   ./scripts/run-backend-tests.sh --parallel 1            # ESCAPE HATCH: force old single-process behavior
 #
-# --parallel (or its env-var equivalent BETTER_AGENT_TEST_XDIST, read as
-# --parallel's default so CI can opt in without a CLI flag — see the
-# per-runner env in .github/workflows/backend-tests-selfhosted.yml) is opt-in
-# for LOCAL invocations, never the default: an unset knob keeps today's
-# sequential single-process behavior unconditionally. CI itself now opts in
-# by default because `--dist loadfile` (see docker_test_xdist_pytest_args in
-# lib/docker-test-lifecycle.sh) keeps every test in one file on the SAME
-# worker PROCESS — file-level isolation is the property backend/scripts
-# integration tests actually rely on (temp homes engaged per module, fixed
-# ports bound with port=0 for ephemeral assignment), and splitting work
-# across worker processes cannot weaken that: two files on two different
-# workers share no process state at all, which is strictly SAFER than
-# today's single process where every file already shares one process's
-# module table for the whole run. What stays unvetted is splitting a single
-# file's own tests across workers (loadscope/load) — never used here.
+# Parallelism default: LOCAL runs now default to pytest-xdist with 3 workers
+# (BETTER_AGENT_TEST_XDIST=3 equivalent), matching this box's default
+# BETTER_AGENT_TEST_CPUS=3 container cap one worker per whole CPU, and
+# matching the shape CI already uses per self-hosted runner (see
+# .github/workflows/backend-tests-selfhosted.yml). This used to be opt-in
+# only (CI-only) because every knob was deliberately left off for local
+# invocations; that meant local runs were single-process (using ~1 of this
+# Mac's 8 cores) with no bound on a hung test. 3 was picked, not `auto`
+# (nproc, i.e. 8 here), because this is the user's primary interactive
+# machine and local agent test runs happen concurrently with everything
+# else on it, often several agent sessions at once — defaulting to "use
+# every core" would let one test run monopolize the box. 3 workers leaves
+# headroom for at least one more concurrent run plus interactive use before
+# the box is fully committed.
+#
+# `--dist loadfile` is applied whenever a worker count is set (see
+# docker_test_xdist_pytest_args in lib/docker-test-lifecycle.sh) — it keeps
+# every test in one file on the SAME worker PROCESS. File-level isolation is
+# the property backend/scripts integration tests actually rely on (temp
+# homes engaged per module, fixed ports bound with port=0 for ephemeral
+# assignment), and splitting work across worker processes cannot weaken
+# that: two files on two different workers share no process state at all,
+# which is strictly SAFER than a single process where every file already
+# shares one process's module table for the whole run. What stays unvetted
+# is splitting a single file's own tests across workers (loadscope/load) —
+# never used here.
+#
+# ESCAPE HATCH (old single-process behavior — needed for pdb, `-s`, or an
+# ordering repro that genuinely requires one process): any of
+#   - BETTER_AGENT_TEST_XDIST=0
+#   - --parallel 1  (or BETTER_AGENT_TEST_XDIST=1)
+#   - `-- -p no:xdist` (or any user pytest arg containing `no:xdist`)
+# fully disables xdist for that run — no `-n`, no `--dist` flag at all, so
+# behavior is identical to a plain `pytest` invocation. An explicit
+# `--parallel <N>` (any N) on the command line always wins over
+# BETTER_AGENT_TEST_XDIST. `-- -p no:xdist` wins over both, since otherwise
+# an auto-appended `-n <workers>` would be an unrecognized argument once the
+# xdist plugin itself is disabled.
 #
 # Coverage (--coverage) mounts an output dir into the container (which runs
 # --rm, so reports written inside the layer would be lost) and appends
@@ -56,11 +80,13 @@
 # pinned commit, since that path must test a frozen tree, not a live mount.
 #
 # Resource caps on the test container itself (docker_test_resource_cap_args
-# in lib/docker-test-lifecycle.sh): BETTER_AGENT_TEST_CPUS (default 2, same
-# as always), BETTER_AGENT_TEST_MEMORY (+ matching --memory-swap; default
-# unset/uncapped, same as always), BETTER_AGENT_TEST_CPU_SHARES (default
-# unset — docker's normal 1024 weight). All are no-ops for local dev unless
-# set; CI sets them per self-hosted runner in
+# in lib/docker-test-lifecycle.sh): BETTER_AGENT_TEST_CPUS (default 3 — see
+# the parallelism-default rationale above; was 2), BETTER_AGENT_TEST_MEMORY
+# (+ matching --memory-swap; default unset/uncapped, same as always),
+# BETTER_AGENT_TEST_CPU_SHARES (default unset — docker's normal 1024
+# weight). CPUS is now a real local default (not a no-op) to match the new
+# xdist worker default 1:1; MEMORY/CPU_SHARES stay opt-in. CI overrides
+# CPUS/XDIST per self-hosted runner in
 # .github/workflows/backend-tests-selfhosted.yml.
 #
 # Bind-mount ownership on native Linux Docker hosts (docker_test_chown_env_args
@@ -84,17 +110,20 @@
 # Per-test timeout (BETTER_AGENT_TEST_TIMEOUT, seconds): forwarded as
 # `--timeout=<value> --timeout-method=signal` (pytest-timeout, see
 # backend/requirements-test.txt) ahead of any user-supplied pytest args, so
-# an explicit `-- --timeout=...` still wins. Unset by default — local runs
-# keep today's no-timeout behavior; CI sets it to 120s via
-# .github/workflows/backend-tests-selfhosted.yml's job env, not hardcoded
-# here, so this script's own default never changes for local dev. signal
-# over thread: the test image is always Linux, and pytest-timeout's thread
-# method can't safely interrupt a hung test at all (its own docs: on
-# timeout it dumps thread stacks and hard-kills the whole pytest process,
-# losing every remaining test in the run) — signal fails just the one
-# hung test via SIGALRM and lets the suite continue, which is what we
-# want. This was the exact gap in the 2026-08-07 incident: a single hung
-# test burned the full ~100-minute runner budget with zero diagnostic
+# an explicit `-- --timeout=...` still wins. Defaults to 120s locally now
+# (same value CI has always used via
+# .github/workflows/backend-tests-selfhosted.yml's job env) — a hung test
+# used to cost a local session its entire remaining runtime with zero
+# diagnostic; now it costs at most ~120s and a stack dump. ESCAPE HATCH:
+# BETTER_AGENT_TEST_TIMEOUT=0 disables the timeout entirely (no flag
+# emitted), for the rare case a single test is known to legitimately run
+# long. signal over thread: the test image is always Linux, and
+# pytest-timeout's thread method can't safely interrupt a hung test at all
+# (its own docs: on timeout it dumps thread stacks and hard-kills the whole
+# pytest process, losing every remaining test in the run) — signal fails
+# just the one hung test via SIGALRM and lets the suite continue, which is
+# what we want. This was the exact gap in the 2026-08-07 incident: a single
+# hung test burned the full ~100-minute runner budget with zero diagnostic
 # because nothing bounded it.
 
 set -euo pipefail
@@ -112,12 +141,13 @@ source "$HERE/lib/docker-test-lifecycle.sh"
 
 REF=""
 COVERAGE_DIR=""
-# BETTER_AGENT_TEST_XDIST is --parallel's default so CI can opt in via env
-# (matching the BETTER_AGENT_TEST_CPUS/_MEMORY/_TIMEOUT pattern already used
-# for per-runner knobs) without needing a CLI flag; an explicit --parallel
-# below still overrides it for manual invocations. Unset in both places
-# leaves this empty, which is the local-dev default (sequential).
-PARALLEL_WORKERS="${BETTER_AGENT_TEST_XDIST:-}"
+# BETTER_AGENT_TEST_XDIST is --parallel's default (matching the
+# BETTER_AGENT_TEST_CPUS/_MEMORY/_TIMEOUT pattern for per-runner knobs); an
+# explicit --parallel below always overrides it. Unset now defaults to "3"
+# (see the parallelism-default rationale in the header comment), not empty
+# — "0" or "1" (from either source) are normalized to "" (xdist fully
+# disabled) after arg parsing below, which is the documented escape hatch.
+PARALLEL_WORKERS="${BETTER_AGENT_TEST_XDIST:-3}"
 PYTEST_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -158,6 +188,12 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# Escape hatches (BETTER_AGENT_TEST_XDIST=0/1, --parallel 1, or a
+# `-- -p no:xdist`-style user pytest arg) all resolve to "" here — see
+# docker_test_normalize_xdist_workers's own header and the escape-hatch list
+# in this script's header comment.
+PARALLEL_WORKERS="$(docker_test_normalize_xdist_workers "$PARALLEL_WORKERS" ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"})"
 
 if ! command -v docker >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -223,7 +259,8 @@ fi
 RUN_ARGS=(--rm)
 # BETTER_AGENT_TEST_CPUS / _MEMORY / _CPU_SHARES (see
 # docker_test_resource_cap_args in lib/docker-test-lifecycle.sh) — unset
-# leaves this identical to the long-standing --cpus=2 default.
+# leaves this at the --cpus=3 local default (see the parallelism-default
+# rationale in this script's header comment).
 while IFS= read -r resource_cap_arg; do
   RUN_ARGS+=("$resource_cap_arg")
 done < <(docker_test_resource_cap_args)
@@ -262,12 +299,9 @@ fi
 # keeps the last occurrence of a repeated flag). See the header comment for
 # the signal-vs-thread method rationale.
 TIMEOUT_PYTEST_ARGS=()
-if [ -n "${BETTER_AGENT_TEST_TIMEOUT:-}" ]; then
-  TIMEOUT_PYTEST_ARGS+=(
-    "--timeout=${BETTER_AGENT_TEST_TIMEOUT}"
-    --timeout-method=signal
-  )
-fi
+while IFS= read -r timeout_pytest_arg; do
+  TIMEOUT_PYTEST_ARGS+=("$timeout_pytest_arg")
+done < <(docker_test_timeout_pytest_args "${BETTER_AGENT_TEST_TIMEOUT:-120}")
 
 # Coverage: mount the output dir (the container runs --rm, so reports written
 # to its layer would be discarded) and append pytest-cov args. Scope/omit is
@@ -306,8 +340,9 @@ echo "run-backend-tests: running tests in $IMAGE_TAG"
 TEST_STATUS=0
 # ${arr[@]+"${arr[@]}"} guards against bash 3.2 (macOS), where reading an
 # empty array under `set -u` raises "unbound variable". TIMEOUT_PYTEST_ARGS is
-# empty without BETTER_AGENT_TEST_TIMEOUT and PYTEST_ARGS is empty on a bare
-# invocation, so both must be conditionally expanded.
+# only empty when BETTER_AGENT_TEST_TIMEOUT=0 (the escape hatch) and
+# PYTEST_ARGS is empty on a bare invocation, so both must be conditionally
+# expanded.
 docker_test_run "${RUN_ARGS[@]}" "$IMAGE_TAG" ${TIMEOUT_PYTEST_ARGS[@]+"${TIMEOUT_PYTEST_ARGS[@]}"} ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"} || TEST_STATUS=$?
 docker_test_cleanup
 exit "$TEST_STATUS"

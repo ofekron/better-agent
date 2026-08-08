@@ -439,9 +439,19 @@ docker_test_remove_current_container() {
 # eval (this repo also targets bash 3.2 — macOS's default /bin/bash).
 #
 #   BETTER_AGENT_TEST_CPUS       -> --cpus=<value>
-#                                    default "2", matching the cap this
-#                                    container has always run under
-#                                    (see ffc1caeea) — unset changes nothing.
+#                                    default "3" (was "2" — see ffc1caeea for
+#                                    the original cap). Raised to 3 to match
+#                                    run-backend-tests.sh's own new local
+#                                    default of 3 pytest-xdist workers (one
+#                                    worker per whole CPU, the same shape CI
+#                                    uses per self-hosted runner) — a lower
+#                                    CPU cap than the worker count would
+#                                    starve workers against each other inside
+#                                    the same container instead of actually
+#                                    parallelizing. 3, not this machine's full
+#                                    8 cores, so one local test run cannot
+#                                    monopolize the box when several agent
+#                                    sessions run tests concurrently.
 #   BETTER_AGENT_TEST_MEMORY     -> --memory=<value> and
 #                                    --memory-swap=<value> (same value, so a
 #                                    capped container can't spill onto swap
@@ -464,7 +474,7 @@ docker_test_remove_current_container() {
 #                                    value hurting cold-cache runs on an
 #                                    otherwise-idle machine.
 docker_test_resource_cap_args() {
-  local cpus="${BETTER_AGENT_TEST_CPUS:-2}"
+  local cpus="${BETTER_AGENT_TEST_CPUS:-3}"
   local memory="${BETTER_AGENT_TEST_MEMORY:-}"
   local shares="${BETTER_AGENT_TEST_CPU_SHARES:-}"
   [ -n "$cpus" ] && printf -- '--cpus=%s\n' "$cpus"
@@ -505,6 +515,44 @@ docker_test_xdist_pytest_args() {
   local workers="$1"
   [ -n "$workers" ] || return 0
   printf -- '-n\n%s\n--dist\nloadfile\n' "$workers"
+  return 0
+}
+
+# Normalizes a resolved pytest-xdist worker count against the documented
+# LOCAL escape hatches (see run-backend-tests.sh's header comment): "0" or
+# "1" — from either BETTER_AGENT_TEST_XDIST or an explicit `--parallel` —
+# means "fully disabled" (no -n/--dist at all, identical to a plain `pytest`
+# invocation), and so does any pytest arg containing `no:xdist` (e.g.
+# `-- -p no:xdist`): once the xdist plugin itself is disabled, an
+# auto-appended `-n` would be an unrecognized pytest argument. $1 is the
+# resolved worker count ("auto" or an explicit --parallel value both pass
+# through unchanged unless a no:xdist arg is present); $2.. is the full
+# pytest args array to scan. Prints "" (disabled) or the original value.
+docker_test_normalize_xdist_workers() {
+  local workers="$1"
+  shift
+  case "$workers" in
+    0|1) workers="" ;;
+  esac
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      *no:xdist*) workers="" ;;
+    esac
+  done
+  printf '%s\n' "$workers"
+}
+
+# Resolves a timeout value (BETTER_AGENT_TEST_TIMEOUT, or the caller's local
+# default) into pytest-timeout CLI args, one per line — same contract as
+# docker_test_resource_cap_args/docker_test_xdist_pytest_args. "0" is the
+# LOCAL escape hatch to disable the timeout entirely (emits nothing); any
+# other value emits `--timeout=<value> --timeout-method=signal` (see
+# run-backend-tests.sh's header comment for the signal-vs-thread rationale).
+docker_test_timeout_pytest_args() {
+  local timeout_value="$1"
+  [ "$timeout_value" != "0" ] || return 0
+  printf -- '--timeout=%s\n--timeout-method=signal\n' "$timeout_value"
   return 0
 }
 
