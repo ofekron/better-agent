@@ -5194,8 +5194,8 @@ def test_private_requirements_mcp_requires_resolvable_internal_llm() -> None:
     state["default_provider_id"] = None
     state["runtime_profiles"] = []
     state["default_runtime_profile_id"] = None
-    config_store._save_state(state)  # type: ignore[attr-defined]
     try:
+        config_store._save_state(state)  # type: ignore[attr-defined]
         if "better-agent-requirements" in _configs():
             raise AssertionError("requirements MCP active while requirement_analysis is unresolvable")
     finally:
