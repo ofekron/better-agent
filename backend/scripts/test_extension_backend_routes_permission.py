@@ -24,11 +24,16 @@ from pathlib import Path
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-backend-routes-perm-"))
 import _test_home
-_test_home.isolate("ba-test-")
+import _test_installation
+_STATE_HOME = _test_home.isolate("ba-test-")
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ROOT.parent
 sys.path.insert(0, str(ROOT))
+
+# Activate a real installation profile: extension activation gates on
+# installation_profile.integrations_enabled(), which is False in a bare home.
+_test_installation.activate(Path(_STATE_HOME), provider="claude")
 
 import extension_store  # noqa: E402
 
@@ -75,6 +80,9 @@ def _install_backend_gate(extension_id: str, permissions: dict) -> None:
             "commit_sha": extension_id,
         },
         persist=True,
+        # Fresh installs arrive inert (enabled=False); enable explicitly so the
+        # test isolates the backend_routes permission gate, not the enabled gate.
+        force_enabled=True,
     )
 
 
