@@ -67,10 +67,12 @@ _PUBLIC_METHODS = {
     "get_worker_record",
     "list_llm_call_records",
     "list_pending_interactions",
+    "list_pending_interactions_for_sessions",
     # ADR 0008 folders/tags/session-organization reads.
     "list_folders",
     "list_tags",
     "get_session_organization",
+    "get_session_organizations",
     # ADR 0011 (System & Host Surface) reads.
     "list_extension_records",
     "get_extension_record",

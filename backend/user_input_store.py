@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -273,6 +274,21 @@ def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:
     with _LOCK:
         _ensure_counts_locked()
         return [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(app_session_id, [])]
+
+
+def pending_for_sessions(app_session_ids: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
+    """Bulk counterpart of `pending_for_session` — one lock acquisition and
+    one `_ensure_counts_locked()` for however many session ids are
+    requested, instead of one per id (each individual lookup is already an
+    O(1) indexed dict read, but a caller resolving many sessions at once —
+    see `store_access.list_pending_interactions_for_sessions` — should
+    still pay the lock/maintenance-check cost once, not N times)."""
+    with _LOCK:
+        _ensure_counts_locked()
+        return {
+            sid: [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(sid, [])]
+            for sid in app_session_ids
+        }
 
 
 def pending_requests() -> list[dict[str, Any]]:

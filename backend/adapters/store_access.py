@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from backend.surface_contract.nodes import (
@@ -522,6 +523,72 @@ def _tag_record(raw: dict) -> SessionTagRecord:
     )
 
 
+def _session_organization_record(org: dict) -> SessionOrganizationRecord:
+    return SessionOrganizationRecord(
+        folder_id=org["folder_id"],
+        tag_assignments=tuple(
+            (str(a["tag_id"]), str(a["source"])) for a in org["tag_assignments"]
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# `list_pending_interactions`/`list_pending_interactions_for_sessions` shared
+# per-record converters — one construction site per mechanism, used by both
+# the single-id and bulk read paths so they can never drift.
+# ---------------------------------------------------------------------------
+
+def _tool_approval_record(rec) -> PendingInteractionRecord:
+    return PendingInteractionRecord(
+        interaction_ref=f"{TOOL_APPROVAL_REF_PREFIX}{rec.approval_id}",
+        kind="approval",
+        request={
+            "subject": "tool", "tool_name": rec.tool_name,
+            "summary": dict(rec.summary or {}), "risk_scope": rec.provider_kind,
+        },
+    )
+
+
+def _worker_approval_record(rec: dict) -> PendingInteractionRecord:
+    return PendingInteractionRecord(
+        interaction_ref=f"{WORKER_APPROVAL_REF_PREFIX}{rec['delegation_id']}",
+        kind="approval",
+        request={
+            "subject": "delegation",
+            "cwd": rec.get("cwd", ""),
+            "justification": rec.get("justification", ""),
+            "proposed_description": rec.get("proposed_description", ""),
+            "risk_scope": rec.get("proposed_orchestration_mode", ""),
+        },
+    )
+
+
+def _delegate_choice_record(rec: dict) -> PendingInteractionRecord:
+    return PendingInteractionRecord(
+        interaction_ref=f"{DELEGATE_CHOICE_REF_PREFIX}{rec['delegation_id']}",
+        kind="choice",
+        request={
+            "candidates": list(rec.get("proposed_ids") or ()),
+            "prompt_preview": rec.get("prompt", ""),
+        },
+    )
+
+
+def _user_input_record(rec: dict, user_input_store) -> PendingInteractionRecord:
+    """The 4th legacy mechanism (`user_input_api.py`'s free-form
+    input/approval/memory-proposal asks, `user_input_store`) — the one
+    remaining `UserInteractionKind.INPUT` slot, unlike the other 3 which
+    are all `approval`/`choice`. `interaction_request_dict` is the single
+    shared builder the live fact producers (`user_input_api.py`) also use,
+    so cold hydration and the live `UserInteractionUpsert` a still-open tab
+    receives render the same `request` shape."""
+    return PendingInteractionRecord(
+        interaction_ref=f"{USER_INPUT_REF_PREFIX}{rec['request_id']}",
+        kind="input",
+        request=user_input_store.interaction_request_dict(rec),
+    )
+
+
 # ---------------------------------------------------------------------------
 # ADR 0011 (System & Host Surface) record types.
 # ---------------------------------------------------------------------------
@@ -914,12 +981,21 @@ class StoreAccess:
     def get_session_organization(self, session_id: str) -> SessionOrganizationRecord:
         session_organization_store = _resolve("session_organization_store")
         org = session_organization_store.organization_for_session(session_id)
-        return SessionOrganizationRecord(
-            folder_id=org["folder_id"],
-            tag_assignments=tuple(
-                (str(a["tag_id"]), str(a["source"])) for a in org["tag_assignments"]
-            ),
-        )
+        return _session_organization_record(org)
+
+    def get_session_organizations(
+        self, session_ids: Iterable[str],
+    ) -> dict[str, SessionOrganizationRecord]:
+        """Bulk counterpart of `get_session_organization` — ANY caller
+        resolving organization for more than one session at a time (a page,
+        a filter pass) MUST use this instead of looping the single-id call:
+        the underlying store deep-copies its full folders/tags/assignments
+        state per call, so N single-id calls cost N full-store copies where
+        this costs exactly one. See `session_organization_store.
+        organizations_for_sessions`'s docstring."""
+        session_organization_store = _resolve("session_organization_store")
+        orgs = session_organization_store.organizations_for_sessions(session_ids)
+        return {sid: _session_organization_record(org) for sid, org in orgs.items()}
 
     def get_provider_credential_status(self, provider_id: str) -> str:
         config_store = _resolve("config_store")
@@ -945,78 +1021,63 @@ class StoreAccess:
         meant to be sourced). Pending-only, like `tool_approval.registry`/
         `pending_approvals.list_pending`/`user_input_store.pending_for_session`
         themselves — history isn't modeled by any of the 4 legacy stores,
-        so there is nothing to page."""
-        return (
-            *self._pending_tool_approvals(session_id),
-            *self._pending_worker_approvals(session_id),
-            *self._pending_delegate_choices(session_id),
-            *self._pending_user_inputs(session_id),
-        )
-
-    def _pending_tool_approvals(self, session_id: str) -> tuple[PendingInteractionRecord, ...]:
+        so there is nothing to page. Single-id convenience; a caller
+        resolving more than one session at once MUST use
+        `list_pending_interactions_for_sessions` instead (one pass per
+        store, not one per session — see that method's docstring)."""
         tool_approval = _resolve("tool_approval")
-        return tuple(
-            PendingInteractionRecord(
-                interaction_ref=f"{TOOL_APPROVAL_REF_PREFIX}{rec.approval_id}",
-                kind="approval",
-                request={
-                    "subject": "tool", "tool_name": rec.tool_name,
-                    "summary": dict(rec.summary or {}), "risk_scope": rec.provider_kind,
-                },
-            )
-            for rec in tool_approval.registry.list_for_session(session_id)
-        )
-
-    def _pending_worker_approvals(self, session_id: str) -> tuple[PendingInteractionRecord, ...]:
         pending_approvals = _resolve("pending_approvals")
-        return tuple(
-            PendingInteractionRecord(
-                interaction_ref=f"{WORKER_APPROVAL_REF_PREFIX}{rec['delegation_id']}",
-                kind="approval",
-                request={
-                    "subject": "delegation",
-                    "cwd": rec.get("cwd", ""),
-                    "justification": rec.get("justification", ""),
-                    "proposed_description": rec.get("proposed_description", ""),
-                    "risk_scope": rec.get("proposed_orchestration_mode", ""),
-                },
-            )
-            for rec in pending_approvals.list_pending()
-            if rec.get("app_session_id") == session_id
-        )
-
-    def _pending_delegate_choices(self, session_id: str) -> tuple[PendingInteractionRecord, ...]:
         session_bridge = _resolve("session_bridge")
-        return tuple(
-            PendingInteractionRecord(
-                interaction_ref=f"{DELEGATE_CHOICE_REF_PREFIX}{rec['delegation_id']}",
-                kind="choice",
-                request={
-                    "candidates": list(rec.get("proposed_ids") or ()),
-                    "prompt_preview": rec.get("prompt", ""),
-                },
-            )
-            for rec in session_bridge.list_pending_for_caller(session_id)
+        user_input_store = _resolve("user_input_store")
+        return (
+            *(_tool_approval_record(r) for r in tool_approval.registry.list_for_session(session_id)),
+            *(
+                _worker_approval_record(r) for r in pending_approvals.list_pending()
+                if r.get("app_session_id") == session_id
+            ),
+            *(_delegate_choice_record(r) for r in session_bridge.list_pending_for_caller(session_id)),
+            *(
+                _user_input_record(r, user_input_store)
+                for r in user_input_store.pending_for_session(session_id)
+            ),
         )
 
-    def _pending_user_inputs(self, session_id: str) -> tuple[PendingInteractionRecord, ...]:
-        """The 4th legacy mechanism (`user_input_api.py`'s free-form
-        input/approval/memory-proposal asks, `user_input_store`) — the one
-        remaining `UserInteractionKind.INPUT` slot, unlike the other 3
-        which are all `approval`/`choice`. `interaction_request_dict` is
-        the single shared builder the live fact producers
-        (`user_input_api.py`) also use, so cold hydration and the live
-        `UserInteractionUpsert` a still-open tab receives render the same
-        `request` shape."""
+    def list_pending_interactions_for_sessions(
+        self, session_ids: Iterable[str],
+    ) -> dict[str, tuple[PendingInteractionRecord, ...]]:
+        """Bulk counterpart of `list_pending_interactions` — ONE pass over
+        each of the 4 legacy pending-interaction stores regardless of how
+        many session ids are requested, instead of one pass per store PER
+        session (`list_pending_interactions` in a loop). Any caller
+        resolving pending interactions for more than one session at a time
+        (a list page) MUST use this instead."""
+        session_ids = list(session_ids)
+        tool_approval = _resolve("tool_approval")
+        pending_approvals = _resolve("pending_approvals")
+        session_bridge = _resolve("session_bridge")
         user_input_store = _resolve("user_input_store")
-        return tuple(
-            PendingInteractionRecord(
-                interaction_ref=f"{USER_INPUT_REF_PREFIX}{rec['request_id']}",
-                kind="input",
-                request=user_input_store.interaction_request_dict(rec),
+
+        by_tool_approval = tool_approval.registry.grouped_by_session()
+        by_worker_approval: dict[str, list[dict]] = {}
+        for rec in pending_approvals.list_pending():
+            sid = rec.get("app_session_id")
+            if isinstance(sid, str) and sid:
+                by_worker_approval.setdefault(sid, []).append(rec)
+        by_delegate_choice = session_bridge.pending_by_caller()
+        by_user_input = user_input_store.pending_for_sessions(session_ids)
+
+        return {
+            sid: (
+                *(_tool_approval_record(r) for r in by_tool_approval.get(sid, [])),
+                *(_worker_approval_record(r) for r in by_worker_approval.get(sid, [])),
+                *(_delegate_choice_record(r) for r in by_delegate_choice.get(sid, [])),
+                *(
+                    _user_input_record(r, user_input_store)
+                    for r in by_user_input.get(sid, [])
+                ),
             )
-            for rec in user_input_store.pending_for_session(session_id)
-        )
+            for sid in session_ids
+        }
 
 
     # ---- ADR 0011 (System & Host Surface) reads ----------------------
