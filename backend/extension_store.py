@@ -321,7 +321,18 @@ def _rotate_activation_identity(record: dict[str, Any]) -> str:
 
 
 def activation_identity(extension_id: str) -> str:
-    record = _load()["extensions"].get(extension_id)
+    """Fingerprint-cached activation-id read.
+
+    HOT PATH: called on the per-extension-backend-request auth chain
+    (`extension_backend_loader._invoke_backend`), so every backend call
+    used to pay the cross-process `fcntl.flock(LOCK_EX)` + disk read in
+    `_load()`. Routes through `get_extension()` so it shares that
+    function's `store_fingerprint()`-keyed cache instead of adding a
+    second cache: any writer that rotates `activation_id`
+    (`_rotate_activation_identity`) mutates the store file, which bumps
+    the fingerprint and invalidates the shared cache, so the generation
+    fence stays correct."""
+    record = get_extension(extension_id)
     if not isinstance(record, dict) or record.get("enabled") is not True:
         return ""
     activation_id = record.get("activation_id")
