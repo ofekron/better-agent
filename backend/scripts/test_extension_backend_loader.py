@@ -27,6 +27,7 @@ from starlette.requests import ClientDisconnect  # noqa: E402
 
 import extension_api  # noqa: E402
 import extension_backend_loader  # noqa: E402
+import extension_backend_transport  # noqa: E402
 import extension_store  # noqa: E402
 import installation_profile  # noqa: E402
 import project_update_store  # noqa: E402
@@ -158,6 +159,9 @@ def _seed_extension() -> Path:
                 "    @router.get('/boom')",
                 "    def boom():",
                 "        raise RuntimeError('secret path /tmp/better-agent-secret')",
+                "    @router.get('/huge')",
+                "    def huge():",
+                "        return {'blob': 'x' * 20000}",
                 "    return router",
             ]
         ),
@@ -503,7 +507,7 @@ def main() -> int:
         check(response.json()["source_extension_path"] == "extensions/backend", "backend extension receives source path")
         spec = extension_store.backend_entrypoint_spec("ofek.backend")
         assert spec is not None
-        direct = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+        direct = extension_backend_loader._roundtrip_blocking(  # type: ignore[attr-defined]
             extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
             spec,
             "http://testserver",
@@ -522,7 +526,7 @@ def main() -> int:
 
         def _direct_echo(marker: str, size: int) -> None:
             payload = (marker.encode("ascii") + b"x" * size)[:size]
-            result = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+            result = extension_backend_loader._roundtrip_blocking(  # type: ignore[attr-defined]
                 extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
                 spec,
                 "http://testserver",
@@ -572,13 +576,17 @@ def main() -> int:
                 "invalid or inconsistent child timing never attributes slowness",
             )
 
-        async def _check_parent_delay_not_attributed() -> None:
+        async def _check_breaker_trips_on_host_observed_delay() -> None:
+            """Requirement (d): the breaker judges host-observed end-to-end
+            elapsed, not the child's self-reported asgi_ns — a slow transport
+            (or a misbehaving child under-reporting its own time) must still
+            be caught."""
             original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
             original_record = extension_store.record_slow_backend_call
             slow_samples: list[float] = []
 
-            def delayed_parent(*_args, **_kwargs):
-                time.sleep(0.05)
+            async def delayed_parent(*_args, **_kwargs):
+                await asyncio.sleep(0.05)
                 rid = "parent-delay"
                 body = base64.b64encode(b'{"ok":true}').decode("ascii")
                 envelope = {
@@ -611,24 +619,24 @@ def main() -> int:
             old_threshold = extension_store.EXTENSION_SLOW_CALL_SECONDS
             extension_store.EXTENSION_SLOW_CALL_SECONDS = 0.01
             try:
-                for _ in range(3):
-                    response = await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
-                        spec,
-                        method="GET",
-                        path="ping",
-                        body_bytes=b"",
-                        query_b64="",
-                        safe_headers=[],
-                        base_url="http://testserver",
-                    )
-                    check(response.status_code == 200, "parent-delayed fast child still returns")
+                response = await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                    spec,
+                    method="GET",
+                    path="ping",
+                    body_bytes=b"",
+                    query_b64="",
+                    safe_headers=[],
+                    base_url="http://testserver",
+                )
+                check(response.status_code == 200, "host-delayed fast-reporting child still returns")
             finally:
                 extension_store.EXTENSION_SLOW_CALL_SECONDS = old_threshold
                 extension_store.record_slow_backend_call = original_record  # type: ignore[assignment]
                 extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
-            check(not slow_samples, "parent transport delay does not count as child ASGI slowness")
+            check(bool(slow_samples), "host-observed transport delay is attributed even when child asgi_ns is tiny")
+            check(slow_samples[0] >= 0.04, "attributed elapsed reflects the host-observed delay, not the 1ms child asgi_ns")
 
-        asyncio.run(_check_parent_delay_not_attributed())
+        asyncio.run(_check_breaker_trips_on_host_observed_delay())
 
         async def _check_slow_child_is_attributed() -> None:
             original_record = extension_store.record_slow_backend_call
@@ -677,6 +685,294 @@ def main() -> int:
             check(capture_order[:2] == ["activation", "handle"], "activation is captured before backend resolution")
 
         asyncio.run(_check_slow_child_is_attributed())
+
+        check(
+            not hasattr(extension_backend_loader, "_ROUNDTRIP_EXECUTOR"),
+            "_ROUNDTRIP_EXECUTOR no longer exists on the loader module",
+        )
+        check(
+            not hasattr(extension_backend_transport, "_ROUNDTRIP_EXECUTOR"),
+            "_ROUNDTRIP_EXECUTOR no longer exists on the transport module",
+        )
+
+        async def _check_bulkhead_capacity_and_deadline() -> None:
+            """(a) bulkhead: N calls held at capacity, the N+1th waits and only
+            proceeds once a permit frees up; a different extension is
+            unaffected. (b) the semaphore wait counts against the whole-call
+            deadline: a caller whose deadline expires while still waiting for
+            a permit gets the same 504 a slow roundtrip would, without ever
+            reaching the transport."""
+            capacity = 2
+            bulkhead_spec = {
+                "extension_id": "ofek.bulkhead",
+                "backend_max_concurrency": capacity,
+                "backend_timeouts": {},
+            }
+            other_spec = {"extension_id": "ofek.bulkhead-other", "backend_timeouts": {}}
+            release = asyncio.Event()
+            entered = asyncio.Event()
+            state = {"active": 0, "max_active": 0, "calls": 0}
+
+            def _ok_result(rid: str) -> extension_backend_loader._RoundtripResult:  # type: ignore[attr-defined]
+                body = base64.b64encode(b'{"ok":true}').decode("ascii")
+                envelope = {"id": rid, "status": 200, "headers": [], "body": body}
+                return extension_backend_loader._RoundtripResult(  # type: ignore[attr-defined]
+                    json.dumps(envelope).encode("utf-8"), rid, 1.0
+                )
+
+            async def held_roundtrip(_handle, call_spec, _base_url, _payload, _timeout):
+                if call_spec.get("extension_id") != "ofek.bulkhead":
+                    return _ok_result("bulkhead-other")
+                state["calls"] += 1
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+                if state["active"] >= capacity:
+                    entered.set()
+                try:
+                    await release.wait()
+                finally:
+                    state["active"] -= 1
+                return _ok_result("bulkhead")
+
+            async def dispatch(call_spec, path="ping"):
+                return await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                    call_spec,
+                    method="GET",
+                    path=path,
+                    body_bytes=b"",
+                    query_b64="",
+                    safe_headers=[],
+                    base_url="http://testserver",
+                )
+
+            original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
+            old_timeout = extension_backend_loader._HOST_TIMEOUT_SECONDS  # type: ignore[attr-defined]
+            extension_backend_loader._roundtrip = held_roundtrip  # type: ignore[attr-defined]
+            try:
+                held_tasks = [asyncio.create_task(dispatch(bulkhead_spec)) for _ in range(capacity)]
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                check(state["max_active"] == capacity, "bulkhead admits exactly its declared capacity concurrently")
+
+                extension_backend_loader._HOST_TIMEOUT_SECONDS = 5.0  # type: ignore[attr-defined]
+                waiting_task = asyncio.create_task(dispatch(bulkhead_spec))
+                await asyncio.sleep(0.05)
+                check(state["calls"] == capacity, "a request past capacity waits for a permit instead of dispatching")
+
+                other_response = await asyncio.wait_for(dispatch(other_spec), timeout=2)
+                check(other_response.status_code == 200, "a different extension's bulkhead is independent")
+
+                extension_backend_loader._HOST_TIMEOUT_SECONDS = 0.05  # type: ignore[attr-defined]
+                try:
+                    await dispatch(bulkhead_spec)
+                except Exception as exc:
+                    check(
+                        getattr(exc, "status_code", None) == 504,
+                        "semaphore wait past the deadline surfaces as a timeout",
+                    )
+                else:
+                    raise AssertionError("semaphore wait past the deadline should not return a normal response")
+                extension_backend_loader._HOST_TIMEOUT_SECONDS = 5.0  # type: ignore[attr-defined]
+
+                release.set()
+                for task in held_tasks:
+                    response = await asyncio.wait_for(task, timeout=2)
+                    check(response.status_code == 200, "held bulkhead call completes once released")
+                waiting_response = await asyncio.wait_for(waiting_task, timeout=2)
+                check(waiting_response.status_code == 200, "queued bulkhead call proceeds once a permit frees up")
+            finally:
+                extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
+                extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
+                extension_backend_transport.evict_persistent_backend("ofek.bulkhead")
+                extension_backend_transport.evict_persistent_backend("ofek.bulkhead-other")
+
+        asyncio.run(_check_bulkhead_capacity_and_deadline())
+
+        async def _check_fast_fail_while_pending_health_decision() -> None:
+            """(c) while pending a user health decision, requests fast-fail
+            with 503 instead of ever reaching the transport."""
+            extension_id = "ofek.backend"
+            data = extension_store._load()  # type: ignore[attr-defined]
+            data["extensions"][extension_id]["pending_health_decision"] = {
+                "id": "a" * 32,
+                "reason": "repeated_slow_backend_calls",
+                "at": "2026-01-01T00:00:00+00:00",
+                "attributed_extension_id": extension_id,
+                "attributed_generation": 1,
+                "cohort": [],
+                "elapsed_seconds": 5.0,
+            }
+            extension_store._save(data)  # type: ignore[attr-defined]
+            extension_backend_loader._clear_spec_cache(extension_id)  # type: ignore[attr-defined]
+
+            async def fail_if_reached(*_args, **_kwargs):
+                raise AssertionError("dispatch reached the transport while pending a health decision")
+
+            original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
+            extension_backend_loader._roundtrip = fail_if_reached  # type: ignore[attr-defined]
+            try:
+                pending_spec = extension_store.backend_entrypoint_spec(extension_id)
+                try:
+                    await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        pending_spec,
+                        method="GET",
+                        path="ping",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                except Exception as exc:
+                    check(getattr(exc, "status_code", None) == 503, "pending health decision fast-fails with 503")
+                else:
+                    raise AssertionError("dispatch should have fast-failed while a health decision is pending")
+            finally:
+                extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
+                data = extension_store._load()  # type: ignore[attr-defined]
+                data["extensions"][extension_id].pop("pending_health_decision", None)
+                extension_store._save(data)  # type: ignore[attr-defined]
+                extension_backend_loader._clear_spec_cache(extension_id)  # type: ignore[attr-defined]
+            check(
+                extension_store.has_pending_health_decision(extension_id) is False,
+                "pending health decision cleared after the test",
+            )
+
+        asyncio.run(_check_fast_fail_while_pending_health_decision())
+
+        async def _check_response_too_large_fails_closed_at_orchestration() -> None:
+            """(e) a ResponseTooLarge from the transport fails the request
+            closed with a clear, size-naming error instead of ever building a
+            Response from the oversized payload."""
+            async def oversized_roundtrip(*_args, **_kwargs):
+                raise extension_backend_transport.ResponseTooLarge("too big")
+
+            original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
+            extension_backend_loader._roundtrip = oversized_roundtrip  # type: ignore[attr-defined]
+            try:
+                try:
+                    await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        spec,
+                        method="GET",
+                        path="ping",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                except Exception as exc:
+                    check(getattr(exc, "status_code", None) == 500, "oversized response fails closed")
+                    check(
+                        str(extension_backend_transport.RESPONSE_BODY_MAX_BYTES) in str(getattr(exc, "detail", "")),
+                        "oversized response error names the size limit",
+                    )
+                else:
+                    raise AssertionError("oversized response should not return a normal response")
+            finally:
+                extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
+
+        asyncio.run(_check_response_too_large_fails_closed_at_orchestration())
+
+        async def _check_response_size_cap_enforced_on_the_wire() -> None:
+            """(e) end-to-end through the real reader loop: an oversized wire
+            line is rejected without ever being decoded, the channel is torn
+            down, and the next request gets a fresh process."""
+            extension_id = "ofek.backend"
+            original_line_cap = extension_backend_transport._LINE_MAX_BYTES
+            original_stream_limit = extension_backend_transport._STREAM_READ_LIMIT
+            small_cap = 4096
+            extension_backend_transport._LINE_MAX_BYTES = small_cap
+            extension_backend_transport._STREAM_READ_LIMIT = small_cap + 4096
+            extension_backend_loader.evict_persistent_backend(extension_id)
+            try:
+                huge_spec = extension_store.backend_entrypoint_spec(extension_id)
+                try:
+                    await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        huge_spec,
+                        method="GET",
+                        path="huge",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                except Exception as exc:
+                    check(getattr(exc, "status_code", None) == 500, "real oversized wire response fails closed")
+                else:
+                    raise AssertionError("oversized wire response should not return a normal response")
+                response = await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                    huge_spec,
+                    method="GET",
+                    path="ping",
+                    body_bytes=b"",
+                    query_b64="",
+                    safe_headers=[],
+                    base_url="http://testserver",
+                )
+                check(response.status_code == 200, "channel recovers with a fresh process after an oversized response")
+            finally:
+                extension_backend_transport._LINE_MAX_BYTES = original_line_cap
+                extension_backend_transport._STREAM_READ_LIMIT = original_stream_limit
+                extension_backend_loader.evict_persistent_backend(extension_id)
+
+        asyncio.run(_check_response_size_cap_enforced_on_the_wire())
+
+        async def _check_high_concurrency_without_a_thread_pool() -> None:
+            """(f) no-thread-wait: 100+ concurrent in-flight requests to a slow
+            child stub all suspend on the event loop, not a bounded thread
+            pool — the deleted `_ROUNDTRIP_EXECUTOR` capped this at 64."""
+            concurrency = 100
+            hc_spec = {
+                "extension_id": "ofek.high-concurrency",
+                "backend_timeouts": {},
+                "backend_max_concurrency": concurrency + 10,
+            }
+            release = asyncio.Event()
+            state = {"entered": 0}
+            entered_lock = asyncio.Lock()
+
+            async def slow_roundtrip(_handle, _spec, _base_url, _payload, _timeout):
+                async with entered_lock:
+                    state["entered"] += 1
+                await release.wait()
+                body = base64.b64encode(b'{"ok":true}').decode("ascii")
+                envelope = {"id": "hc", "status": 200, "headers": [], "body": body}
+                return extension_backend_loader._RoundtripResult(  # type: ignore[attr-defined]
+                    json.dumps(envelope).encode("utf-8"), "hc", 1.0
+                )
+
+            original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
+            extension_backend_loader._roundtrip = slow_roundtrip  # type: ignore[attr-defined]
+            try:
+                async def dispatch():
+                    return await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        hc_spec,
+                        method="GET",
+                        path="ping",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+
+                tasks = [asyncio.create_task(dispatch()) for _ in range(concurrency)]
+                wait_deadline = time.monotonic() + 5
+                while state["entered"] < concurrency and time.monotonic() < wait_deadline:
+                    await asyncio.sleep(0.01)
+                check(
+                    state["entered"] == concurrency,
+                    f"{concurrency} concurrent extension calls are all in flight with no thread pool (entered={state['entered']})",
+                )
+                release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+                check(
+                    all(response.status_code == 200 for response in responses),
+                    "all concurrent calls complete once released",
+                )
+            finally:
+                extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
+                extension_backend_transport.evict_persistent_backend("ofek.high-concurrency")
+
+        asyncio.run(_check_high_concurrency_without_a_thread_pool())
+
         # Bare base (no trailing slash) must dispatch DIRECTLY to the extension's
         # root handler. follow_redirects=False is essential: unpatched code only
         # 307-redirects to the slashed path, which the live app's static mount
@@ -873,6 +1169,30 @@ def main() -> int:
                 "assistant/ensure/child",
             ),
             "backend_retry_on_exit does not prefix-match routes",
+        )
+
+        # Manifest validation: backend_max_concurrency (the bulkhead capacity).
+        check(
+            extension_store._validate_backend_max_concurrency(None) is None,  # type: ignore[attr-defined]
+            "unset backend_max_concurrency leaves the host default in effect",
+        )
+        check(
+            extension_store._validate_backend_max_concurrency(5) == 5,  # type: ignore[attr-defined]
+            "valid backend_max_concurrency is accepted verbatim",
+        )
+        for invalid in (0, -1, 1.5, True, "5"):
+            try:
+                extension_store._validate_backend_max_concurrency(invalid)  # type: ignore[attr-defined]
+            except extension_store.ExtensionError:
+                continue
+            raise AssertionError(f"invalid backend_max_concurrency accepted: {invalid!r}")
+        check(
+            extension_backend_loader._resolve_max_concurrency({}) == extension_backend_loader._DEFAULT_MAX_CONCURRENCY,  # type: ignore[attr-defined]
+            "no declared backend_max_concurrency falls back to the host default",
+        )
+        check(
+            extension_backend_loader._resolve_max_concurrency({"backend_max_concurrency": 3}) == 3,  # type: ignore[attr-defined]
+            "declared backend_max_concurrency overrides the host default",
         )
 
         # Concurrency: a fast route must return while a blocked route is in flight
