@@ -481,6 +481,28 @@ docker_test_resource_cap_args() {
   return 0
 }
 
+# BETTER_AGENT_TEST_CHOWN forwards the invoking host's uid:gid into the
+# container as an env var, for docker/entrypoint-test.sh to chown its
+# bind-mounted /repo back to the invoking user after the test run (see that
+# script's header for the full rationale). Same one-flag-per-line contract
+# as docker_test_resource_cap_args, so callers populate RUN_ARGS the same
+# way (a `while read` loop into a bash 3.2-safe array, no namerefs/eval).
+#
+# Native Linux Docker hosts (self-hosted CI runners, plain docker-ce) share
+# the bind mount's filesystem/inode ownership 1:1 with the container's UID,
+# so files docker/Dockerfile.test's root-owned entrypoint writes into /repo
+# (junit XML, .pytest_cache) come out root-owned on the host too — the next
+# CI job's actions/checkout can't clean those as the unprivileged `runner`
+# user. Docker Desktop/OrbStack's macOS VM remaps bind-mount ownership to
+# the invoking host user regardless of the in-container UID, so this must
+# stay a deliberate no-op there: unconditionally forwarding it would add an
+# always-needless chown -R to every local dev run for zero benefit.
+docker_test_chown_env_args() {
+  [ "$(uname -s)" = Linux ] || return 0
+  printf -- '-e\n'
+  printf -- 'BETTER_AGENT_TEST_CHOWN=%s:%s\n' "$(id -u)" "$(id -g)"
+}
+
 docker_test_run() {
   local status
   DOCKER_TEST_CURRENT_CONTAINER="$DOCKER_TEST_CONTAINER_NAME"

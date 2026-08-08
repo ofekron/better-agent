@@ -41,6 +41,43 @@ jobs:
     env:
       BETTER_AGENT_TEST_TIMEOUT: "120"
     steps:
+      # Belt-and-suspenders for docker/entrypoint-test.sh's own chown-back
+      # (scripts/lib/docker-test-lifecycle.sh's docker_test_chown_env_args):
+      # that only fires on a container that exits normally. A killed/137'd
+      # test container (OOM, timeout-killer, manual cancel) never reaches
+      # its entrypoint's post-pytest chown, so root-owned droppings from a
+      # PAST run can still be sitting in the workspace when THIS job's
+      # checkout runs. Self-heal them here, before checkout touches
+      # anything, using docker itself as the privilege boundary (root
+      # inside a throwaway container, not the unprivileged `runner` user
+      # gaining privileges) — no sudoers changes needed. Linux-only:
+      # macOS/Docker Desktop already remaps bind-mount ownership, so the
+      # `arm64` (owner's Mac) runner in this same matrix never accumulates
+      # root-owned files in the first place.
+      - name: Restore workspace ownership before checkout (self-hosted Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$GITHUB_WORKSPACE" ]; then
+            echo "workspace not present yet; nothing to restore"
+            exit 0
+          fi
+          # Any previously-materialized backend test image works — it's
+          # only used as a throwaway root shell for `chown`, never run as
+          # the app. Skip cleanly if none is cached yet (e.g. this runner's
+          # very first job): a workspace with no prior job in it has
+          # nothing to be poisoned.
+          image="$(docker images --filter 'reference=better-agent-backend-tests:deps-*' --format '{{.Repository}}:{{.Tag}}' | head -n1)"
+          if [ -z "$image" ]; then
+            echo "no cached backend test image yet; nothing to restore"
+            exit 0
+          fi
+          # --entrypoint: the image's default entrypoint is the pytest
+          # wrapper (docker/entrypoint-test.sh), which would swallow these
+          # args as pytest args — override it to run chown directly.
+          docker run --rm --entrypoint chown -v "$GITHUB_WORKSPACE:/w" "$image" \
+            -R "$(id -u):$(id -g)" /w
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
