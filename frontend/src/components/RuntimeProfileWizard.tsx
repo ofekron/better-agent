@@ -3,24 +3,21 @@ import { useTranslation } from "react-i18next";
 import type { Provider, ProviderRunner, ReasoningEffort } from "../types";
 import { API, createRuntimeProfile } from "../api";
 import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
+import { useInstallableProviders } from "../hooks/useInstallableProviders";
 import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
 import { useBusEffect } from "../hooks/useBusEffect";
 import { EffortDefaultField, ModelDefaultField } from "./RuntimeProfileFields";
 import { providerNickname } from "../utils/providerDisplayName";
 import { effortsForRunner, runnerLabelKey } from "./modelPicker";
-import {
-  ProviderForm,
-  TemplateGrid,
-  TEMPLATES,
-  type FormPayload,
-  type TemplateId,
-} from "./ProviderForm";
+import { ProviderForm, TemplateGrid, type FormPayload } from "./ProviderForm";
 
 // ---------------------------------------------------------------------------
 // Runtime-profile creation wizard: provider (account + auth) → runner →
 // defaults (model, effort when relevant). Provider auth reuses the account
 // surfaces (TemplateGrid + ProviderForm + the provider OAuth login route);
-// profile creation posts to /api/runtime-profiles.
+// profile creation posts to /api/runtime-profiles. The installable-kind
+// catalog (`useInstallableProviders`) is descriptor-driven per ADR 0007,
+// Package D — see ProviderForm.tsx's module docstring.
 // ---------------------------------------------------------------------------
 
 type Step = "provider" | "runner" | "defaults";
@@ -29,7 +26,7 @@ const STEP_ORDER: Step[] = ["provider", "runner", "defaults"];
 type ProviderStage =
   | { kind: "pick" }
   | { kind: "templates" }
-  | { kind: "form"; templateId: TemplateId };
+  | { kind: "form"; templateId: string };
 
 const WS_TOPICS = ["ws_connection_changed"] as const;
 
@@ -52,10 +49,16 @@ export function RuntimeProfileWizard({
 }) {
   const { t } = useTranslation();
   const { profiles } = useRuntimeProfiles();
+  const {
+    templates,
+    loading: installableLoading,
+    error: installableError,
+    retry: retryInstallable,
+  } = useInstallableProviders();
   const [step, setStep] = useState<Step>("provider");
   const [stage, setStage] = useState<ProviderStage>({ kind: "pick" });
   const [providerId, setProviderId] = useState("");
-  const [createdFromTemplate, setCreatedFromTemplate] = useState<TemplateId | null>(null);
+  const [createdFromTemplate, setCreatedFromTemplate] = useState<string | null>(null);
   const [runner, setRunner] = useState<ProviderRunner | "">("");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -131,7 +134,7 @@ export function RuntimeProfileWizard({
   };
 
   const template = createdFromTemplate
-    ? TEMPLATES.find((tpl) => tpl.id === createdFromTemplate) ?? null
+    ? templates.find((tpl) => tpl.id === createdFromTemplate) ?? null
     : null;
 
   const effortOptions = provider && runner ? effortsForRunner(provider, runner) : [];
@@ -190,7 +193,7 @@ export function RuntimeProfileWizard({
     setError("");
   };
 
-  const createProvider = async (payload: FormPayload, templateId: TemplateId) => {
+  const createProvider = async (payload: FormPayload, templateId: string) => {
     setError("");
     try {
       const r = await fetch(`${API}/api/providers`, {
@@ -260,12 +263,14 @@ export function RuntimeProfileWizard({
   // header/footer chrome; the wizard frame resumes once it submits or backs
   // out.
   if (step === "provider" && stage.kind === "form") {
-    const tpl = TEMPLATES.find((item) => item.id === stage.templateId)!;
+    const tpl = templates.find((item) => item.id === stage.templateId);
+    if (!tpl) return null; // templates fetch still in flight — TemplateGrid is the only entry point here, and it only ever offers ids from this same array.
     return (
       <ProviderForm
         mode="create"
         initial={tpl.defaults}
         initialHasKey={false}
+        formSchema={tpl.formSchema}
         onClose={onClose}
         onBack={goBack}
         onSubmit={(payload) => createProvider(payload, stage.templateId)}
@@ -375,7 +380,13 @@ export function RuntimeProfileWizard({
         {step === "provider" && stage.kind === "templates" && (
           <div className="rpw-step" key="provider-templates">
             <p className="setup-mode-desc">{t("setup.pickTemplate")}</p>
-            <TemplateGrid onPick={(templateId) => setStage({ kind: "form", templateId })} />
+            <TemplateGrid
+              templates={templates}
+              loading={installableLoading}
+              error={installableError}
+              onRetry={retryInstallable}
+              onPick={(templateId) => setStage({ kind: "form", templateId })}
+            />
           </div>
         )}
 

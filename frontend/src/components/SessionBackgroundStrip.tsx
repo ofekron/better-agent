@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import { cancelSchedule, fetchSessionSchedules } from "../api";
 import { eventBus } from "../lib/eventBus";
+import { subscribeSystemFrames } from "../lib/systemFeedRegistry";
+import { deleteScheduleNativeOrRest } from "../lib/scheduleMutations";
 import type { Schedule } from "../types";
 
 /** Compact strip above the input area surfacing pending model-created
@@ -37,14 +39,27 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
       if (p.app_session_id !== sessionId) return;
       setSchedules(p.schedules ?? []);
     });
+    // ADR 0011 §6 `schedules` feed — additional live-refresh trigger
+    // (dual SIGNAL; rendered rows stay the legacy `Schedule` shape,
+    // re-pulled via `fetchSessionSchedules` since `ScheduleSummary` has
+    // no `kind`/`interval_seconds` fields this strip's detail panel
+    // renders).
+    const offV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "schedule_upsert" && frame.schedule.session_id !== sessionId) return;
+      if (frame.type !== "schedule_upsert" && frame.type !== "schedule_removed") return;
+      void fetchSessionSchedules(sessionId).then((d) => {
+        if (!stale) setSchedules(d.schedules ?? []);
+      });
+    });
     return () => {
       stale = true;
       offSched();
+      offV2();
     };
   }, [sessionId]);
 
   const handleCancelSchedule = useCallback(async (schedule: Schedule) => {
-    await cancelSchedule(schedule.id, schedule.app_session_id);
+    await deleteScheduleNativeOrRest(schedule.id, () => cancelSchedule(schedule.id, schedule.app_session_id));
     // Optimistic removal; the schedules_updated frame re-converges.
     setSchedules((prev) => prev.filter((s) => s.id !== schedule.id));
   }, []);

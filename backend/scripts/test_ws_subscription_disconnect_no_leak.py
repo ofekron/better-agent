@@ -39,6 +39,7 @@ import pytest
 pytestmark = pytest.mark.anyio
 
 import asyncio
+import contextlib
 import sys
 from pathlib import Path
 
@@ -49,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from session_manager import manager as session_manager  # noqa: E402
 from orchestrator import Coordinator, _cb_token  # noqa: E402
+from event_bus import BusEvent, bus  # noqa: E402
 from paths import ba_home  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -150,12 +152,72 @@ async def test_per_connection_token_isolation() -> None:
           f"(both={both}, cb1_gone={cb1_gone}, cb2_survives={cb2_survives})")
 
 
+async def test_active_turn_tailer_survives_demand_churn() -> None:
+    """An in-flight turn's per-root wire tailer must survive a transient
+    WS disconnect (demand dropping to zero, e.g. a reconnect loop) -- a
+    stop here starves the events.jsonl journal /ws/v2/surface reads from
+    for the rest of the turn. `_maybe_stop_wire_tailer` defers the stop
+    while `turn_manager.has_active_runs(root_id)` is True; `session.
+    running_changed(value=False)` sweeps the deferred stop once the run
+    actually ends, so a root whose WS never reconnects still closes."""
+    coord = Coordinator()
+    root_id = _mk_root()
+    cb = _make_cb("conn-1")
+
+    coord.register_ws(root_id, cb)
+    await _settle()
+    open_before = root_id in coord._wire_tailers
+
+    original_has_active = coord.turn_manager.has_active_runs
+    coord.turn_manager.has_active_runs = lambda *_a, **_kw: True
+    try:
+        coord.unregister_ws(root_id, cb)
+        await _settle()
+        survived_churn = root_id in coord._wire_tailers
+        deferred = root_id in coord._deferred_wire_tailer_stops
+
+        # The run actually ends now -- the guard must let the deferred
+        # stop through this time.
+        coord.turn_manager.has_active_runs = lambda *_a, **_kw: False
+        await bus.publish(BusEvent(
+            type="session.running_changed",
+            root_id=root_id,
+            sid=root_id,
+            payload={"value": False},
+            persist=False,
+        ))
+        await _settle()
+        swept_after_run_ends = root_id not in coord._wire_tailers
+
+        assert open_before, "tailer not open after initial subscribe"
+        assert survived_churn, "tailer must survive demand churn during an active turn"
+        assert deferred, "stop must be deferred while the turn is still active"
+        assert swept_after_run_ends, "deferred stop must sweep once the run ends"
+        print(f"  {PASS} active-turn tailer survives demand churn "
+              f"(open_before={open_before}, survived={survived_churn}, "
+              f"deferred={deferred}, swept={swept_after_run_ends})")
+    finally:
+        coord.turn_manager.has_active_runs = original_has_active
+        tailer = coord._wire_tailers.pop(root_id, None)
+        task = coord._wire_tailer_tasks.pop(root_id, None)
+        if tailer is not None:
+            tailer.stop()
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await task
+        coord._wire_tailer_subs.pop(root_id, None)
+        coord._deferred_wire_tailer_stops.discard(root_id)
+
+
 async def _main() -> int:
     checks = [
         ("disconnect unregisters all sessions",
          test_disconnect_unregisters_every_subscribed_session),
         ("per-connection token isolation",
          test_per_connection_token_isolation),
+        ("active-turn tailer survives demand churn",
+         test_active_turn_tailer_survives_demand_churn),
     ]
     passed = 0
     for label, fn in checks:

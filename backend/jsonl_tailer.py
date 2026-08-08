@@ -1397,12 +1397,28 @@ class OwnedClaudeJsonlTailer:
         # reads top-level metadata (*_agent_session_id, orchestration_mode,
         # messages[].isStreaming / .id), none of which live in events lists.
         sess = await asyncio.to_thread(session_manager.get_lite, self.app_session_id) or {}
-        primary_sids = {
-            sess.get("agent_session_id"),
-            sess.get("supervisor_agent_session_id"),
-        }
+        session_agent_sid = sess.get("agent_session_id")
+        session_supervisor_sid = sess.get("supervisor_agent_session_id")
+        primary_sids = {session_agent_sid, session_supervisor_sid}
         primary_sids.discard(None)
         is_primary = self.agent_sid in primary_sids
+        # Perf-instrumented (additive only): the dual-tailer lead from the
+        # live-content investigation — this gate races against
+        # `session_manager`'s in-memory `agent_session_id` becoming
+        # consistent with the tailer's own `agent_sid` (see
+        # `OwnedClaudeJsonlTailer`'s class docstring). Recording BOTH
+        # values (not just the boolean) lets a captured run answer whether
+        # a `non_primary` decision was a genuine fork line or this gate
+        # firing before the session record caught up.
+        perf.record_count(
+            f"jsonl_tailer.owned.is_primary_gate.{'primary' if is_primary else 'non_primary'}",
+        )
+        logger.debug(
+            "OwnedClaudeJsonlTailer.is_primary_gate app_session_id=%s agent_sid=%s "
+            "session_agent_sid=%s session_supervisor_sid=%s is_primary=%s",
+            self.app_session_id, self.agent_sid,
+            session_agent_sid, session_supervisor_sid, is_primary,
+        )
 
         if is_primary:
             from orchs import ApplyEventCtx, get_strategy

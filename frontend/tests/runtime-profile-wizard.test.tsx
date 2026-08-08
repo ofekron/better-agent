@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 import { SettingsPage } from "../src/components/SettingsPage";
+import { toRuntimeProfilesSnapshotEnvelope } from "./fixtures";
+import type { RuntimeProfilesSnapshot } from "../src/types";
 
 // Locks the C2 creation wizard: provider (existing account) → runner cards
 // derived from the backend's mode-aware runner_options (a pair with a live
@@ -66,7 +68,7 @@ const snapshot = {
   deleted_providers: [],
   last_models: {},
   last_reasoning_efforts: {},
-};
+} satisfies RuntimeProfilesSnapshot;
 
 function mockFetch({ createStatus = 200, createBody = null as unknown }: {
   createStatus?: number;
@@ -90,6 +92,9 @@ function mockFetch({ createStatus = 200, createBody = null as unknown }: {
         last_known_good: null,
         runtime_profiles: [],
       });
+    }
+    if (url.includes("/api/v2/surface/runtime-profiles")) {
+      return response(toRuntimeProfilesSnapshotEnvelope(snapshot));
     }
     if (url.includes("/api/runtime-profiles")) {
       if (init?.method === "POST") {

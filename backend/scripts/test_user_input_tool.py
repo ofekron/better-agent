@@ -394,6 +394,206 @@ def test_request_payload_is_session_scoped() -> bool:
     )
 
 
+def test_internal_request_publishes_interaction_fire_requested_for_input_kind(client: TestClient) -> bool:
+    """ADR 0006 §5 v2 fact producer (additive to the legacy WS broadcast
+    above): a new pending user-input request must fire
+    `interaction.fire.requested` with kind INPUT, namespaced under
+    USER_INPUT_REF_PREFIX — the remaining kind slot not already covered
+    by tool/worker approval (`approval`) or the delegation picker
+    (`choice`)."""
+    sid = _new_session()
+    token = main.coordinator.internal_token
+    captured: list[tuple[str, str, dict]] = []
+    original = user_input_api._publish_interaction_fact
+
+    def fake_publish(fact_type: str, app_session_id: str, payload: dict) -> None:
+        captured.append((fact_type, app_session_id, payload))
+        original(fact_type, app_session_id, payload)
+
+    user_input_api._publish_interaction_fact = fake_publish
+    result_holder: dict = {}
+
+    def post_request() -> None:
+        result_holder["response"] = client.post(
+            "/api/internal/user-input/request",
+            headers={"X-Internal-Token": token},
+            json={
+                "app_session_id": sid,
+                "questions": [{
+                    "id": "decision",
+                    "header": "Decision",
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes", "description": "Continue"}],
+                }],
+                "timeout_seconds": 5,
+            },
+        )
+
+    thread = threading.Thread(target=post_request)
+    thread.start()
+    try:
+        request_id = ""
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            pending = user_input_store.pending_for_session(sid)
+            if pending:
+                request_id = pending[0]["request_id"]
+                break
+            time.sleep(0.02)
+        if not request_id:
+            return False
+        resolve = client.post(
+            f"/api/user-input/{request_id}/resolve",
+            json={"app_session_id": sid, "answers": {"decision": "Yes"}},
+        )
+        thread.join(timeout=3)
+        if thread.is_alive() or resolve.status_code != 200:
+            return False
+    finally:
+        user_input_api._publish_interaction_fact = original
+    requested = [c for c in captured if c[0] == "interaction.fire.requested"]
+    if len(requested) != 1:
+        return False
+    _, app_session_id, payload = requested[0]
+    return (
+        app_session_id == sid
+        and payload.get("interaction_ref") == f"user_input:{request_id}"
+        and payload.get("kind") == "input"
+        and payload.get("state") == "pending"
+        and payload.get("request", {}).get("schema", {}).get("kind") == "questions"
+    )
+
+
+def test_resolve_user_input_publishes_interaction_fire_resolved(client: TestClient) -> bool:
+    sid = _new_session()
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Q?", "options": []}],
+        timeout_seconds=60,
+    )
+    captured: list[tuple[str, str, dict]] = []
+    original = user_input_api._publish_interaction_fact
+
+    def fake_publish(fact_type: str, app_session_id: str, payload: dict) -> None:
+        captured.append((fact_type, app_session_id, payload))
+        original(fact_type, app_session_id, payload)
+
+    user_input_api._publish_interaction_fact = fake_publish
+    try:
+        resolved = client.post(
+            f"/api/user-input/{req['request_id']}/resolve",
+            json={"app_session_id": sid, "answers": {"q": "an answer"}},
+        )
+        if resolved.status_code != 200:
+            return False
+    finally:
+        user_input_api._publish_interaction_fact = original
+    resolved_facts = [c for c in captured if c[0] == "interaction.fire.resolved"]
+    if len(resolved_facts) != 1:
+        return False
+    _, app_session_id, payload = resolved_facts[0]
+    return (
+        app_session_id == sid
+        and payload.get("interaction_ref") == f"user_input:{req['request_id']}"
+        and payload.get("kind") == "input"
+        and payload.get("state") == "resolved"
+        and payload.get("response") == {"q": "an answer"}
+    )
+
+
+def test_cancel_user_input_publishes_interaction_fire_resolved_with_cancelled_state(client: TestClient) -> bool:
+    sid = _new_session()
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Q?", "options": []}],
+        timeout_seconds=60,
+    )
+    captured: list[tuple[str, str, dict]] = []
+    original = user_input_api._publish_interaction_fact
+
+    def fake_publish(fact_type: str, app_session_id: str, payload: dict) -> None:
+        captured.append((fact_type, app_session_id, payload))
+        original(fact_type, app_session_id, payload)
+
+    user_input_api._publish_interaction_fact = fake_publish
+    try:
+        cancelled = client.post(
+            f"/api/user-input/{req['request_id']}/cancel",
+            json={"app_session_id": sid},
+        )
+        if cancelled.status_code != 200:
+            return False
+    finally:
+        user_input_api._publish_interaction_fact = original
+    resolved_facts = [c for c in captured if c[0] == "interaction.fire.resolved"]
+    if len(resolved_facts) != 1:
+        return False
+    _, app_session_id, payload = resolved_facts[0]
+    return (
+        app_session_id == sid
+        and payload.get("interaction_ref") == f"user_input:{req['request_id']}"
+        and payload.get("state") == "cancelled"
+    )
+
+
+def test_duplicate_internal_request_does_not_republish_interaction_fire_requested(client: TestClient) -> bool:
+    """`create_or_get_pending_request` dedup (`created=False`) must not
+    re-fire `interaction.fire.requested` from the REST route — mirrors the
+    pre-existing legacy `user_input_requested` dedup guard (`if created:`)
+    this fact producer shares the same conditional with. Two concurrent
+    identical requests, same setup as
+    `test_duplicate_internal_request_reuses_pending_dialog`."""
+    sid = _new_session()
+    token = main.coordinator.internal_token
+    questions = [{"id": "decision", "header": "Decision", "question": "Proceed?", "options": []}]
+    captured: list[tuple[str, str, dict]] = []
+    original = user_input_api._publish_interaction_fact
+
+    def fake_publish(fact_type: str, app_session_id: str, payload: dict) -> None:
+        captured.append((fact_type, app_session_id, payload))
+        original(fact_type, app_session_id, payload)
+
+    user_input_api._publish_interaction_fact = fake_publish
+    responses: list = []
+
+    def post_request(timeout_seconds: float) -> None:
+        responses.append(client.post(
+            "/api/internal/user-input/request",
+            headers={"X-Internal-Token": token},
+            json={"app_session_id": sid, "questions": questions, "timeout_seconds": timeout_seconds},
+        ))
+
+    threads = [
+        threading.Thread(target=post_request, args=(5,)),
+        threading.Thread(target=post_request, args=(1,)),
+    ]
+    try:
+        for t in threads:
+            t.start()
+        deadline = time.time() + 3
+        pending: list[dict] = []
+        while time.time() < deadline:
+            pending = user_input_store.pending_for_session(sid)
+            if pending:
+                time.sleep(0.1)
+                break
+            time.sleep(0.02)
+        if not pending:
+            return False
+        resolve = client.post(
+            f"/api/user-input/{pending[0]['request_id']}/resolve",
+            json={"app_session_id": sid, "answers": {"decision": "Yes"}},
+        )
+        for t in threads:
+            t.join(timeout=3)
+        if any(t.is_alive() for t in threads) or resolve.status_code != 200:
+            return False
+    finally:
+        user_input_api._publish_interaction_fact = original
+    requested = [c for c in captured if c[0] == "interaction.fire.requested"]
+    return len(requested) == 1
+
+
 def test_pending_counts_are_cached_after_warmup() -> bool:
     sid = _new_session()
     user_input_store.create_request(
@@ -438,6 +638,22 @@ def run() -> int:
         ("pending snapshot supports all sessions", lambda: test_pending_snapshot_supports_all_sessions(client)),
         ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
         ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
+        (
+            "internal request publishes interaction.fire.requested for input kind",
+            lambda: test_internal_request_publishes_interaction_fire_requested_for_input_kind(client),
+        ),
+        (
+            "resolve user input publishes interaction.fire.resolved",
+            lambda: test_resolve_user_input_publishes_interaction_fire_resolved(client),
+        ),
+        (
+            "cancel user input publishes interaction.fire.resolved with cancelled state",
+            lambda: test_cancel_user_input_publishes_interaction_fire_resolved_with_cancelled_state(client),
+        ),
+        (
+            "duplicate internal request does not republish interaction.fire.requested",
+            lambda: test_duplicate_internal_request_does_not_republish_interaction_fire_requested(client),
+        ),
     ]
     failures: list[str] = []
     for name, fn in tests:

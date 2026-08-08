@@ -53,6 +53,38 @@ async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
   await h.clickByText(/^(\+ New|session\.newButton)$/);
 }
 
+/** `HarnessProfileSelector` (mounted inside the New Session modal) gates
+ *  the Create button on its `GET /api/harness-profiles` fetch settling.
+ *  While offline that fetch goes through `trackedFetch`'s real
+ *  retry-with-backoff (~3s of real `setTimeout` delays) before landing on
+ *  an error state that still unblocks the button — poll for the actual
+ *  readiness signal (button no longer disabled) instead of guessing a
+ *  fixed sleep length. */
+async function waitForNewSessionCreateReady(h: Awaited<ReturnType<typeof renderApp>>) {
+  for (let i = 0; i < 40; i++) {
+    const btn = h.$(".ns-create-primary") as HTMLButtonElement | null;
+    if (btn && !btn.disabled) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await h.flush();
+  }
+}
+
+/** Desktop-only Enter-to-create keyboard shortcut: `useViewport()` reports
+ *  "tablet" at happy-dom's default 1024px width (the tablet breakpoint is
+ *  inclusive), which would make Enter insert a newline instead — force a
+ *  real desktop width for tests that specifically exercise this shortcut. */
+function useDesktopViewport() {
+  const previous = { width: window.innerWidth, height: window.innerHeight };
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 800 });
+  window.dispatchEvent(new Event("resize"));
+  return () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: previous.width });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: previous.height });
+    window.dispatchEvent(new Event("resize"));
+  };
+}
+
 async function chooseNewSessionAction(
   h: Awaited<ReturnType<typeof renderApp>>,
   action: RegExp,
@@ -285,6 +317,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.backend.setOffline(true);
     await h.flush();
     await clickNewSession(h);
+    await waitForNewSessionCreateReady(h);
     await enterNewSessionPrompt(h, "keep this offline draft");
     await chooseNewSessionAction(h, /^(Create|newSession\.create)$/);
     await h.flush();
@@ -449,6 +482,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.backend.setOffline(true);
     await h.flush();
     await clickNewSession(h);
+    await waitForNewSessionCreateReady(h);
 
     const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
     expect(prompt).not.toBeNull();
@@ -509,6 +543,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("pressing Enter in the new-session initial prompt runs the selected Create action", async () => {
+    const restoreViewport = useDesktopViewport();
     const restoreDefault = setNewSessionActionDefault("create");
     const current = makeSession({ id: "current", cwd: "/tmp/project" });
     const h = await renderApp({
@@ -534,9 +569,11 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       .toBe("draft from enter");
     h.unmount();
     restoreDefault();
+    restoreViewport();
   });
 
   it("pressing Enter in the new-session initial prompt runs the selected Create & Send action", async () => {
+    const restoreViewport = useDesktopViewport();
     const restoreDefault = setNewSessionActionDefault("send");
     const current = makeSession({ id: "current", cwd: "/tmp/project" });
     const h = await renderApp({
@@ -577,9 +614,11 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await acknowledgeSentPrompt(h, sent!, "create and send from enter");
     h.unmount();
     restoreDefault();
+    restoreViewport();
   });
 
   it("pressing Enter in the new-session initial prompt runs the selected Create & Send & Open action", async () => {
+    const restoreViewport = useDesktopViewport();
     const restoreDefault = setNewSessionActionDefault("send-and-open");
     const current = makeSession({ id: "current", cwd: "/tmp/project" });
     const h = await renderApp({
@@ -607,6 +646,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await acknowledgeSentPrompt(h, sent!, "create send and open from enter");
     h.unmount();
     restoreDefault();
+    restoreViewport();
   });
 
   it("keeps multiline and IME initial prompt Enter paths from creating a session", async () => {
@@ -638,6 +678,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("keeps disabled initial prompt Enter from creating a session", async () => {
+    const restoreViewport = useDesktopViewport();
     const restoreDefault = setNewSessionActionDefault("send-and-open");
     const h = await renderApp({
       seed: { sessions: [], projects: [] },
@@ -652,6 +693,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(h.outbound.some((frame) => frame.type === "send_message")).toBe(false);
     h.unmount();
     restoreDefault();
+    restoreViewport();
   });
 
   it("keeps a deferred new-session prompt durable across reload and pre-ack replay", async () => {
@@ -942,6 +984,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.backend.setOffline(true);
     await h.flush();
     await clickNewSession(h);
+    await waitForNewSessionCreateReady(h);
     await h.click(".modal-footer .btn-primary");
 
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
@@ -993,6 +1036,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.backend.setOffline(true);
     await h.flush();
     await clickNewSession(h);
+    await waitForNewSessionCreateReady(h);
     await h.click(".modal-footer .btn-primary");
 
     const releaseCreate = h.backend.holdNext("POST", "/api/sessions");

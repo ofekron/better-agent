@@ -70,6 +70,12 @@ describe("useResizable", () => {
   });
 
   it("supports controlled sizes without writing localStorage", () => {
+    // Baseline, not a literal 0: global test setup (tests/setup.ts) pins
+    // an unrelated feature-flag key into localStorage before every test.
+    // What this test actually asserts is that the CONTROLLED-mode hook
+    // itself never calls localStorage.setItem — i.e. no entry is added
+    // beyond whatever the environment already had.
+    const baselineLength = localStorage.length;
     render(<ControlledResizableProbe />);
 
     expect(screen.getByTestId("controlled-size").textContent).toBe("500");
@@ -82,6 +88,6 @@ describe("useResizable", () => {
     fireEvent.mouseUp(document);
 
     expect(screen.getByTestId("controlled-size").textContent).toBe("660");
-    expect(localStorage.length).toBe(0);
+    expect(localStorage.length).toBe(baselineLength);
   });
 });

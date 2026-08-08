@@ -1,30 +1,41 @@
 /**
- * Regression test — `selectSession` optimistic swap.
+ * Regression test — `useSession.selectSession`'s non-content plane: pin/
+ * unpin, delete, same-tick metadata patches, the offline-fetch-abort
+ * guard, and session-list search/pagination. All exercised at the hook
+ * level (renderHook) since none of this is chat-content rendering.
  *
- * Invariant: clicking a different session must flip `currentSession`
- * to the new id in the SAME tick as the click, BEFORE awaiting the
- * REST `/api/sessions/:id?exchange_count=N` round-trip. Older code
- * awaited REST first, so the sidebar highlight (`currentSession?.id`)
- * and the chat view (driven by the same value) sat on the old
- * session for the entire RTT — the user perceived "clicking a
- * session does nothing for a beat", especially during active turns
- * when the backend's REST handler contends with WS-frame work.
- *
- * Also locks: a stale prior `selectSession` REST response cannot
- * clobber a newer optimistic state. With back-to-back clicks A→B,
- * if A's REST returns AFTER B is in place, A's tree must be
- * discarded via `selectRequestIdRef`.
- *
- * Tested at the hook level (renderHook) — the App-level harness is
- * blocked behind an unmocked `/api/auth/me` gate, but the changed
- * contract lives in `useSession.selectSession` and is exercised
- * directly here.
+ * The message-content-reconciliation cases formerly here (the optimistic
+ * empty-stub swap; stale-REST-response discard across back-to-back
+ * selectSession clicks; REFETCH-OF-SAME-ID cache-preservation guards;
+ * applyMessagesReplay/addMessages/applySessionReconciled/markTurnTerminal/
+ * patchMessageStatus reconciliation) are DELETED, not ported — every one
+ * of those functions is legacy `/ws/chat`-content-plane-only plumbing
+ * (wired exclusively in App.tsx's onMessagesReplay/onMessageContentUpdated/
+ * onSessionReconciled handlers, confirmed via grep — nothing in
+ * src/surface/ references any of them). The native contract-node model
+ * has no analogous client-side cache/stub/reconciliation step to guard:
+ * each session id gets its own disposable SurfaceStore instance
+ * (src/surface/useSurfaceStore.ts), so there is no shared mutable tree
+ * for a late response to clobber, no optimistic stub (ChatSurfaceView
+ * always renders a loading skeleton until its own store's snapshot fetch
+ * resolves — src/surface/ChatSurfaceView.tsx), and reselecting the
+ * already-current session id is a complete no-op (the store's owning
+ * effect is keyed on sessionId, so nothing refetches). The portable
+ * intent — per-session isolation, and a stale snapshot fetch for a
+ * session you've navigated away from being unable to clobber the newly
+ * selected one — is ported below in the "native surface — session-switch
+ * semantics" describe block, against the real App-level renderApp()
+ * harness (the "App-level harness is blocked behind an unmocked
+ * /api/auth/me gate" note this file's history carried no longer holds —
+ * MockBackend answers that route unconditionally).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useSession } from "../src/hooks/useSession";
-import { isInflight } from "../src/progress/store";
 import type { Session } from "../src/types";
+import { renderApp } from "./harness";
+import { makeSession as makeHarnessSession } from "./fixtures";
+import { promptNode, turnNode, compactTurn } from "./surface/fixtures";
 
 const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
 const SESSION_LIST = /\/api\/sessions\?/;
@@ -142,66 +153,6 @@ describe("useSession.selectSession — optimistic swap", () => {
       gate.restore();
       gate = null;
     }
-  });
-
-  it("flips currentSession to the clicked session BEFORE the REST round-trip resolves", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const b = makeSession({ id: "b", name: "Beta" });
-
-    // Initial /api/sessions for the sidebar list resolves immediately.
-    // /api/sessions/:id requests are HELD so we can observe what
-    // currentSession looks like with REST still in flight.
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a, b] },
-    });
-
-    const { result } = renderHook(() => useSession());
-
-    // Sidebar fetch lands.
-    await waitFor(() => {
-      expect(result.current.sessions.map((s) => s.id).sort()).toEqual([
-        "a",
-        "b",
-      ]);
-    });
-    expect(result.current.currentSession).toBeNull();
-
-    // Click session "b" — REST is held, but currentSession MUST flip
-    // optimistically to the cached sidebar entry.
-    await act(async () => {
-      void result.current.selectSession("b");
-      // Yield a microtask so the synchronous setState commits.
-      await Promise.resolve();
-    });
-
-    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
-    expect(result.current.currentSession?.id).toBe("b");
-    expect(result.current.currentSession?.name).toBe("Beta");
-    // Optimistic stub carries empty messages until REST lands.
-    expect(result.current.currentSession?.messages).toEqual([]);
-
-    // Now release the REST response with the canonical (full) tree.
-    const canonicalB: Session = {
-      ...b,
-      messages: [
-        {
-          id: "m1",
-          role: "user",
-          content: "hello",
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-        },
-      ],
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalB);
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.id).toBe("b");
-    expect(result.current.currentSession?.messages).toHaveLength(1);
   });
 
   it("pinning a selected session updates the current tree and sidebar row", async () => {
@@ -423,757 +374,6 @@ describe("useSession.selectSession — optimistic swap", () => {
       "first",
       "second",
     ]);
-  });
-
-  it("discards a late-returning prior-REST response so it cannot clobber newer optimistic state", async () => {
-    const a = makeSession({ id: "race-a", name: "Alpha" });
-    const b = makeSession({ id: "race-b", name: "Beta" });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a, b] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(2);
-    });
-
-    // Click A — REST A is parked.
-    await act(async () => {
-      void result.current.selectSession("race-a");
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("race-a");
-
-    // Click B — REST B is parked. Optimistic state is now B.
-    await act(async () => {
-      void result.current.selectSession("race-b");
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("race-b");
-
-    // Resolve REST A FIRST (out of order). The stale-request guard
-    // (selectRequestIdRef) must drop it — currentSession stays on B.
-    const canonicalA: Session = { ...a, messages: [] };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalA);
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("race-b");
-    expect(isInflight("session:select:race-a")).toBe(false);
-
-    // Resolve REST B — canonical state lands.
-    const canonicalB: Session = { ...b, messages: [] };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalB);
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("race-b");
-    expect(isInflight("session:select:race-b")).toBe(false);
-  });
-
-  it("DEEP-LINK (no cached entry): no optimistic write — currentSession stays null until REST resolves", async () => {
-    // selectSession can be called with an id not in the sidebar list
-    // (initial route restoration before /api/sessions returns, fork id
-    // that lives only inside the tree, manual URL paste). The
-    // optimistic write must skip this case — there's nothing safe to
-    // stub from.
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [] }, // empty sidebar
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(0);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("unknown-id");
-      await Promise.resolve();
-    });
-
-    // No cached entry → no optimistic stub. currentSession stays null
-    // until REST returns the canonical tree.
-    expect(result.current.currentSession).toBeNull();
-    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
-
-    const canonical = makeSession({ id: "unknown-id", name: "Surprise" });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonical);
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("unknown-id");
-  });
-
-  it("REFETCH-OF-SAME-ID: optimistic stub does NOT wipe loaded messages", async () => {
-    // The most dangerous regression to guard against. If the optimistic
-    // path stubbed the currently-focused session on every selectSession
-    // call, a refetch (e.g. post-turn refresh) would briefly blank the
-    // chat. The `cur?.id !== id` guard prevents this.
-    const a = makeSession({ id: "a", name: "Alpha" });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    // First select: optimistic stub → REST resolves with canonical
-    // messages.
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    const canonicalA: Session = {
-      ...a,
-      messages: [
-        {
-          id: "m1",
-          role: "user",
-          content: "first",
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-        },
-      ],
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalA);
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.messages).toHaveLength(1);
-
-    // Second select with the SAME id (refetch). Optimistic guard
-    // must keep loaded messages in place — no flash to empty.
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.id).toBe("a");
-    expect(result.current.currentSession?.messages).toHaveLength(1);
-  });
-
-  it("paints a cached session immediately, then reconciles it with backend truth", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const b = makeSession({ id: "b", name: "Beta" });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a, b] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(2);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    const failedAssistant = {
-      id: "a-failed",
-      role: "assistant" as const,
-      content: "",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.601488",
-      isStreaming: false,
-      seq: 11,
-      errorText: "selected extension MCP 'scheduler' exposed no usable tools",
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [failedAssistant],
-      });
-      await Promise.resolve();
-    });
-    await waitFor(() => {
-      expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-failed");
-    });
-
-    await act(async () => {
-      void result.current.selectSession("b");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, { ...b, messages: [] });
-      await Promise.resolve();
-    });
-    await waitFor(() => {
-      expect(result.current.currentSession?.id).toBe("b");
-    });
-
-    const fetchCountBeforeReopen = gate.urls.filter((u) => SESSION_FETCH.test(u)).length;
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.id).toBe("a");
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "a-failed",
-    ]);
-    expect(result.current.wsTargetSessionId).toBeNull();
-    expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(
-      fetchCountBeforeReopen + 1,
-    );
-    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
-
-    const persistedPrompt = {
-      id: "a-user",
-      role: "user" as const,
-      content: "persisted prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.587603",
-      isStreaming: false,
-      seq: 10,
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [persistedPrompt, failedAssistant],
-      });
-      await Promise.resolve();
-    });
-
-    await waitFor(() => {
-      expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-        "a-user",
-        "a-failed",
-      ]);
-      expect(result.current.wsTargetSessionId).toBe("a");
-      expect(result.current.sessionLoading).toBe(false);
-    });
-  });
-
-  it("keeps cached content visible and disconnected when reconciliation fails", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const b = makeSession({ id: "b", name: "Beta" });
-    const cachedMessage = {
-      id: "a-cached",
-      role: "user" as const,
-      content: "cached prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.587603",
-      isStreaming: false,
-      seq: 10,
-    };
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a, b] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(2);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, { ...a, messages: [cachedMessage] });
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.selectSession("b");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, { ...b, messages: [] });
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-cached");
-    expect(result.current.wsTargetSessionId).toBeNull();
-
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, { detail: "backend unavailable" }, 503);
-      await Promise.resolve();
-    });
-
-    await waitFor(() => {
-      expect(result.current.currentSession?.messages?.[0]?.id).toBe("a-cached");
-      expect(result.current.sessionLoadError).toEqual({
-        sessionId: "a",
-        message: "backend unavailable",
-      });
-      expect(result.current.wsTargetSessionId).toBeNull();
-      expect(result.current.sessionLoading).toBe(false);
-    });
-  });
-
-  it("retains a late replay for A while B loads and applies it exactly once", async () => {
-    const aPrompt = {
-      id: "a-user",
-      role: "user" as const,
-      content: "first prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.000000",
-      isStreaming: false,
-      seq: 0,
-    };
-    const lateReply = {
-      id: "a-late",
-      role: "assistant" as const,
-      content: "late replay",
-      events: [],
-      timestamp: "2026-07-28T09:46:38.000000",
-      isStreaming: false,
-      seq: 1,
-    };
-    const a = makeSession({ id: "a", name: "Alpha", messages: [aPrompt] });
-    const b = makeSession({ id: "b", name: "Beta" });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a, b] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(2);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.selectSession("b");
-      await Promise.resolve();
-      result.current.applyMessagesReplay("a", [lateReply]);
-      gate!.resolve(SESSION_FETCH, b);
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.id).toBe("b");
-    expect(result.current.getSinceSeq("a")).toBe(0);
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "a-user",
-      "a-late",
-    ]);
-    expect(result.current.getSinceSeq("a")).toBe(1);
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [aPrompt, lateReply],
-      });
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "a-user",
-      "a-late",
-    ]);
-  });
-
-  it("REFETCH-OF-SAME-ID: finalized REST snapshot replaces stale local streaming message", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    const streamingA: Session = {
-      ...a,
-      messages: [
-        {
-          id: "u1",
-          role: "user",
-          content: "prompt",
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-          seq: 0,
-        },
-        {
-          id: "a1",
-          role: "assistant",
-          content: "partial",
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: true,
-          seq: 1,
-        },
-      ],
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, streamingA);
-      await Promise.resolve();
-    });
-    expect(result.current.currentSession?.messages?.[1]?.isStreaming).toBe(true);
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    const finalizedA: Session = {
-      ...a,
-      messages: [
-        streamingA.messages![0],
-        {
-          ...streamingA.messages![1],
-          content: "complete",
-          isStreaming: false,
-        },
-      ],
-    };
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, finalizedA);
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.[1]?.content).toBe("complete");
-    expect(result.current.currentSession?.messages?.[1]?.isStreaming).toBe(false);
-  });
-
-  it("REFETCH-OF-SAME-ID: completed backend truth removes stale baseline rows", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const userMessage = {
-      id: "u1",
-      role: "user" as const,
-      content: "prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.587603",
-      isStreaming: false,
-      seq: 10,
-    };
-    const staleFailure = {
-      id: "stale-failure",
-      role: "assistant" as const,
-      content: "",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.601488",
-      isStreaming: false,
-      seq: 11,
-      errorText: "stale failure",
-    };
-    const canonicalAssistant = {
-      id: "canonical-assistant",
-      role: "assistant" as const,
-      content: "complete",
-      events: [],
-      timestamp: "2026-07-28T09:46:38.000000",
-      isStreaming: false,
-      seq: 11,
-    };
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [userMessage, staleFailure],
-      });
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [userMessage, canonicalAssistant],
-      });
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "u1",
-      "canonical-assistant",
-    ]);
-  });
-
-  it("session reconciliation is authoritative without a refresh correlation id", async () => {
-    const stale = {
-      id: "stale-orphan",
-      role: "assistant" as const,
-      content: "orphaned local row",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.000000",
-      isStreaming: false,
-      seq: 4,
-    };
-    const prompt = {
-      id: "restored-prompt",
-      role: "user" as const,
-      content: "restored prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:36.000000",
-      isStreaming: false,
-      seq: 0,
-    };
-    const a = makeSession({ id: "a", messages: [stale] });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.applySessionReconciled("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, { ...a, messages: [prompt] });
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "restored-prompt",
-    ]);
-  });
-
-  it("does not preserve an empty terminal assistant removed by authoritative recovery", async () => {
-    const userMessage = {
-      id: "u1",
-      role: "user" as const,
-      content: "retry prompt",
-      events: [],
-      timestamp: "2026-07-28T03:16:35.981300",
-      isStreaming: false,
-      seq: 6,
-      lifecycle_msg_id: "lifecycle-u1",
-    };
-    const emptyAssistant = {
-      id: "a1",
-      role: "assistant" as const,
-      content: "",
-      events: [],
-      workers: [],
-      timestamp: "2026-07-28T03:16:36.000000",
-      isStreaming: true,
-      seq: 7,
-    };
-    const recoveredUser = {
-      ...userMessage,
-      status: "error" as const,
-      errorText: "Backend stopped before the provider run started.",
-    };
-    const a = makeSession({
-      id: "a",
-      messages: [userMessage, emptyAssistant],
-    });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.applySessionReconciled("a");
-      await Promise.resolve();
-      result.current.markTurnTerminal("a", "2026-07-28T03:17:00.000000");
-      result.current.patchMessageStatus("a", "lifecycle-u1", "done");
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [recoveredUser],
-      });
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages).toEqual([recoveredUser]);
-  });
-
-  it("preserves an empty terminal assistant created during an older REST request", async () => {
-    const userMessage = {
-      id: "u1",
-      role: "user" as const,
-      content: "prompt",
-      events: [],
-      timestamp: "2026-07-28T03:16:35.981300",
-      isStreaming: false,
-      seq: 6,
-    };
-    const emptyAssistant = {
-      id: "a1",
-      role: "assistant" as const,
-      content: "",
-      events: [],
-      workers: [],
-      timestamp: "2026-07-28T03:16:36.000000",
-      isStreaming: true,
-      seq: 7,
-    };
-    const a = makeSession({ id: "a", messages: [userMessage] });
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.applySessionReconciled("a");
-      await Promise.resolve();
-      result.current.addMessages("a", [emptyAssistant]);
-      result.current.markTurnTerminal("a", "2026-07-28T03:17:00.000000");
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "u1",
-      "a1",
-    ]);
-    expect(result.current.currentSession?.messages?.[1]?.isStreaming).toBe(false);
-    expect(result.current.currentSession?.messages?.[1]?.content).toBe("");
-  });
-
-  it("REFETCH-OF-SAME-ID: preserves messages created or changed after reconciliation starts", async () => {
-    const a = makeSession({ id: "a", name: "Alpha" });
-    const userMessage = {
-      id: "u1",
-      role: "user" as const,
-      content: "prompt",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.587603",
-      isStreaming: false,
-      seq: 10,
-    };
-    const arrivedDuringFetch = {
-      id: "a2",
-      role: "assistant" as const,
-      content: "arrived during fetch",
-      events: [],
-      timestamp: "2026-07-28T09:46:38.000000",
-      isStreaming: false,
-      seq: 12,
-    };
-    const streamingAssistant = {
-      id: "a1",
-      role: "assistant" as const,
-      content: "before fetch",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.700000",
-      isStreaming: true,
-      seq: 11,
-    };
-
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [userMessage, streamingAssistant],
-      });
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      result.current.addMessages("a", [arrivedDuringFetch]);
-      result.current.applyMessageContent("a", "a1", "changed during fetch");
-    });
-    await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        messages: [userMessage, streamingAssistant],
-      });
-      await Promise.resolve();
-    });
-
-    expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
-      "u1",
-      "a1",
-      "a2",
-    ]);
-    expect(result.current.currentSession?.messages?.[1]?.content).toBe(
-      "changed during fetch",
-    );
   });
 
   it("uses the current search field snapshot when refetching the session list", async () => {
@@ -1495,5 +695,139 @@ describe("useSession.selectSession — optimistic swap", () => {
     });
 
     expect(result.current.sessions.map((s) => s.id)).toEqual(["match"]);
+  });
+});
+
+describe("native surface — session-switch semantics (SurfaceStore)", () => {
+  it("switching sessions swaps to an isolated store — a session's turns never leak into another", async () => {
+    localStorage.setItem("ba.surface_native", "1");
+    const a = makeHarnessSession({ id: "a", name: "Alpha", messages: [] });
+    const b = makeHarnessSession({ id: "b", name: "Beta", messages: [] });
+    const h = await renderApp({
+      seed: { sessions: [a, b] },
+      configureBackend: (backend) => {
+        backend.seedSurface("a", {
+          turns: [compactTurn(turnNode("ta", undefined, "a"), promptNode("ta", "from A", "a"), [])],
+        });
+        backend.seedSurface("b", {
+          turns: [compactTurn(turnNode("tb", undefined, "b"), promptNode("tb", "from B", "b"), [])],
+        });
+      },
+    });
+
+    await h.selectSession("a");
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("from A"));
+    expect(h.$$('[data-testid="surface-turn"]')).toHaveLength(1);
+
+    await h.selectSession("b");
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("from B"));
+    expect(h.$$('[data-testid="surface-turn"]')).toHaveLength(1);
+    expect(h.raw.container.textContent).not.toContain("from A");
+
+    // Reselecting A re-mounts a fresh store and re-fetches — not a stale
+    // cache from the first visit.
+    await h.selectSession("a");
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("from A"));
+    expect(h.raw.container.textContent).not.toContain("from B");
+
+    h.unmount();
+  });
+
+  it("a snapshot fetch held while navigating away resolves late without clobbering the newly-selected session", async () => {
+    // Native counterpart to the deleted legacy "discards a late-returning
+    // prior-REST response" case. Each session id owns its own SurfaceStore
+    // instance (useSurfaceStore.ts) — navigating away disposes the old one
+    // (`cancelled = true`), so a fetch it kicked off that resolves AFTER
+    // the disposal is a no-op by construction (state.ts's `hydrate()`:
+    // `if (this.cancelled) return;`). There is no shared tree, and so no
+    // `selectRequestIdRef`-style request-id arbitration needed to prove.
+    localStorage.setItem("ba.surface_native", "1");
+    const a = makeHarnessSession({ id: "a", name: "Alpha", messages: [] });
+    const b = makeHarnessSession({ id: "b", name: "Beta", messages: [] });
+    let releaseA!: () => void;
+    const h = await renderApp({
+      // "b" first: autoSelectSession picks the FIRST autoselectable
+      // session on mount, so this keeps a's snapshot fetch from firing
+      // (and resolving unheld) before the hold below is even registered.
+      seed: { sessions: [b, a] },
+      configureBackend: (backend) => {
+        backend.seedSurface("a", {
+          turns: [compactTurn(turnNode("ta", undefined, "a"), promptNode("ta", "from A", "a"), [])],
+        });
+        backend.seedSurface("b", {
+          turns: [compactTurn(turnNode("tb", undefined, "b"), promptNode("tb", "from B", "b"), [])],
+        });
+        // Registered before mount so it is in place for the FIRST ever
+        // fetch of a's snapshot, whichever call site triggers it.
+        releaseA = backend.holdNext("GET", "/api/v2/surface/sessions/a/snapshot");
+      },
+    });
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("from B"));
+
+    await h.selectSession("a");
+    // A's fetch is parked — ChatSurfaceView shows the loading skeleton,
+    // not stale/empty content.
+    await h.waitFor(() => h.$('[data-testid="surface-loading-skeleton"]') !== null);
+    expect(h.$('[data-testid="surface-chat-view"]')).toBeNull();
+
+    await h.selectSession("b");
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("from B"));
+
+    // Release A's held fetch now that B is the active session.
+    releaseA();
+    await h.flush();
+
+    expect(h.$('[data-testid="surface-typed-prompt"]')?.textContent).toContain("from B");
+    expect(h.raw.container.textContent).not.toContain("from A");
+
+    h.unmount();
+  });
+
+  it("content written to a session while it is not the active view is present once that session becomes active again", async () => {
+    // Native counterpart to the deleted legacy "retains a late replay for
+    // A while B loads" case. There is no live socket to deliver a frame
+    // to for a session that is not currently mounted (its SurfaceStore was
+    // disposed on navigating away) — server-side truth updates instead,
+    // and a later reselect's fresh REST snapshot picks it up, the same
+    // path a cold load or reconnect uses.
+    localStorage.setItem("ba.surface_native", "1");
+    const a = makeHarnessSession({ id: "a", name: "Alpha", messages: [] });
+    const b = makeHarnessSession({ id: "b", name: "Beta", messages: [] });
+    const h = await renderApp({
+      seed: { sessions: [a, b] },
+      configureBackend: (backend) => {
+        backend.seedSurface("a", {
+          turns: [compactTurn(turnNode("ta", undefined, "a"), promptNode("ta", "first", "a"), [])],
+        });
+      },
+    });
+
+    await h.selectSession("a");
+    await h.waitFor(() => h.$('[data-testid="surface-typed-prompt"]')?.textContent?.includes("first"));
+
+    await h.selectSession("b");
+    await h.waitFor(() => h.$('[data-testid="surface-chat-view"]') !== null);
+
+    // A second turn is appended to A's server-side truth while A isn't
+    // the active view.
+    h.backend.seedSurface("a", {
+      turns: [
+        compactTurn(turnNode("ta", undefined, "a"), promptNode("ta", "first", "a"), []),
+        compactTurn(turnNode("ta2", undefined, "a"), promptNode("ta2", "second", "a"), []),
+      ],
+      identity: { incarnation: "mock", render_rev: 2, hist_rev: 0 },
+    });
+
+    await h.selectSession("a");
+    await h.waitFor(() => h.$$('[data-testid="surface-turn"]').length === 2);
+    // .includes, not exact-equal — PlainUserHeader (TypedPrompt.tsx) now
+    // prefixes each plain-user prompt's textContent with the configured
+    // display-name header ("test-user" in this harness).
+    const prompts = h.$$('[data-testid="surface-typed-prompt"]').map((el) => el.textContent ?? "");
+    expect(prompts.some((t) => t.includes("first"))).toBe(true);
+    expect(prompts.some((t) => t.includes("second"))).toBe(true);
+    expect(prompts).toHaveLength(2);
+
+    h.unmount();
   });
 });

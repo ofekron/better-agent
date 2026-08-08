@@ -41,7 +41,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 from typing import NamedTuple
 
 from i18n import t
@@ -301,6 +301,12 @@ from event_bus import BusEvent, bus
 # Coordinator
 # ============================================================================
 
+# Distinguishes "caller didn't pass this queued-item field" from "caller
+# explicitly passed None" for `Coordinator.update_queued`'s keyword-only
+# fields (see its docstring) — a plain `None` default can't do that.
+_UNSET_QUEUED_FIELD = object()
+
+
 class _Cancelled(Exception):
     """Raised when a turn is cancelled by the user."""
     pass
@@ -450,6 +456,17 @@ class Coordinator:
         # (app_session_id, _cb_token(ws_callback)) → _Subscriber, so unregister
         # can find and remove the right subscriber from its tailer.
         self._subscriber_index: dict[tuple, "_Subscriber"] = {}
+        # root_ids whose wire-tailer stop `_maybe_stop_wire_tailer` deferred
+        # because a turn was still in flight when demand hit zero (see
+        # there). `_on_session_running_changed` re-invokes the stop once
+        # the run actually ends, so a root whose WS never reconnects still
+        # gets swept instead of leaking the tailer open forever.
+        self._deferred_wire_tailer_stops: set[str] = set()
+        bus.unsubscribe("coordinator_wire_tailer_running_changed")
+        bus.subscribe(
+            "session.running_changed", self._on_session_running_changed,
+            name="coordinator_wire_tailer_running_changed",
+        )
         # Native-CLI-jsonl tailing (the OwnedClaudeJsonlTailers) is owned
         # entirely by `native_files_manager.native_files`. The orchestrator
         # only publishes demand (`native_files.demand`) on WS subscribe /
@@ -2066,6 +2083,7 @@ class Coordinator:
         new), optionally gate on user approval, then dispatch the task
         detached (does NOT join the sender's turn)."""
         import config_store
+        import pending_approvals_api
         import session_search
         import team_messaging
         from stores import pending_approvals
@@ -2178,16 +2196,18 @@ class Coordinator:
             loop = asyncio.get_running_loop()
             fut: asyncio.Future = loop.create_future()
             self.approval_waiters[dt_id] = fut
+            dt_justification = (
+                "Create a new target and delegate the task"
+                if created else f"Delegate the task to session {target}"
+            )
+            dt_proposed_description = (task or "")[:200] or "delegate_task"
             try:
                 pending_approvals.create(
                     delegation_id=dt_id,
                     app_session_id=caller,
                     cwd=cwd,
-                    justification=(
-                        "Create a new target and delegate the task"
-                        if created else f"Delegate the task to session {target}"
-                    ),
-                    proposed_description=(task or "")[:200] or "delegate_task",
+                    justification=dt_justification,
+                    proposed_description=dt_proposed_description,
                     proposed_orchestration_mode="native",
                     instructions_preview=task,
                     model=create_config.get("model") or "",
@@ -2206,6 +2226,19 @@ class Coordinator:
                     "created_session": created,
                 },
             })
+            # v2 UserInteraction fact (ADR 0006 §5) — same "requested,
+            # live" restoration as orchs/manager/_approval.py's own
+            # fresh-worker handshake, mirrored at this creation site's own
+            # convergence point with its legacy WS broadcast above.
+            pending_approvals_api.publish_requested_fact(
+                dt_id, caller,
+                {
+                    "cwd": cwd,
+                    "justification": dt_justification,
+                    "proposed_description": dt_proposed_description,
+                    "proposed_orchestration_mode": "native",
+                },
+            )
             try:
                 await asyncio.wait_for(fut, timeout=_DELEGATE_TASK_APPROVAL_TIMEOUT)
             except asyncio.TimeoutError:
@@ -2349,6 +2382,8 @@ class Coordinator:
                     panel=panel,
                     success=bool(result.get("success")),
                     error=result.get("error"),
+                    token_usage=result.get("token_usage"),
+                    target_turn_id=result.get("target_turn_id"),
                 )
             finally:
                 self.unregister_ws(target_session_id, wait_callback)
@@ -2544,11 +2579,14 @@ class Coordinator:
         panel: Optional[dict],
         success: bool,
         error: Optional[str] = None,
+        token_usage: Optional[dict] = None,
+        target_turn_id: Optional[str] = None,
     ) -> None:
         if not panel:
             return
         panel["success"] = success
         panel["error"] = error
+        panel["token_usage"] = token_usage
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
         if turn_save is None:
             return
@@ -2563,10 +2601,18 @@ class Coordinator:
                     "worker_session_id": panel["worker_session_id"],
                     "jsonl_path": None,
                     "new_byte_offset": None,
-                    "token_usage": None,
+                    "token_usage": token_usage,
                     "success": success,
                     "error": error,
                     "run_mode": panel.get("run_mode"),
+                    # The target session's own canonical TYPED_PROMPT
+                    # node_id (`user_msg["id"]`) for the turn this
+                    # delegation dispatched — `derive.build_subagent_
+                    # panel_container` reads this into `TargetRef.turn_id`
+                    # (nodes.py). None when the target's own user message
+                    # was never found (e.g. a `*_created` panel with
+                    # nothing dispatched) — never fabricated.
+                    "target_turn_id": target_turn_id,
                 },
             },
             label="team-message-worker-complete-save",
@@ -2975,6 +3021,8 @@ class Coordinator:
                 panel=panel,
                 success=bool(result.get("success")),
                 error=result.get("error"),
+                token_usage=result.get("token_usage"),
+                target_turn_id=result.get("target_turn_id"),
             )
         full = {
             **result,
@@ -2996,8 +3044,23 @@ class Coordinator:
         import user_msg_lifecycle
 
         result = user_msg_lifecycle.terminal_result(event_type, payload)
+        # The target turn's REAL aggregated usage (own turn + its own
+        # workers, if any — `orchs.base.make_done_payload`'s `token_usage_
+        # total`), already on the SAME `user_message_done` payload this
+        # panel's terminal watches for — not fabricated, just previously
+        # discarded here. Absent on `user_message_failed` (no accumulator
+        # to sum; `user_msg_lifecycle.emit_failed` carries no usage field
+        # at all) — token_usage stays None there, correctly (a failed
+        # delegation produced no usage to report).
+        data = payload if isinstance(payload, dict) else {}
+        token_usage = data.get("token_usage_total") if event_type == "user_message_done" else None
         if not result["success"]:
-            return result
+            return {
+                **result, "token_usage": token_usage,
+                "target_turn_id": self._team_message_target_turn_id(
+                    target_session_id=target_session_id, lifecycle_msg_id=lifecycle_msg_id,
+                ),
+            }
         response = self._team_message_turn_response(
             target_session_id=target_session_id,
             lifecycle_msg_id=lifecycle_msg_id,
@@ -3006,8 +3069,38 @@ class Coordinator:
             return {
                 "success": False,
                 "error": "target turn completed without an assistant response",
+                "token_usage": token_usage,
+                "target_turn_id": self._team_message_target_turn_id(
+                    target_session_id=target_session_id, lifecycle_msg_id=lifecycle_msg_id,
+                ),
             }
-        return {**result, **response}
+        return {**result, **response, "token_usage": token_usage}
+
+    def _team_message_target_turn_id(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> Optional[str]:
+        """The target session's OWN canonical TYPED_PROMPT node_id
+        (`user_msg["id"]`, stamped once by `_init_turn_messages` at turn
+        dispatch — never a fresh/guessed uuid) for the turn this
+        delegation's `lifecycle_msg_id` dispatched. The correlator
+        `nodes.TargetRef.turn_id` needs for the SubAgentTurn family
+        (`derive.build_subagent_panel_container` reads it off the
+        `worker_complete` fact's `target_turn_id`, threaded by
+        `_emit_team_message_panel_complete`'s callers). None until the
+        target's own `_init_turn_messages` has actually run and stamped
+        this `lifecycle_msg_id` on its user message (e.g. still queued,
+        not yet dispatched) — never fabricated."""
+        found = self._team_message_user_and_assistant(
+            target_session_id=target_session_id, lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if found is None:
+            return None
+        user_msg, _assistant_msg = found
+        turn_id = user_msg.get("id")
+        return turn_id if isinstance(turn_id, str) and turn_id else None
 
     def _team_message_turn_response(
         self,
@@ -3021,7 +3114,7 @@ class Coordinator:
         )
         if found is None:
             return None
-        _user_msg, assistant_msg = found
+        user_msg, assistant_msg = found
         if assistant_msg is None or not assistant_msg.get("id"):
             return None
         return {
@@ -3030,6 +3123,7 @@ class Coordinator:
                 target_session_id,
                 assistant_msg,
             ),
+            "target_turn_id": user_msg.get("id"),
         }
 
     def _team_message_assistant_content(
@@ -3141,10 +3235,16 @@ class Coordinator:
         if found is None:
             return None
         user_msg, assistant_msg = found
+        # Real, already-in-scope from the SAME lookup every branch below
+        # needs — never a second `session_manager.get` call just to
+        # re-derive it (see `_team_message_target_turn_id`, this function's
+        # non-reattach sibling).
+        target_turn_id = user_msg.get("id")
         if user_msg.get("status") == "error":
             return {
                 "success": False,
                 "error": user_msg.get("errorText") or "target turn failed",
+                "target_turn_id": target_turn_id,
             }
         if assistant_msg is None:
             return None
@@ -3155,13 +3255,20 @@ class Coordinator:
                 target_session_id,
                 assistant_msg,
             ),
+            "target_turn_id": target_turn_id,
         }
         if assistant_msg.get("completed_at"):
+            # gap: `assistant_msg` (session_manager's own message row) has
+            # no token-usage field of its own to read here — unlike the
+            # `complete` dict below (a run's own `complete.json`, read
+            # fresh from disk), this branch never touches runs_dir, so
+            # `token_usage` stays absent rather than guessed.
             return {"success": True, **response}
         if assistant_msg.get("error") or assistant_msg.get("errorText"):
             return {
                 "success": False,
                 "error": assistant_msg.get("errorText") or "target turn failed",
+                "target_turn_id": target_turn_id,
             }
 
         complete = await asyncio.to_thread(
@@ -3172,10 +3279,11 @@ class Coordinator:
         if complete is not None:
             success = bool(complete.get("success"))
             if success:
-                return {"success": True, **response}
+                return {"success": True, "token_usage": complete.get("token_usage"), **response}
             return {
                 "success": False,
                 "error": complete.get("error") or "target turn failed",
+                "target_turn_id": target_turn_id,
             }
 
         return None
@@ -3526,8 +3634,27 @@ class Coordinator:
         return cancelled_any
 
     async def update_queued(
-        self, app_session_id: str, queued_id: str, content: str,
+        self,
+        app_session_id: str,
+        queued_id: str,
+        content: str,
+        *,
+        cli_content: Any = _UNSET_QUEUED_FIELD,
+        client_id: Any = _UNSET_QUEUED_FIELD,
+        lifecycle_msg_id: Any = _UNSET_QUEUED_FIELD,
+        capability_contexts: Any = _UNSET_QUEUED_FIELD,
     ) -> bool:
+        """The ONE queued-item content mutation — both `edit_queued`
+        (explicit `queued_id`, no extra fields) and `update_latest_queued`
+        below (resolves the latest id itself, plus stamps the alter-resend
+        bookkeeping fields) route through this, so an alter that lands on
+        a still-queued prompt uses the same mutation `edit_queued` uses,
+        never a second implementation. Keyword-only fields default to the
+        `_UNSET_QUEUED_FIELD` sentinel (not `None`) so "the caller didn't
+        pass this" and "the caller explicitly passed None" stay
+        distinguishable — `edit_queued`'s plain content-only edit and
+        `update_latest_queued`'s alter-resend bookkeeping need different
+        answers to that question for `cli_content` (see below)."""
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
             return False
@@ -3537,8 +3664,17 @@ class Coordinator:
             item = await q.get()
             if item and item.get("_queued_id") == queued_id:
                 item["prompt"] = content
-                if item.get("cli_prompt") is not None:
-                    item["cli_prompt"] = content
+                if cli_content is _UNSET_QUEUED_FIELD:
+                    if item.get("cli_prompt") is not None:
+                        item["cli_prompt"] = content
+                elif item.get("cli_prompt") is not None or cli_content is not None:
+                    item["cli_prompt"] = cli_content or content
+                if client_id is not _UNSET_QUEUED_FIELD:
+                    item["client_id"] = client_id
+                if lifecycle_msg_id is not _UNSET_QUEUED_FIELD:
+                    item["lifecycle_msg_id"] = lifecycle_msg_id
+                if capability_contexts is not _UNSET_QUEUED_FIELD:
+                    item["capability_contexts"] = list(capability_contexts or [])
                 updated = True
             items.append(item)
         for item in items:
@@ -3681,6 +3817,10 @@ class Coordinator:
         lifecycle_msg_id: str,
         capability_contexts: Optional[list[dict]] = None,
     ) -> Optional[str]:
+        """Alter-resend onto a still-queued prompt: find the LATEST queued
+        item's id, then delegate the actual mutation to `update_queued` —
+        the same function `edit_queued` uses (no second implementation;
+        see `update_queued`'s docstring)."""
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
             return None
@@ -3691,19 +3831,19 @@ class Coordinator:
             if item:
                 latest_idx = len(items)
             items.append(item)
-        queued_id: Optional[str] = None
-        if latest_idx is not None:
-            item = items[latest_idx]
-            queued_id = item.get("_queued_id")
-            item["prompt"] = content
-            if item.get("cli_prompt") is not None or cli_content is not None:
-                item["cli_prompt"] = cli_content or content
-            item["client_id"] = client_id
-            item["lifecycle_msg_id"] = lifecycle_msg_id
-            item["capability_contexts"] = list(capability_contexts or [])
         for item in items:
             await q.put(item)
-        return queued_id
+        if latest_idx is None:
+            return None
+        queued_id = items[latest_idx].get("_queued_id")
+        if not queued_id:
+            return None
+        updated = await self.update_queued(
+            app_session_id, queued_id, content,
+            cli_content=cli_content, client_id=client_id,
+            lifecycle_msg_id=lifecycle_msg_id, capability_contexts=capability_contexts,
+        )
+        return queued_id if updated else None
 
     async def _run_session_processor(self, app_session_id: str) -> None:
         """Consume the per-session prompt queue. Lives independently of
@@ -4421,9 +4561,31 @@ class Coordinator:
             )
         return root_ids
 
+    async def _on_session_running_changed(self, event: BusEvent) -> None:
+        """A session's active-run state flipped. Only a transition to NOT
+        running can newly satisfy a wire-tailer stop that
+        `_maybe_stop_wire_tailer` deferred while the run was in flight;
+        re-invoke the stop for that root now instead of leaking the
+        tailer open until some unrelated subscriber event happens to
+        touch it again."""
+        payload = event.payload or {}
+        if payload.get("value") is not False:
+            return
+        root_id = event.root_id
+        if not root_id or root_id not in self._deferred_wire_tailer_stops:
+            return
+        self._maybe_stop_wire_tailer(root_id, app_session_id="")
+
     def _maybe_stop_wire_tailer(self, root_id: str, app_session_id: str) -> None:
         """If no remaining WS subscribers exist for any session in the
-        root, stop its tailer."""
+        root, stop its tailer -- unless a turn is actively running for
+        the root. An in-flight turn's tailer must survive transient WS
+        churn (a reconnect loop briefly dropping every subscriber);
+        stopping it mid-turn is what starves the journal that
+        /ws/v2/surface reads from for the remainder of the turn. The stop
+        is deferred, not skipped: `_on_session_running_changed` re-invokes
+        this the instant the run ends, so a root whose WS never comes
+        back still gets swept."""
         subs = self._wire_tailer_subs.get(root_id)
         if subs is None:
             return
@@ -4434,6 +4596,10 @@ class Coordinator:
             subs.discard(sid)
         if subs:
             return
+        if self.turn_manager.has_active_runs(root_id):
+            self._deferred_wire_tailer_stops.add(root_id)
+            return
+        self._deferred_wire_tailer_stops.discard(root_id)
         self._wire_tailer_subs.pop(root_id, None)
         tailer = self._wire_tailers.pop(root_id, None)
         task = self._wire_tailer_tasks.pop(root_id, None)

@@ -728,24 +728,86 @@ def engage_test_home(home: str) -> str:
 
 
 
+_ENCODE_CWD_MAX_LEN = 200  # claude CLI's own project-dir-name cap (`RA()`)
+
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _js_utf16_code_units(s: str) -> list[int]:
+    """`s`'s UTF-16 code units, matching JS string indexing/`charCodeAt`
+    (astral characters split into surrogate pairs) so `encode_cwd` replaces
+    and hashes byte-for-byte like the CLI's own JS implementation does."""
+    encoded = s.encode("utf-16-le")
+    return [encoded[i] | (encoded[i + 1] << 8) for i in range(0, len(encoded), 2)]
+
+
+def _js_ascii_alnum_dash(s: str) -> str:
+    """Port of claude CLI's `e.replace(/[^a-zA-Z0-9]/g,"-")`: every UTF-16
+    code unit outside ASCII `[a-zA-Z0-9]` becomes `-` (Python's `str.isalnum`
+    is unicode-aware and would keep characters the CLI's regex would not)."""
+    out = []
+    for code in _js_utf16_code_units(s):
+        if (0x30 <= code <= 0x39) or (0x41 <= code <= 0x5A) or (0x61 <= code <= 0x7A):
+            out.append(chr(code))
+        else:
+            out.append("-")
+    return "".join(out)
+
+
+def _to_base36(n: int) -> str:
+    if n == 0:
+        return "0"
+    digits = []
+    while n:
+        n, rem = divmod(n, 36)
+        digits.append(_BASE36_DIGITS[rem])
+    return "".join(reversed(digits))
+
+
+def _js_string_hashcode32(s: str) -> int:
+    """Port of claude CLI's `art()` string hashcode (`t = (t<<5)-t+code|0`,
+    i.e. `t = t*31 + code` wrapped to a signed 32-bit int every step —
+    JS `|0` semantics) over `s`'s UTF-16 code units. Feeds the `-<hash>`
+    suffix `encode_cwd` appends past `_ENCODE_CWD_MAX_LEN`."""
+    h = 0
+    for code in _js_utf16_code_units(s):
+        h = h * 31 + code
+        h &= 0xFFFFFFFF
+        if h >= 0x80000000:
+            h -= 0x100000000
+    return h
+
+
 def encode_cwd(cwd: str) -> str:
     """Normalize a cwd into a filesystem-safe token.
 
-    Matches claude CLI's own ~/.claude/projects/ encoding: replace `/`,
-    `\\`, `:`, AND `_` with `-`. The `_`→`-` rule is non-obvious but
-    verified — paths containing underscores resolve to the same encoded
-    name in both stores, so a stale code path that recomputes from cwd
-    hits the right file. On Windows the `:`→`-` rule is required so the
-    drive letter encodes the same way Claude CLI writes it: `C:\\foo`
-    becomes `C--foo` (NOT `C:-foo`), matching `~/.claude/projects/C--foo/`.
-    Without this, the tailer opens a path that doesn't exist and
-    ingestion silently fails on Windows.
+    Byte-for-byte port of claude CLI's own `~/.claude/projects/<token>/`
+    directory-name encoder (`RA()` in the installed CLI bundle, verified
+    by extracting it from the shipped binary): replace every character
+    that is not ASCII `[a-zA-Z0-9]` with `-` — NOT just `/`, `\\`, `:`,
+    `_` as an earlier version of this function assumed. That included
+    `.`, spaces, `~`, and everything else non-alphanumeric: a cwd like
+    `/foo/.claude/bar` encodes to `-foo--claude-bar` (double dash — one
+    `-` for the path separator, one for the literal `.`), not
+    `-foo-.claude-bar`. Getting this wrong means every claude-CLI-jsonl
+    consumer (the live tailer, resume-path lookup, memory store, native
+    session search/miner, extension project ids, …) watches or looks up
+    a directory claude CLI never writes to, and silently sees nothing.
+
+    Also replicates the CLI's length cap: past `_ENCODE_CWD_MAX_LEN`
+    characters the token is truncated and suffixed with `-<hash>`, where
+    `<hash>` is `abs(art(cwd)).toString(36)` (`art` = JS's classic
+    `h*31 + charCode` string hashcode, 32-bit wrapped) — without this a
+    long cwd's encoded token diverges from the CLI's past the cap.
     """
     resolved = Path(cwd).expanduser().resolve().as_posix()
-    return (
-        resolved.replace("/", "-").replace("\\", "-").replace(":", "-").replace("_", "-")
-        or "root"
-    )
+    token = _js_ascii_alnum_dash(resolved)
+    if not token:
+        return "root"
+    if len(token) <= _ENCODE_CWD_MAX_LEN:
+        return token
+    digest = _to_base36(abs(_js_string_hashcode32(resolved)))
+    return f"{token[:_ENCODE_CWD_MAX_LEN]}-{digest}"
 
 
 def resolve_provider_config_dir(cfg_dir: str) -> Path:
@@ -775,6 +837,45 @@ def resolve_claude_config_dir(cfg_dir: str) -> Path:
     """Claude-facing alias of `resolve_provider_config_dir`; kept for the
     `CLAUDE_CONFIG_DIR` call sites (projects-root resolution, ingestion)."""
     return resolve_provider_config_dir(cfg_dir)
+
+
+def scheme_home(component: str, version: int) -> Path:
+    """Schema-versioned state directory for `component` at `version`.
+
+    Returns `<ba_home()>/scheme/<component>/v<version>/`, creating every
+    path segment under `ba_home()` as a private (owner-only) directory —
+    `ba_home()` only secures its own root, not descendants. Idempotent:
+    calling again for an already-created dir just re-verifies privacy.
+
+    `component` must be a bare token (no path separators, no `.`/`..`) so
+    a caller can never escape the `scheme/` root via traversal.
+
+    This is the on-disk root for `scheme_migrations.ensure()` — see
+    `backend/scheme_migrations.py` for the versioning/migration contract
+    built on top of this path.
+    """
+    if (
+        not component
+        or component in (".", "..")
+        or "/" in component
+        or "\\" in component
+    ):
+        raise ValueError(f"scheme_home: invalid component {component!r}")
+    if version < 1:
+        raise ValueError(f"scheme_home: version must be >= 1, got {version}")
+    root = ba_home()
+    target = root / "scheme" / component / f"v{version}"
+    current = root
+    for part in target.relative_to(root).parts:
+        current /= part
+        try:
+            current.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=False)
+        except FileExistsError:
+            require_private_directory(current)
+            continue
+        make_private_directory(current)
+        require_private_directory(current)
+    return target
 
 
 def claude_projects_root_for_session(node: dict) -> Path:

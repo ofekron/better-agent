@@ -40,6 +40,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import app_version
 from env_compat import get_env
+from event_bus import BusEvent, bus
 from paths import ba_home
 from topology import (
     NodeSpec,
@@ -387,6 +388,21 @@ async def _fire(node_id: str, state: str) -> None:
             await cb(node_id, state)
         except Exception:
             logger.exception("node_store listener raised for %s", node_id)
+    # ADR 0011 §9 fact for backend/adapters/system_adapter.py's
+    # `NodeDescriptor` live push — connect/disconnect transitions only
+    # (the sole state-change hook this module exposes); other metadata
+    # mutations (version_status, repository alignment) have no equivalent
+    # hook and are an honest Part 1 gap (see the adapter's module
+    # docstring / the caller's report).
+    try:
+        await bus.publish(BusEvent(
+            type="machines.fire.node_changed",
+            root_id="system", sid="system",
+            payload={"node_id": node_id, "state": state},
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("machines.fire.node_changed publish failed for %s", node_id)
 
 
 async def register(

@@ -36,12 +36,18 @@ import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
+import { formatAttachmentSize } from "../utils/attachmentSize";
+import { fmtTime } from "../utils/timestamp";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId, providerKindForId } from "../utils/providerCache";
 import { providerDisplayName } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
 import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
+import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
+import { findScrollParent } from "../utils/scrollParent";
+import { VirtualizedEventList, VIRTUALIZE_EVENT_THRESHOLD } from "./VirtualizedEventList";
+import type { UserInteractionPayloadWire } from "../adapter/wire";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -167,21 +173,6 @@ export function workerPanelComplete(worker: WorkerPanel): boolean {
 export function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
   if (isCreationPanelKind(worker.panel_kind)) return false;
   return activeWorkerIds.has(worker.delegation_id) && !workerPanelComplete(worker);
-}
-
-/** Walk up the DOM tree from `el` and return the nearest ancestor
- *  whose computed `overflow-y` makes it a scroll container. Used by
- *  the collapse-toggle anchor logic when the parent hasn't threaded
- *  an explicit `scrollEl` prop — works for every container regardless
- *  of class name. Returns null if nothing in the chain scrolls. */
-function findScrollParent(el: HTMLElement): HTMLElement | null {
-  let parent = el.parentElement;
-  while (parent) {
-    const overflowY = getComputedStyle(parent).overflowY;
-    if (overflowY === "auto" || overflowY === "scroll") return parent;
-    parent = parent.parentElement;
-  }
-  return null;
 }
 
 /** Returns true when the text has no rendering payload (only whitespace,
@@ -334,6 +325,70 @@ function DetachedPill() {
     <div className="detached-pill" role="status" aria-live="polite">
       <span className="detached-spinner" aria-hidden="true" />
       <span>Reconnecting — agent still running…</span>
+    </div>
+  );
+}
+
+/** Shown while the backend is replaying/rebuilding state for a message
+ * (long replay or recovery). Shared by the message-level `isRecovering`
+ * flag and the `lifecycle_notice(kind="recovering")` dispatch so both
+ * paths render identically. */
+function RecoveringPill() {
+  return (
+    <div
+      className="recovering-pill"
+      data-testid="message-recovering-pill"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="recovering-spinner" aria-hidden="true" />
+      <span>Updating state…</span>
+    </div>
+  );
+}
+
+/** Shown once a turn recovers after backend automatic retry attempts.
+ * Shared by the message-level `auto_retry` field and the
+ * `lifecycle_notice(kind="auto_retried")` dispatch. */
+function AutoRetryPill({ kind, count }: { kind?: string; count: number }) {
+  return (
+    <div className="auto-retry-pill" data-testid="message-auto-retry-pill" role="status">
+      <span aria-hidden="true">↻</span>
+      <span>
+        {kind === "rate_limit"
+          ? "Auto-retried after rate limit"
+          : kind === "transient"
+            ? "Auto-retried after a transient error"
+            : "Auto-retried"}
+        {count > 1 ? ` ×${count}` : ""} — recovered
+      </span>
+    </div>
+  );
+}
+
+/** The status-warning box chrome shown while a turn is retrying (most
+ * commonly after a rate limit). `actions` (retry-on-another-provider
+ * controls) is only available where the caller has the assistant
+ * message + callbacks in scope; the `lifecycle_notice(kind="rate_limited")`
+ * dispatch renders the same chrome without it — no callback plumbing
+ * reaches that render path (see MessageBubble.LifecycleNotice). */
+function RateLimitBox({
+  label,
+  errorText,
+  actions,
+}: {
+  label: string;
+  errorText?: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className="message-status status-warning" data-testid="message-retry-warning">
+      <div className="error-block-header">
+        <span className="status-dot" />
+        <span className="error-block-label">{label}</span>
+        <span className="status-error-text">{errorText ?? "Rate limit exceeded"}</span>
+        {actions}
+      </div>
     </div>
   );
 }
@@ -965,11 +1020,15 @@ export function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) 
   const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
   const runner = typeof data.runner === "string" ? data.runner : "";
   const previousRunner = typeof data.previous_runner === "string" ? data.previous_runner : "";
+  const harnessProfileId = typeof data.harness_profile_id === "string" ? data.harness_profile_id : "";
+  const previousHarnessProfileId =
+    typeof data.previous_harness_profile_id === "string" ? data.previous_harness_profile_id : "";
   const changed = Array.isArray(data.changed) ? data.changed : [];
   const hasModelChange = changed.includes("model") || changed.includes("provider_id");
   const hasReasoningChange = changed.includes("reasoning_effort");
   const hasRunnerChange = changed.includes("runner");
-  if (!model && !providerId && !reasoningEffort && !runner) return null;
+  const hasHarnessChange = changed.includes("harness_profile");
+  if (!model && !providerId && !reasoningEffort && !runner && !harnessProfileId) return null;
   const fromProvider = providerDisplayName(
     { name: previousProviderName, nickname: previousProviderNick },
     (previousProviderKind ? t(runtimeKindLabelKey(previousProviderKind), { defaultValue: previousProviderKind }) : "")
@@ -989,13 +1048,21 @@ export function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) 
   const reasoning = previousReasoningEffort && reasoningEffort
     ? `${previousReasoningEffort} to ${reasoningEffort}`
     : reasoningEffort;
-  const label = hasRunnerChange
+  const label = hasHarnessChange
+    ? t("message.harnessChanged")
+    : hasRunnerChange
     ? t("message.runtimeChanged")
     : hasModelChange || !hasReasoningChange ? t("message.modelSwitched") : t("message.reasoningChanged");
   return (
     <div className="event-model-switched">
       <span>{label}</span>
-      {hasModelChange || !hasReasoningChange ? (
+      {hasHarnessChange ? (
+        <span>
+          {previousHarnessProfileId && harnessProfileId
+            ? `${previousHarnessProfileId} to ${harnessProfileId}`
+            : harnessProfileId}
+        </span>
+      ) : hasModelChange || !hasReasoningChange ? (
         <span>{from && to ? `${from} to ${to}` : to}</span>
       ) : (
         <span>{reasoning}</span>
@@ -1188,6 +1255,8 @@ export function renderSingleEvent(
       return <ModelFallbackEvent key={idx} data={event.data ?? {}} />;
     case "lifecycle_notice":
       return <LifecycleNotice key={idx} data={event.data ?? {}} />;
+    case "failure":
+      return <FailureChip key={idx} data={event.data ?? {}} />;
     case "pr_link":
       return (
         <PrLinkEvent
@@ -1214,14 +1283,19 @@ export function renderSingleEvent(
           {linkifyFilePaths(event.data.error as string, onFileClick)}
         </div>
       );
-    case "diagnostic":
-      return (
-        <DiagnosticEvent
-          key={idx}
-          kind={(event.data?.kind as string) || "unknown"}
-          raw={event.data?.raw}
-        />
-      );
+    case "diagnostic": {
+      const kind = (event.data?.kind as string) || "unknown";
+      if (kind === "compaction") {
+        return <CompactionEvent key={idx} data={event.data ?? {}} />;
+      }
+      if (kind === "user_interaction") {
+        return <UserInteractionNotice key={idx} data={event.data ?? {}} />;
+      }
+      if (kind.startsWith("fact.")) {
+        return <FactChipEvent key={idx} factKind={kind.slice("fact.".length)} data={event.data?.raw} />;
+      }
+      return <DiagnosticEvent key={idx} kind={kind} raw={event.data?.raw} />;
+    }
     default:
       // Unknown top-level event type — render rather than silently
       // drop so future provider events (stream-json types, claude
@@ -1303,6 +1377,101 @@ export function PrLinkEvent({
   );
 }
 
+/** `compaction` node's dedicated boundary notice — reuses `.event-session`
+ * (the same subtle inline-boundary style LifecycleNotice/PrLinkEvent's
+ * neighbors use) instead of the generic "unknown event" DiagnosticEvent
+ * fallback, with an origin-aware, translated label. */
+export function CompactionEvent({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const origin = typeof data.origin === "string" ? data.origin : "";
+  const summary = typeof data.summary === "string" ? data.summary : "";
+  const originLabel = origin ? t(`message.compactionOrigin_${origin}`, { defaultValue: origin }) : "";
+  return (
+    <div className="event-session">
+      <strong>{t("message.compactionNotice")}</strong>
+      {originLabel ? <span> · {originLabel}</span> : null}
+      {summary ? <div style={{ marginTop: 2, opacity: 0.85 }}>{summary}</div> : null}
+    </div>
+  );
+}
+
+/** Generic `fact.<kind>` chip (every FactPayload kind other than
+ * `pr_link`, which has its own PrLinkEvent) — a compact label+payload
+ * pill instead of the collapsible raw-JSON DiagnosticEvent fallback. */
+export function FactChipEvent({ factKind, data }: { factKind: string; data: unknown }) {
+  const { t } = useTranslation();
+  const entries =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? Object.entries(data as Record<string, unknown>)
+      : [];
+  const payload = entries
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(", ");
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.7,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+      }}
+    >
+      <span>{t("message.factChip", { kind: factKind })}</span>
+      {payload ? <span style={{ marginInlineStart: 6, opacity: 0.85 }}>{payload}</span> : null}
+    </div>
+  );
+}
+
+/** Fallback for a `user_interaction` node with no corresponding legacy
+ * card (unrecognized kind), or one kept for history (resolved/
+ * cancelled) — same diagnostic-box visual language as DiagnosticEvent,
+ * with a translated kind label and a pending/resolved/cancelled state
+ * chip instead of a raw-JSON dump. */
+export function UserInteractionNotice({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const raw = data.raw as UserInteractionPayloadWire | undefined;
+  const kind = raw?.kind || "unknown";
+  const state = raw?.state || "pending";
+  const stateColor =
+    state === "pending" ? "var(--warning, #d29922)" : state === "resolved" ? "var(--success, #3fb950)" : "var(--text-muted)";
+  const stateBackground =
+    state === "pending" ? "rgba(210,153,34,0.16)" : state === "resolved" ? "rgba(63,185,80,0.16)" : "rgba(139,148,158,0.16)";
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.7,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flexWrap: "wrap",
+      }}
+    >
+      <span>{t("message.userInteraction", { kind })}</span>
+      <span
+        style={{
+          padding: "1px 7px",
+          borderRadius: 999,
+          fontSize: "0.9em",
+          fontWeight: 600,
+          background: stateBackground,
+          color: stateColor,
+        }}
+      >
+        {t(`message.userInteractionState_${state}`, { defaultValue: state })}
+      </span>
+    </div>
+  );
+}
+
 export function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
   const [open, setOpen] = useState(false);
   let pretty: string;
@@ -1346,7 +1515,30 @@ export function DiagnosticEvent({ kind, raw }: { kind: string; raw: unknown }) {
   );
 }
 
+/** Dispatches a `lifecycle_notice` node by its `LifecycleNoticeKind` to the
+ * SAME purpose-built pill the message-level equivalent field renders
+ * (RetryingPill/DetachedPill/RecoveringPill/AutoRetryPill/RateLimitBox) —
+ * never the generic italic line — for the five taxonomy kinds. Any other
+ * `kind` (a future/unrecognized producer) falls through to the italic-line
+ * + optional replacement-history fallback, unchanged. */
 export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
+  const kind = typeof data.kind === "string" ? data.kind : "";
+  if (kind === "retrying") {
+    const retryAt = typeof data.retry_at === "string" ? data.retry_at : null;
+    return retryAt ? <RetryingPill retryAt={retryAt} /> : null;
+  }
+  if (kind === "detached") return <DetachedPill />;
+  if (kind === "recovering") return <RecoveringPill />;
+  if (kind === "auto_retried") {
+    const retryKind = typeof data.retry_kind === "string" ? data.retry_kind : undefined;
+    const count = typeof data.count === "number" ? data.count : 1;
+    return <AutoRetryPill kind={retryKind} count={count} />;
+  }
+  if (kind === "rate_limited") {
+    const text = typeof data.text === "string" ? data.text : undefined;
+    return <RateLimitBox label="Retrying" errorText={text} />;
+  }
+
   const message = String(data.message ?? "");
   if (!message) return null;
   const replacementHistory = Array.isArray(data.replacement_history)
@@ -1378,6 +1570,87 @@ export function LifecycleNotice({ data }: { data: Record<string, unknown> }) {
           <pre className="tool-result-pre">{replacementText}</pre>
         </CollapsibleOutput>
       ) : null}
+    </div>
+  );
+}
+
+const FAILURE_SEVERITY_STYLE: Record<string, { color: string; background: string }> = {
+  info: { color: "var(--text-muted)", background: "rgba(139,148,158,0.16)" },
+  warning: { color: "var(--warning, #d29922)", background: "rgba(210,153,34,0.16)" },
+  error: { color: "var(--danger, #f85149)", background: "rgba(248,81,73,0.16)" },
+};
+
+/** Generic renderer for a `failure` node (FailurePayloadWire, taxonomy
+ * see backend/surface_contract/nodes.py FailureSeverity/FailureResolution).
+ * Dispatches by `resolution` to an existing purpose-built component where
+ * one applies; otherwise a severity-colored chip with text + a retryable
+ * indicator. Never dumps `data`/`raw` as JSON — unknown codes fall
+ * through to the same chip with a generic label. */
+export function FailureChip({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const code = typeof data.code === "string" && data.code ? data.code : "unknown";
+  const text = typeof data.text === "string" ? data.text : "";
+  const severity = typeof data.severity === "string" ? data.severity : "error";
+  const retryable = data.retryable === true;
+  const resolution = typeof data.resolution === "string" ? data.resolution : "none";
+  const raw = (data.raw && typeof data.raw === "object" ? data.raw : {}) as Record<string, unknown>;
+  const label = t("message.failureChip", { code, defaultValue: text || code });
+
+  if (resolution === "fix_credential") {
+    const providerId = typeof raw.provider_id === "string" ? raw.provider_id : undefined;
+    if (providerId) {
+      return (
+        <CredentialErrorFix
+          meta={{
+            kind: "provider_credential",
+            provider_id: providerId,
+            credential_status: typeof raw.credential_status === "string" ? raw.credential_status : undefined,
+          }}
+        />
+      );
+    }
+  }
+  if (resolution === "choose_fallback") {
+    // Actions (retry-on-another-provider buttons) need message-level
+    // callbacks not available at this render depth (see RateLimitBox's
+    // own docstring) — rendered without them where data alone suffices
+    // for the box + label.
+    return <RateLimitBox label={label} errorText={text} />;
+  }
+
+  const palette = FAILURE_SEVERITY_STYLE[severity] ?? FAILURE_SEVERITY_STYLE.error;
+  return (
+    <div
+      className="event-diagnostic"
+      style={{
+        fontSize: "0.8em",
+        opacity: 0.85,
+        border: "1px dashed currentColor",
+        padding: "4px 8px",
+        margin: "4px 0",
+        borderRadius: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flexWrap: "wrap",
+      }}
+    >
+      <span
+        style={{
+          padding: "1px 7px",
+          borderRadius: 999,
+          fontSize: "0.9em",
+          fontWeight: 600,
+          background: palette.background,
+          color: palette.color,
+        }}
+      >
+        {t(`message.failureSeverity_${severity}`, { defaultValue: severity })}
+      </span>
+      <span>{label}</span>
+      {retryable && (
+        <span style={{ opacity: 0.7 }}>{t("message.failureRetryable", { defaultValue: "Retryable" })}</span>
+      )}
     </div>
   );
 }
@@ -1804,6 +2077,24 @@ export function renderGroupedEvents(
   );
 }
 
+/** Windows a turn's fully-built row list (renderTimeline's return value —
+ * every path: entity blocks, worker collapsibles, prep blocks, and the
+ * legacy no-worker manager stream all funnel through here) via
+ * VirtualizedEventList once the row count crosses VIRTUALIZE_EVENT_
+ * THRESHOLD — the v2 (Chat Surface Contract) path only; legacy rendering
+ * is untouched (readSurfaceV2Flag false -> always the plain, fully-
+ * mounted row list, byte-identical DOM to before virtualization existed).
+ * Threshold is checked against the RENDERED rows, not the raw event
+ * count, since grouping (auto-action groups, etc.) can collapse many
+ * events into one row — "renderable events" means what actually becomes
+ * a DOM node. */
+function possiblyVirtualizeStream(rows: ReactNode[]): ReactNode {
+  if (readSurfaceV2Flag() && rows.length > VIRTUALIZE_EVENT_THRESHOLD) {
+    return <VirtualizedEventList items={rows} />;
+  }
+  return rows;
+}
+
 function workerPanelEvents(worker: WorkerPanel): WSEvent[] {
   return Array.isArray(worker.events) ? worker.events : [];
 }
@@ -1969,28 +2260,6 @@ export function buildTurnSummary(managerEvents: WSEvent[], workerCount: number, 
     return contentFallback;
   }
   return contentFallback ? "Response" : "No output";
-}
-
-/** Format a timestamp string. Shows HH:MM:SS for today, MM/DD HH:MM:SS
- *  for older dates. Returns null on falsy input. */
-export function fmtTime(ts: string | undefined): string | null {
-  if (!ts) return null;
-  try {
-    const d = new Date(ts);
-    const now = new Date();
-    const isToday =
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate();
-    if (isToday) {
-      return d.toLocaleTimeString(undefined, { hour12: false });
-    }
-    const time = d.toLocaleTimeString(undefined, { hour12: false });
-    const date = `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
-    return `${date} ${time}`;
-  } catch {
-    return null;
-  }
 }
 
 /** Label for a turn's primary agent — used by the collapse-toggle header
@@ -2637,6 +2906,11 @@ const AssistantMessage = memo(function AssistantMessage({
     initiatorMessageId,
     sessionId,
   );
+  // Windows `stream` via VirtualizedEventList above the threshold — v2
+  // path only, see possiblyVirtualizeStream. `stream` itself (the raw
+  // row array) stays the source of truth for every `.length` check below
+  // so gating rendering never changes content-presence decisions.
+  const renderedStream = possiblyVirtualizeStream(stream);
 
   const managerSessionShort =
     hasManagerScope && effectiveMessage.agent_session_id
@@ -2668,10 +2942,10 @@ const AssistantMessage = memo(function AssistantMessage({
                 <span className="role-session-id">· {managerSessionShort}</span>
               )}
             </div>
-            {stream}
+            {renderedStream}
           </div>
         ) : (
-          stream
+          renderedStream
         )}
         {shouldRenderAssistantContent && (
           <MessageBox text={assistantContent} onFileClick={onFileClick} />
@@ -2704,39 +2978,36 @@ const AssistantMessage = memo(function AssistantMessage({
           </>
         )}
         {message.error && message.retrying_until && (
-          <div className="message-status status-warning" data-testid="message-retry-warning">
-            <div className="error-block-header">
-              <span className="status-dot" />
-              <span className="error-block-label">Retrying</span>
-              <span className="status-error-text">
-                {message.errorText
-                  ? message.errorText.split("\n", 1)[0]
-                  : "Rate limit exceeded"}
-              </span>
-              {onContinueRateLimitOnAnotherProvider && (
-                <button
-                  className="status-retry-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onContinueRateLimitOnAnotherProvider();
-                  }}
-                >
-                  {rateLimitFallbackLabel ?? t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
-                </button>
-              )}
-              {onChooseAnotherProviderForRateLimit && (
-                <button
-                  className="status-retry-btn status-retry-btn--secondary"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onChooseAnotherProviderForRateLimit(message);
-                  }}
-                >
-                  {t("rateLimit.chooseProviderModel", "Choose provider & model…")}
-                </button>
-              )}
-            </div>
-          </div>
+          <RateLimitBox
+            label="Retrying"
+            errorText={message.errorText ? message.errorText.split("\n", 1)[0] : undefined}
+            actions={
+              <>
+                {onContinueRateLimitOnAnotherProvider && (
+                  <button
+                    className="status-retry-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onContinueRateLimitOnAnotherProvider();
+                    }}
+                  >
+                    {rateLimitFallbackLabel ?? t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
+                  </button>
+                )}
+                {onChooseAnotherProviderForRateLimit && (
+                  <button
+                    className="status-retry-btn status-retry-btn--secondary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onChooseAnotherProviderForRateLimit(message);
+                    }}
+                  >
+                    {t("rateLimit.chooseProviderModel", "Choose provider & model…")}
+                  </button>
+                )}
+              </>
+            }
+          />
         )}
         {message.stopped_at && (
           <StoppedIndicator
@@ -2747,15 +3018,7 @@ const AssistantMessage = memo(function AssistantMessage({
         )}
         {message.isDetached && <DetachedPill />}
         {message.isRecovering && !runs.some((run) => run.startup_phase === "stalled") && (
-          <div
-            className="recovering-pill"
-            data-testid="message-recovering-pill"
-            role="status"
-            aria-live="polite"
-          >
-            <span className="recovering-spinner" aria-hidden="true" />
-            <span>Updating state…</span>
-          </div>
+          <RecoveringPill />
         )}
         {message.retrying_until && (
           <RetryingPill retryAt={message.retrying_until} />
@@ -2764,24 +3027,7 @@ const AssistantMessage = memo(function AssistantMessage({
           <ContinuationPill chainDepth={message.continuation_active} />
         )}
         {message.auto_retry && message.auto_retry.count > 0 && (
-          <div
-            className="auto-retry-pill"
-            data-testid="message-auto-retry-pill"
-            role="status"
-          >
-            <span aria-hidden="true">↻</span>
-            <span>
-              {message.auto_retry.kind === "rate_limit"
-                ? "Auto-retried after rate limit"
-                : message.auto_retry.kind === "transient"
-                  ? "Auto-retried after a transient error"
-                  : "Auto-retried"}
-              {message.auto_retry.count > 1
-                ? ` ×${message.auto_retry.count}`
-                : ""}{" "}
-              — recovered
-            </span>
-          </div>
+          <AutoRetryPill kind={message.auto_retry.kind} count={message.auto_retry.count} />
         )}
         <AssistantRunMeta
           message={message}
@@ -3071,12 +3317,6 @@ function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; ses
       )}
     </ImageLightboxGallery>
   );
-}
-
-function formatAttachmentSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function UserFiles({ files }: { files?: ChatMessage["files"] }) {

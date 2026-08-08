@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, type MutableRefObject } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
 import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { useThrottledValue } from "../hooks/useThrottledValue";
@@ -7,6 +7,7 @@ import { isUnanchoredRun } from "../utils/runTargets";
 import { useTranslation } from "react-i18next";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { eventBus } from "../lib/eventBus";
+import { submitResolveInteraction, useInteractionResolveSocket } from "../lib/interactionResolveSocket";
 import {
   peekPendingMessageFocus,
   clearPendingMessageFocus,
@@ -21,10 +22,7 @@ import type {
   UserApprovalRequest,
   UserInputRequest,
   UserInteractionRequest,
-  MemoryProposal,
   MemoryProposalRequest,
-  MemoryType,
-  MemoryScopeType,
   ToolApproval,
   Provider,
   RunInfo,
@@ -34,6 +32,7 @@ import type {
 import type { InlineTag } from "../types/inlineTag";
 import type { StreamingLoadPhase } from "../hooks/useAppWebSocket";
 import { TurnGroup, MessageBubble } from "./MessageBubble";
+import { UserInputCardCore, UserApprovalCardCore, MemoryProposalCardCore } from "./UserInteractionCards";
 import { InputArea } from "./InputArea";
 import type { ScheduleSendPayload } from "./ScheduleSendPopover";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
@@ -44,6 +43,10 @@ import { SelectionPopup } from "./SelectionPopup";
 import { userFacingForks } from "../hooks/useSession";
 import { buildThreadColorMap } from "../threadColors";
 import { ForkSplitView } from "./ForkSplitView";
+import { readNativeSurfaceFlag } from "../surface/flag";
+import { useSurfaceStore } from "../surface/useSurfaceStore";
+import { ChatSurfaceView } from "../surface/ChatSurfaceView";
+import { ForkSplitView as NativeForkSplitView } from "../surface/ForkSplitView";
 import { SessionTabs } from "./SessionTabs";
 import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
@@ -65,6 +68,23 @@ const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
 const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
+
+/** The queued-banner UI (InputArea.tsx) stays legacy-projection-driven no
+ * matter what (see surface/state.ts's `editQueued`/`deleteQueued`
+ * docstring — the native surface has no live representation of a queued
+ * prompt to render from) — App.tsx keeps owning `queuedBySession`'s local
+ * optimistic-update bookkeeping unconditionally. Only the WIRE that
+ * carries the actual edit/delete command should switch to the native
+ * `/ws/v2/surface` intent when eligible; this is that narrow seam. Chat.tsx
+ * is the sole owner of the per-session `SurfaceStore` instance (see
+ * `nativeStore` below), so it populates this ref rather than App.tsx
+ * reaching into the store directly. `null` means "not eligible right now,
+ * use the legacy transport" — same eligibility gate `nativeSendEligible`
+ * uses (native store exists AND its socket is open). */
+export interface NativeQueuedTransport {
+  deleteQueued: (queuedId: string) => void;
+  editQueued: (queuedId: string, text: string) => void;
+}
 
 function assistantSpeechText(message: ChatMessage | undefined): string {
   if (!message || message.isStreaming) return "";
@@ -104,108 +124,13 @@ export function UserInputCard({
   request: UserInputRequest;
   onDone: (requestId: string) => void;
 }) {
-  const { t } = useTranslation();
-  const [answers, setAnswers] = useState<Record<string, string>>(() => {
-    const initial: Record<string, string> = {};
-    for (const q of request.questions) {
-      initial[q.id] = q.options?.[0]?.label ?? "";
-    }
-    return initial;
-  });
-  const [submitting, setSubmitting] = useState(false);
-  const textRefs = useRef<Record<string, HTMLInputElement | null>>({});
-  const canSubmit = request.questions.every((q) => (answers[q.id] || "").trim());
-
-  const pickOption = (questionId: string, label: string) => {
-    setAnswers((prev) => ({ ...prev, [questionId]: label }));
-    const el = textRefs.current[questionId];
-    if (el) requestAnimationFrame(() => { el.focus(); el.select(); });
-  };
-
-  const submit = async () => {
-    if (!canSubmit || submitting) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ app_session_id: request.app_session_id, answers }),
-      });
-      if (res.ok) onDone(request.request_id);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const cancel = async () => {
-    if (submitting) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/cancel`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ app_session_id: request.app_session_id }),
-      });
-      if (res.ok) onDone(request.request_id);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   return (
-    <div className="user-input-card" data-testid="user-input-card">
-      <div className="user-input-card__title">{t("userInput.title")}</div>
-      {request.questions.map((q) => (
-        <div className="user-input-card__question" key={q.id}>
-          <div className="user-input-card__header">{q.header}</div>
-          <div className="user-input-card__body">{q.question}</div>
-          {q.options && q.options.length > 0 ? (
-            <div className="user-input-card__options">
-              {q.options.map((option) => (
-                <label className="user-input-card__option" key={option.label}>
-                  <input
-                    type="radio"
-                    name={`${request.request_id}:${q.id}`}
-                    checked={answers[q.id] === option.label}
-                    onChange={() => pickOption(q.id, option.label)}
-                    disabled={submitting}
-                  />
-                  <span>
-                    <strong>{option.label}</strong>
-                    {option.description ? <small>{option.description}</small> : null}
-                  </span>
-                </label>
-              ))}
-              <input
-                ref={(el) => { textRefs.current[q.id] = el; }}
-                className="user-input-card__text"
-                value={answers[q.id] ?? ""}
-                onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                onFocus={(e) => e.target.select()}
-                disabled={submitting}
-                placeholder={t("userInput.otherAnswer")}
-              />
-            </div>
-          ) : (
-            <textarea
-              className="user-input-card__textarea"
-              value={answers[q.id] ?? ""}
-              onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-              disabled={submitting}
-              rows={3}
-            />
-          )}
-        </div>
-      ))}
-      <div className="user-input-card__actions">
-        <button type="button" onClick={cancel} disabled={submitting}>{t("userInput.cancel")}</button>
-        <button type="button" className="primary" onClick={submit} disabled={!canSubmit || submitting}>
-          {submitting ? t("userInput.submitting") : t("userInput.send")}
-        </button>
-      </div>
-    </div>
+    <UserInputCardCore
+      requestId={request.request_id}
+      appSessionId={request.app_session_id}
+      questions={request.questions}
+      onDone={onDone}
+    />
   );
 }
 
@@ -216,78 +141,15 @@ export function UserApprovalCard({
   request: UserApprovalRequest;
   onDone: (requestId: string) => void;
 }) {
-  const { t } = useTranslation();
-  const [alternative, setAlternative] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  const resolve = async (approved: boolean) => {
-    const text = alternative.trim();
-    if (submitting || (!approved && !text)) return;
-    setSubmitting(true);
-    setFailed(false);
-    try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          app_session_id: request.app_session_id,
-          approved,
-          ...(approved ? {} : { alternative: text }),
-        }),
-      });
-      if (res.ok) {
-        onDone(request.request_id);
-        return;
-      }
-      setFailed(true);
-    } catch {
-      setFailed(true);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   return (
-    <div className="user-input-card user-approval-card" data-testid="user-approval-card">
-      <div className="user-input-card__title">{t("userApproval.title")}</div>
-      <div className="user-input-card__body">{request.prompt}</div>
-      <textarea
-        className="user-input-card__textarea"
-        data-action="alternative"
-        value={alternative}
-        onChange={(event) => setAlternative(event.target.value)}
-        placeholder={t("userApproval.alternativePlaceholder")}
-        disabled={submitting}
-        rows={3}
-      />
-      {failed ? <div className="user-approval-card__error" role="alert">{t("userApproval.failed")}</div> : null}
-      <div className="user-input-card__actions">
-        <button
-          type="button"
-          data-action="submit-alternative"
-          onClick={() => resolve(false)}
-          disabled={submitting || !alternative.trim()}
-        >
-          {submitting ? t("userApproval.submitting") : t("userApproval.useAlternative")}
-        </button>
-        <button
-          type="button"
-          className="primary"
-          data-action="approve"
-          onClick={() => resolve(true)}
-          disabled={submitting}
-        >
-          {submitting ? t("userApproval.submitting") : t("userApproval.approve")}
-        </button>
-      </div>
-    </div>
+    <UserApprovalCardCore
+      requestId={request.request_id}
+      appSessionId={request.app_session_id}
+      prompt={request.prompt}
+      onDone={onDone}
+    />
   );
 }
-
-const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const;
-const MEMORY_SCOPE_TYPES = ["global", "project", "folder"] as const;
 
 export function MemoryProposalCard({
   request,
@@ -296,150 +158,13 @@ export function MemoryProposalCard({
   request: MemoryProposalRequest;
   onDone: (requestId: string) => void;
 }) {
-  const { t } = useTranslation();
-  const [fields, setFields] = useState<MemoryProposal>(() => ({ ...request.memory_proposal }));
-  const [expanded, setExpanded] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const canSubmit = fields.name.trim() && fields.description.trim() && fields.content.trim()
-    && (fields.scope_type === "global" || fields.scope_path.trim());
-
-  const set = <K extends keyof MemoryProposal>(key: K, value: MemoryProposal[K]) =>
-    setFields((prev) => ({ ...prev, [key]: value }));
-
-  const resolve = async (approved: boolean) => {
-    if (submitting) return;
-    if (approved && !canSubmit) return;
-    setSubmitting(true);
-    setFailed(false);
-    try {
-      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          app_session_id: request.app_session_id,
-          approved,
-          ...(approved ? { edited: fields } : {}),
-        }),
-      });
-      if (res.ok) {
-        onDone(request.request_id);
-        return;
-      }
-      setFailed(true);
-    } catch {
-      setFailed(true);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const fieldsBody = (
-    <>
-      <label className="memory-proposal-card__field">
-        <span>{t("memoryProposal.name")}</span>
-        <input
-          value={fields.name}
-          onChange={(e) => set("name", e.target.value)}
-          disabled={submitting}
-        />
-      </label>
-      <label className="memory-proposal-card__field">
-        <span>{t("memoryProposal.description")}</span>
-        <input
-          value={fields.description}
-          onChange={(e) => set("description", e.target.value)}
-          disabled={submitting}
-        />
-      </label>
-      <div className="memory-proposal-card__row">
-        <label className="memory-proposal-card__field">
-          <span>{t("memoryProposal.type")}</span>
-          <select value={fields.type} onChange={(e) => set("type", e.target.value as MemoryType)} disabled={submitting}>
-            {MEMORY_TYPES.map((type) => (
-              <option key={type} value={type}>{t(`memoryProposal.type_${type}`)}</option>
-            ))}
-          </select>
-        </label>
-        <label className="memory-proposal-card__field">
-          <span>{t("memoryProposal.scope")}</span>
-          <select
-            value={fields.scope_type}
-            onChange={(e) => set("scope_type", e.target.value as MemoryScopeType)}
-            disabled={submitting}
-          >
-            {MEMORY_SCOPE_TYPES.map((scope) => (
-              <option key={scope} value={scope}>{t(`memoryProposal.scope_${scope}`)}</option>
-            ))}
-          </select>
-        </label>
-      </div>
-      {fields.scope_type !== "global" ? (
-        <label className="memory-proposal-card__field">
-          <span>{t("memoryProposal.scopePath")}</span>
-          <input
-            value={fields.scope_path}
-            onChange={(e) => set("scope_path", e.target.value)}
-            disabled={submitting}
-            placeholder="/abs/path"
-          />
-        </label>
-      ) : null}
-      <label className="memory-proposal-card__field">
-        <span>{t("memoryProposal.content")}</span>
-        <textarea
-          className="memory-proposal-card__content"
-          value={fields.content}
-          onChange={(e) => set("content", e.target.value)}
-          disabled={submitting}
-          rows={expanded ? 18 : 4}
-        />
-      </label>
-    </>
-  );
-
   return (
-    <div className="user-input-card memory-proposal-card" data-testid="memory-proposal-card">
-      <div className="user-input-card__title">
-        {fields.action === "edit" ? t("memoryProposal.titleEdit") : t("memoryProposal.titleAdd")}
-      </div>
-      {fieldsBody}
-      {failed ? <div className="user-approval-card__error" role="alert">{t("memoryProposal.failed")}</div> : null}
-      <div className="user-input-card__actions">
-        <button type="button" onClick={() => setExpanded(true)} disabled={submitting}>
-          {t("memoryProposal.expand")}
-        </button>
-        <button type="button" onClick={() => resolve(false)} disabled={submitting}>
-          {t("memoryProposal.reject")}
-        </button>
-        <button type="button" className="primary" onClick={() => resolve(true)} disabled={submitting || !canSubmit}>
-          {submitting ? t("memoryProposal.submitting") : t("memoryProposal.approve")}
-        </button>
-      </div>
-      {expanded ? (
-        <div className="memory-proposal-modal__overlay" onClick={() => setExpanded(false)}>
-          <div className="memory-proposal-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="memory-proposal-modal__title">
-              {fields.action === "edit" ? t("memoryProposal.titleEdit") : t("memoryProposal.titleAdd")}
-            </div>
-            {fieldsBody}
-            {failed ? <div className="user-approval-card__error" role="alert">{t("memoryProposal.failed")}</div> : null}
-            <div className="user-input-card__actions">
-              <button type="button" onClick={() => setExpanded(false)} disabled={submitting}>
-                {t("memoryProposal.collapse")}
-              </button>
-              <button type="button" onClick={() => resolve(false)} disabled={submitting}>
-                {t("memoryProposal.reject")}
-              </button>
-              <button type="button" className="primary" onClick={() => resolve(true)} disabled={submitting || !canSubmit}>
-                {submitting ? t("memoryProposal.submitting") : t("memoryProposal.approve")}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </div>
+    <MemoryProposalCardCore
+      requestId={request.request_id}
+      appSessionId={request.app_session_id}
+      memoryProposal={request.memory_proposal}
+      onDone={onDone}
+    />
   );
 }
 
@@ -493,6 +218,7 @@ function ToolApprovalCard({
   onResolved: (approvalId: string) => void;
 }) {
   const { t } = useTranslation();
+  useInteractionResolveSocket();
   const [busy, setBusy] = useState(false);
   const toolName =
     approval.tool_name ||
@@ -503,15 +229,28 @@ function ToolApprovalCard({
     if (busy) return;
     setBusy(true);
     try {
-      await fetch(
-        `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ approved }),
-        },
+      // ADR 0006 §5: tool-use approval is the `approval` UserInteractionKind,
+      // namespaced `tool_approval:{approval_id}`. Native `resolve` intent
+      // first (same store mutation, `backend/surface_commands.py`'s
+      // `_resolve_tool_approval`), legacy REST decide as fallback when the
+      // shared connection isn't open yet.
+      const ack = await submitResolveInteraction(
+        sessionId,
+        `tool_approval:${approval.approval_id}`,
+        "approval",
+        { decision: approved ? "approve" : "deny" },
       );
+      if (!ack) {
+        await fetch(
+          `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ approved }),
+          },
+        );
+      }
       onResolved(approval.approval_id);
     } finally {
       setBusy(false);
@@ -670,6 +409,13 @@ interface Props {
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
   onQueuedEditStart?: (queuedId?: string) => void;
   onQueuedEditFinish?: (queuedId?: string) => void;
+  /** Populated by Chat.tsx (owner of the native `SurfaceStore`) with a
+   * transport App.tsx's `onCancelQueued`/`onQueuedTextEdit` handlers can use
+   * INSTEAD of the legacy WS send when eligible — see `NativeQueuedTransport`'s
+   * docstring. `onQueuedEditStart`/`onQueuedEditFinish` have no native
+   * intent counterpart (no lock/presence concept on the v2 command plane)
+   * and always go through their legacy prop unconditionally. */
+  nativeQueuedTransportRef?: MutableRefObject<NativeQueuedTransport | null>;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
@@ -808,6 +554,7 @@ export function Chat({
   onQueuedTextEdit,
   onQueuedEditStart,
   onQueuedEditFinish,
+  nativeQueuedTransportRef,
   onReviewLastWork,
   onToggleSupervisor,
   onEditSupervisorPrompt,
@@ -859,6 +606,94 @@ export function Chat({
   const showPendingPromptAsRunning =
     !sessionRunning && hasPendingPromptAck(pendingMessages);
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
+
+  // Native send path (Phase I stage 2c): the SAME SurfaceStore instance
+  // ChatSurfaceView renders from — lifted up here rather than owned
+  // internally by ChatSurfaceView, and handed down via its `store` prop
+  // (see that component's docstring), so a native send lands in the exact
+  // tree being rendered instead of an invisible sibling store. `onSend`/
+  // `onSteer`/`onInterrupt` route through `SurfaceStore.sendPrompt` only
+  // when the send is representable on the v2 SendPrompt intent AND the
+  // socket is actually open right now; every other case (attachments —
+  // the backend command port rejects any non-empty `attachments` today;
+  // a supervisor-targeted send — SendPrompt's `target` has no worker/
+  // supervisor concept; offline — `nativeSnapshot?.socketOpen` false)
+  // falls straight through to the ORIGINAL legacy prop unchanged, which
+  // still owns 100% of the offline-durability path (useOfflineQueue) —
+  // deliberately not duplicated here, see App.tsx's `sendPrompt`.
+  const nativeSessionId =
+    readNativeSurfaceFlag() && (focusedSessionId ?? tree?.id ?? session?.id)
+      ? ((focusedSessionId ?? tree?.id ?? session?.id) as string)
+      : null;
+  const { store: nativeStore, snapshot: nativeSnapshot } = useSurfaceStore(nativeSessionId);
+
+  const nativeSendEligible = useCallback(
+    (images: unknown[], files: unknown[]) =>
+      !!nativeStore &&
+      !!nativeSnapshot?.socketOpen &&
+      images.length === 0 &&
+      files.length === 0 &&
+      !(session?.supervisor_enabled && sendTarget === "supervisor"),
+    [nativeStore, nativeSnapshot?.socketOpen, session?.supervisor_enabled, sendTarget],
+  );
+
+  const nativeOnSend = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!nativeSendEligible(images, files)) return onSend(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "queue");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onSend],
+  );
+
+  const nativeOnSteer = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!onSteer) return false;
+      if (!nativeSendEligible(images, files)) return onSteer(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "steer");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onSteer],
+  );
+
+  const nativeOnInterrupt = useCallback(
+    (
+      prompt: string,
+      images: import("./InputArea").PastedImage[],
+      files: import("./InputArea").FileAttachment[],
+    ): boolean | Promise<boolean> => {
+      if (!onInterrupt) return false;
+      if (!nativeSendEligible(images, files)) return onInterrupt(prompt, images, files);
+      nativeStore!.sendPrompt(prompt, [], "interrupt");
+      return true;
+    },
+    [nativeSendEligible, nativeStore, onInterrupt],
+  );
+
+  // See `NativeQueuedTransport`'s docstring: App.tsx's queued-banner
+  // handlers read this ref at call time to pick a transport, without this
+  // component needing to know anything about the banner's own local-state
+  // bookkeeping. A ref (not state) deliberately — this must never itself
+  // trigger a Chat.tsx re-render, only be read just-in-time.
+  useEffect(() => {
+    if (!nativeQueuedTransportRef) return;
+    nativeQueuedTransportRef.current =
+      nativeStore && nativeSnapshot?.socketOpen
+        ? {
+            deleteQueued: (queuedId: string) => void nativeStore.deleteQueued(queuedId),
+            editQueued: (queuedId: string, text: string) => void nativeStore.editQueued(queuedId, text),
+          }
+        : null;
+  }, [nativeQueuedTransportRef, nativeStore, nativeSnapshot?.socketOpen]);
+
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -954,6 +789,12 @@ export function Chat({
   // from `worker_creation_requested` WS events AND (on mount / cwd
   // change) from the Team Orchestration extension to rehydrate after a
   // reconnect.
+  // Keeps `lib/interactionResolveSocket.ts`'s shared connection warm for
+  // the whole chat view's lifetime — not just while a tool-approval card
+  // happens to be mounted — so a worker-approval resolve (dispatched from
+  // an extension-rendered card via `chatInlineActionContext` below, not a
+  // component of its own here) has a real chance of finding it OPEN.
+  useInteractionResolveSocket();
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   useEffect(() => {
     const cwd = session?.cwd;
@@ -1138,24 +979,53 @@ export function Chat({
   const chatInlineActionContext = useMemo(
     () => ({
       workerApprovals: pendingApprovals,
+      // ADR 0006 §5: worker-creation approval is the `approval`
+      // UserInteractionKind, namespaced `worker_approval:{delegation_id}`.
+      // Native `resolve` intent first (`backend/surface_commands.py`'s
+      // `_resolve_worker_approval` calls the SAME `pending_approvals.
+      // approve()`/`.deny()` + coordinator worker-spawn callback the
+      // extension's own REST route ultimately reaches) — the extension
+      // REST call is the fallback when the shared connection isn't open.
       approveWorker: async (delegationId: string, description: string, orchestrationMode: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
-          },
-        );
+        const record = pendingApprovals.find((a) => a.delegation_id === delegationId);
+        const ack = record
+          ? await submitResolveInteraction(
+              record.app_session_id,
+              `worker_approval:${delegationId}`,
+              "approval",
+              { decision: "approve" },
+            )
+          : null;
+        if (!ack) {
+          await fetch(
+            `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
+            },
+          );
+        }
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
       },
       denyWorker: async (delegationId: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
-          { method: "POST" },
-        );
+        const record = pendingApprovals.find((a) => a.delegation_id === delegationId);
+        const ack = record
+          ? await submitResolveInteraction(
+              record.app_session_id,
+              `worker_approval:${delegationId}`,
+              "approval",
+              { decision: "deny" },
+            )
+          : null;
+        if (!ack) {
+          await fetch(
+            `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
+            { method: "POST" },
+          );
+        }
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
@@ -1286,10 +1156,10 @@ export function Chat({
     [session],
   );
 
-  const allMessages = useMemo(() => {
-    const merged = mergeMessagesSorted(messages, pendingMessages);
-    return merged;
-  }, [messages, pendingMessages]);
+  const allMessages = useMemo(
+    () => mergeMessagesSorted(messages, pendingMessages),
+    [messages, pendingMessages],
+  );
 
   const lastAssistantText = useMemo(() => {
     for (let i = allMessages.length - 1; i >= 0; i--) {
@@ -1637,6 +1507,19 @@ export function Chat({
               <div className="chat-loading-skeleton">
                 <div className="chat-loading-pulse" />
               </div>
+            ) : tree && userFacingForks(tree).length > 0 && readNativeSurfaceFlag() ? (
+              // Phase I stage 2a: native ForkSplit (surface/ForkSplitView.tsx)
+              // — same pane chrome/CSS/i18n as the legacy version below, each
+              // pane's body is a native ChatSurfaceView (see that module's
+              // docstring for the shared-region gap it documents).
+              <NativeForkSplitView
+                tree={tree}
+                focusedSessionId={focusedSessionId ?? tree.id}
+                onSetFocus={onSetForkFocus ?? (() => {})}
+                onCloseFork={onCloseFork ?? (() => {})}
+                onReopenFork={onReopenFork ?? (() => {})}
+                onDeleteFork={onDeleteFork}
+              />
             ) : tree && userFacingForks(tree).length > 0 ? (
               <ForkSplitView
                 tree={tree}
@@ -1649,6 +1532,16 @@ export function Chat({
                 onReopenFork={onReopenFork ?? (() => {})}
                 onDeleteFork={onDeleteFork}
                 onLoadOlderMessages={onLoadOlderMessages}
+              />
+            ) : readNativeSurfaceFlag() && (focusedSessionId ?? tree?.id ?? session?.id) ? (
+              // Phase I stage 1: native Contract-Node rendering layer
+              // (ba.surface_native flag) — the single integration
+              // touchpoint into the chat content region for the
+              // non-forked case (forks are handled by the branch above).
+              <ChatSurfaceView
+                sessionId={(focusedSessionId ?? tree?.id ?? session?.id) as string}
+                store={nativeStore}
+                userDisplayName={userDisplayName}
               />
             ) : (
               <LayoutGroup>
@@ -1815,7 +1708,7 @@ export function Chat({
             />
 
             <ShortcutResponses
-              onSend={(prompt) => onSend(prompt, [], [])}
+              onSend={(prompt) => nativeOnSend(prompt, [], [])}
               isStreaming={effectiveIsStreaming}
               disabled={disabled}
               lastAssistantText={lastAssistantText}
@@ -1823,9 +1716,9 @@ export function Chat({
             />
 
             <InputArea
-              onSend={onSend}
-              onSteer={onSteer}
-              onInterrupt={onInterrupt}
+              onSend={nativeOnSend}
+              onSteer={onSteer ? nativeOnSteer : undefined}
+              onInterrupt={onInterrupt ? nativeOnInterrupt : undefined}
               forkTargetLabel={forkTargetLabel}
               canSteer={!!canSteer}
               onFork={onForkAndSend}

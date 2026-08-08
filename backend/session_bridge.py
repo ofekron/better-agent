@@ -81,6 +81,34 @@ def _last_assistant(sid: str) -> Optional[dict]:
 _pending: dict[str, dict] = {}
 
 
+def get_pending(delegation_id: str) -> Optional[dict]:
+    """Read-only snapshot of one pending delegation-picker record (public
+    accessor for `backend/adapters/store_access.py`'s v2 hydration path and
+    `backend/surface_commands.py`'s v2 resolve-ownership check — never
+    mutates `_pending`)."""
+    rec = _pending.get(delegation_id)
+    if rec is None:
+        return None
+    return {
+        "caller_sid": rec["caller_sid"],
+        "caller_msg_id": rec["caller_msg_id"],
+        "prompt": rec["prompt"],
+        "run_mode": rec["run_mode"],
+        "proposed_ids": list(rec["proposed_ids"]),
+    }
+
+
+def list_pending_for_caller(caller_sid: str) -> list[dict]:
+    """Every currently-pending delegation-picker record whose caller is
+    `caller_sid` — the v2 cold-hydration source for that session's pending
+    `choice`-kind UserInteractions."""
+    return [
+        {"delegation_id": did, **get_pending(did)}
+        for did, rec in _pending.items()
+        if rec.get("caller_sid") == caller_sid
+    ]
+
+
 class BridgeError(Exception):
     """Recoverable error surfaced to the delegate tool as is_error text."""
 

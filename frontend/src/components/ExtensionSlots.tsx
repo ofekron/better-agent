@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
+import { subscribeSystemFrames } from "src/lib/systemFeedRegistry";
 import { PUBLIC_EXTENSION_IDS } from "src/extensionIds";
 import { trackPromise } from "src/progress/store";
 import { uuidv4 } from "src/lib/uuid";
@@ -270,7 +271,18 @@ export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCata
       }
       void refresh();
     });
-    return off;
+    // ADR 0011 §3 `extension_ui` feed — additional live-refresh trigger
+    // (dual SIGNAL only, same rationale as `ExtensionUiHooks.tsx`: v2's
+    // `ExtensionUiModule` has no `extension_name`/`marketplace_auth`-free-
+    // form-payload equivalent of this catalog's richer error-recovery
+    // envelope, so the rendered catalog stays legacy REST-sourced).
+    const offV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "extension_ui_changed") void refresh();
+    });
+    return () => {
+      off();
+      offV2();
+    };
   }, [applyEntrypoints, refresh]);
 
   return { modules, error, resetting, resetError, reset };

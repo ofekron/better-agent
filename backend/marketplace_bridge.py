@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import extension_store
 import marketplace_service
+from event_bus import BusEvent, bus
 from marketplace_bridge_store import MarketplaceStateStore
 from marketplace_device_identity import MarketplaceDeviceIdentity
 from marketplace_protocol import (
@@ -106,6 +107,20 @@ class MarketplaceBridge:
     async def _notify(self, state: dict) -> None:
         if self._on_change is not None:
             await self._on_change(state["revision"])
+        # ADR 0011 §5 fact for backend/adapters/system_adapter.py's
+        # `MarketplaceBridgeState`/`MarketplaceIntent` live push — the
+        # ONE chokepoint every state mutation (connection_state
+        # transitions, intent create/update, device pair/revoke) already
+        # routes through, so one publish site covers all of them.
+        try:
+            await bus.publish(BusEvent(
+                type="marketplace.fire.changed",
+                root_id="system", sid="system",
+                payload={"revision": state.get("revision")},
+                persist=False,
+            ))
+        except Exception:
+            pass
 
     def snapshot(self) -> dict:
         state = self._store.read()

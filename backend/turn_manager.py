@@ -193,6 +193,18 @@ _STARTUP_ACTIVITY_KINDS = {
     "claude": "provider_response",
 }
 
+# `run.state.*` fact types — the event-driven publication surface
+# `RunsSurfaceAdapter` (backend/adapters/runs_adapter.py) subscribes to and
+# folds into its live overlay. One constant per distinguishable "what
+# happened to _run_state" shape; see `_publish_run_state_fact`. Facts
+# describe events, never commands — the subscriber decides what to project.
+_RUN_STATE_FACT_ANCHOR_CHANGED = "run.state.anchor_changed"
+_RUN_STATE_FACT_PID_CHANGED = "run.state.pid_changed"
+_RUN_STATE_FACT_RETRYING = "run.state.retrying"
+_RUN_STATE_FACT_REMOVED = "run.state.removed"
+_RUN_STATE_FACT_STARTUP_PHASE_CHANGED = "run.state.startup_phase_changed"
+_RUN_STATE_FACT_RECOVERY_CLASSIFIED = "run.state.recovery_classified"
+
 
 def _provider_capability_contexts(
     contexts: Optional[list[dict]],
@@ -360,6 +372,7 @@ class TurnManager:
         lifecycle_message_id: str,
         assistant_message_id: str,
         manager_session_id: Optional[str] = None,
+        prompt_uuid: Optional[str] = None,
     ) -> None:
         self._validate_lifecycle_identity(
             user_turn_id=user_turn_id,
@@ -380,6 +393,8 @@ class TurnManager:
             }
             if manager_session_id is not None:
                 payload["manager_session_id"] = manager_session_id
+            if prompt_uuid is not None:
+                payload["prompt_uuid"] = prompt_uuid
             await bus.publish(BusEvent(
                 type="lifecycle.turn_start",
                 root_id=root_id,
@@ -391,6 +406,270 @@ class TurnManager:
             logger.exception(
                 "lifecycle turn_start bus publish failed sid=%s",
                 app_session_id,
+            )
+
+    # Verified `user_msg["source"]` -> contract `PromptOrigin` signals.
+    # `"supervisor"` is stamped by `_init_turn_messages` (orchestrator.py)
+    # whenever `run_turn` is called with `source="supervisor"` — the
+    # direct-to-supervisor dispatch branch in `Coordinator.handle_prompt`,
+    # always paired with `session_id_field="supervisor_agent_session_id"`.
+    # No other `user_msg["source"]` value is currently stamped by any
+    # verified call site, so every other value (including None) maps to
+    # the contract default "user" rather than a guessed origin.
+    _PROMPT_ORIGIN_SIGNALS: dict[str, str] = {"supervisor": "supervisor"}
+
+    @staticmethod
+    def _image_filename_records(user_msg: dict) -> list[dict]:
+        """`user_msg["images"]` entries with a valid `filename`, in the
+        SAME order the images were sent — `user_msg["images"]` is
+        `_init_turn_messages`'s own return value from `_save_message_
+        images` (`[{"filename", "media_type"}, ...]`), keyed by
+        `owner_id=user_msg["id"]` and index. `normalize.py`'s `_split_
+        image_attachments` derives its `Attachment`s from the provider-
+        echoed row in the SAME per-message order, so a positional join
+        (`enrich_typed_prompt_node`) is safe. Non-string/missing filenames
+        are dropped rather than guessed. Single source for BOTH
+        `_image_filenames` (prompt_meta's filename list) and
+        `_publish_typed_prompt_journal`'s placeholder attachments."""
+        images = user_msg.get("images")
+        if not isinstance(images, list):
+            return []
+        return [
+            img for img in images
+            if isinstance(img, dict) and isinstance(img.get("filename"), str)
+        ]
+
+    @classmethod
+    def _image_filenames(cls, user_msg: dict) -> list[str]:
+        return [img["filename"] for img in cls._image_filename_records(user_msg)]
+
+    async def _publish_prompt_meta(
+        self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
+    ) -> None:
+        """Backend-authored persisted journal fact carrying this prompt's
+        origin/send_mode/image_filenames, published alongside
+        `lifecycle.turn_start`.
+
+        Kept as its OWN journal row (never mutating the CLI-authored user
+        row) so `backend.adapters.chat_adapter` can join it onto the
+        matching TYPED_PROMPT node without the provider's own
+        session-jsonl replay ever needing to reproduce it — see
+        `backend.adapters.normalize`'s `prompt_meta` row handling.
+
+        The row's OWNERSHIP `msg_id` (`EventJournalWriter`'s
+        `MetadataOwnership`, verified in `event_journal.py`) is stamped
+        `assistant_message_id`, not `user_msg["id"]`: every render event
+        of this turn — INCLUDING the provider's own echoed `type: "user"`
+        row that `normalize._handle_user` turns into the TYPED_PROMPT node
+        — is journaled with `message_id=assistant_msg.get("id")` (see
+        `_publish_provider_stream_event` above), so that's the id the
+        TYPED_PROMPT row's own `row["msg_id"]` will carry once ownership
+        resolves. Using `user_msg["id"]` here would leave this fact
+        permanently unjoinable. `user_msg["id"]` still travels inside the
+        payload `data` — it identifies WHICH prompt this describes,
+        distinct from the journal-ownership key used to find it.
+
+        `image_filenames` (see `_image_filenames`) is omitted from the
+        payload entirely when this prompt carried no images — closed-set
+        payload discipline, never an empty-list placeholder key.
+
+        `send_mode` is omitted: no send-mode context reaches `run_turn`
+        yet (tracked as follow-up work).
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        origin = self._PROMPT_ORIGIN_SIGNALS.get(user_msg.get("source"), "user")
+        payload: dict = {"msg_id": prompt_msg_id, "origin": origin}
+        image_filenames = self._image_filenames(user_msg)
+        if image_filenames:
+            payload["image_filenames"] = image_filenames
+        try:
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await bus.publish(BusEvent(
+                type="prompt_meta",
+                root_id=root_id,
+                sid=app_session_id,
+                payload=payload,
+                msg_id=assistant_message_id,
+                persist=True,
+            ))
+        except Exception:
+            logger.exception(
+                "prompt_meta bus publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
+            )
+
+    async def _publish_typed_prompt_journal(
+        self, *, app_session_id: str, user_msg: dict, assistant_message_id: str,
+    ) -> None:
+        """Backend-authored, persisted TYPED_PROMPT-shaped journal row for
+        the user's own prompt — closes the P0 gap: native-mode turns never
+        journal the user's prompt (`runner.py`'s SDK `receive_response()`
+        stream never yields a `type: "user"` event, so `_publish_provider_
+        stream_event` never sees one to journal), so `chat_adapter.
+        _segment_turns` finds no turn boundary and the v2 read plane
+        renders nothing for the turn even though `render_rev` still
+        advances on every provider-stream row.
+
+        Journaled as `type: "agent_message"`, `data: {"type": "user",
+        ...}` — the SAME shape `normalize._handle_user` already maps to a
+        TYPED_PROMPT node (mirroring the shape the CLI's own echoed `type:
+        "user"` transcript line would carry, had the SDK ever streamed
+        one) — no new normalize.py row-type branch is needed.
+
+        `data["uuid"]` is `user_msg["id"]` itself (never a fresh uuid):
+        deterministic and durable, so live and any later cold reload
+        derive the identical TYPED_PROMPT `node_id`
+        (`normalize.typed_prompt_node_id`) — the "canonical = f(user_msg
+        id)" identity this turn's prompt keeps forever.
+
+        `data["origin"]` is ALWAYS stamped (reusing `_PROMPT_ORIGIN_
+        SIGNALS`, identically to `_publish_prompt_meta`, so the two facts
+        about the same prompt never disagree) — this is deliberate: it is
+        what lets `backend.adapters.normalize.is_canonical_prompt_row`
+        tell this row apart from a LATER raw provider-transcript echo of
+        the SAME prompt (the CLI/SDK session jsonl's own `type: "user"`
+        line, orphan-tailed into the journal by `jsonl_tailer.
+        OwnedClaudeJsonlTailer` with a DIFFERENT uuid and — for native
+        mode — always `msg_id=None`, so ownership/msg_id equality can
+        never be used for this). `chat_adapter._segment_turns`/
+        `_on_event_written` use that discriminator to drop the echo
+        rather than misfile it as a second turn boundary — see
+        `is_canonical_prompt_row`'s docstring for the full convergence
+        argument (live, reconnect, and cold-reload all resolve to the
+        SAME single TYPED_PROMPT node).
+
+        `send_mode` is omitted for the same not-yet-reachable reason
+        `_publish_prompt_meta` omits it (see that method's docstring).
+
+        Images: `user_msg["images"]` filenames are known here, but the
+        actual bytes live only in `_save_message_images`'s on-disk copy
+        (never inlined into this row). This row stamps PLACEHOLDER
+        `data["attachments"]` entries (name/media_type only, `ref=""`,
+        `size=None`) so `normalize._handle_user`'s existing explicit-
+        attachment path produces one `Attachment` per image; the already-
+        published `prompt_meta` fact's `image_filenames` then fills `ref`
+        positionally via `enrich_typed_prompt_node`, completely
+        unchanged — the join itself is untouched by this method.
+
+        Ownership `msg_id` is `assistant_message_id` — the SAME convention
+        `_publish_prompt_meta` uses (see that method's docstring for the
+        verification trail) — so every render row of this turn shares one
+        ownership id, even though nothing currently joins on this row's
+        own ownership key.
+
+        Published via `event_journal.publish_event` directly — the same
+        funnel `_publish_provider_stream_event`/the `turn_started` fact
+        use, not the bus-publish helper `_publish_prompt_meta` uses — so
+        this addition needs no bump to `test_turn_manager_lifecycle_emit.
+        py`'s per-file emit-site funnel-count lock.
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        text = user_msg.get("content")
+        text = text if isinstance(text, str) else ""
+        origin = self._PROMPT_ORIGIN_SIGNALS.get(user_msg.get("source"), "user")
+        data: dict = {
+            "type": "user",
+            "uuid": prompt_msg_id,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            "origin": origin,
+        }
+        # `user_msg["client_id"]` (`_init_turn_messages`'s echo of `run_turn`'s
+        # `client_id` kwarg — itself `surface_commands.send_prompt`'s unified
+        # `cid`, fed by EITHER the v2 intent transport's `intent_id` or the
+        # legacy WS transport's `client_id`; see that function's docstring)
+        # is the ONE correlator a client-side optimistic send can reconcile
+        # against once this row round-trips through `normalize._handle_user`
+        # into `TypedPromptPayload.intent_id`. Omitted when the prompt was
+        # dispatched without one (closed-set payload discipline).
+        client_id = user_msg.get("client_id")
+        if isinstance(client_id, str) and client_id:
+            data["intent_id"] = client_id
+        attachments = [
+            {"name": img["filename"], "media_type": img.get("media_type") or "", "ref": "", "size": None}
+            for img in self._image_filename_records(user_msg)
+        ]
+        if attachments:
+            data["attachments"] = attachments
+        try:
+            from event_journal import publish_event
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await publish_event(
+                session_id=root_id,
+                context_id=app_session_id,
+                event_type="agent_message",
+                data=data,
+                source="turn_manager.prompt_journal",
+                message_id=assistant_message_id,
+            )
+        except Exception:
+            logger.exception(
+                "typed prompt journal publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
+            )
+
+    async def _publish_turn_error_meta(
+        self,
+        *,
+        app_session_id: str,
+        user_msg: dict,
+        assistant_message_id: str,
+        error_text: str,
+        error_meta: dict,
+    ) -> None:
+        """Backend-authored persisted journal fact carrying a failed
+        turn's structured `error_meta` (e.g. `ProviderCredentialError`'s
+        `{kind, provider_id, credential_status}` — see `provider.py`'s
+        `error_meta()`; never secret-bearing), published from the single
+        `run_turn` error-terminal chokepoint so surface v2 can render a
+        credential-specific FAILURE node even after reload (the live-only
+        `error` WS frame this accompanies isn't journaled).
+
+        Same ownership convention as `_publish_prompt_meta`: the journal
+        row's OWNERSHIP `msg_id` is `assistant_message_id` (the
+        turn-owning id every render event of this turn is journaled
+        under), while `user_msg["id"]` travels inside the payload `data`
+        to identify WHICH prompt this failure describes.
+        """
+        prompt_msg_id = user_msg.get("id")
+        if not isinstance(prompt_msg_id, str) or not prompt_msg_id:
+            return
+        if not isinstance(assistant_message_id, str) or not assistant_message_id:
+            return
+        try:
+            root_id = (
+                session_manager._root_id_for(app_session_id)
+                or app_session_id
+            )
+            await bus.publish(BusEvent(
+                type="turn_error_meta",
+                root_id=root_id,
+                sid=app_session_id,
+                payload={
+                    "msg_id": prompt_msg_id,
+                    "error_text": error_text,
+                    "error_meta": error_meta,
+                },
+                msg_id=assistant_message_id,
+                persist=True,
+            ))
+        except Exception:
+            logger.exception(
+                "turn_error_meta bus publish failed sid=%s msg_id=%s",
+                app_session_id, prompt_msg_id,
             )
 
     async def _publish_terminal_lifecycle(
@@ -405,6 +684,8 @@ class TurnManager:
         trace_id: Optional[str] = None,
         reason: Optional[str] = None,
         provider_kind: Optional[str] = None,
+        prompt_uuid: Optional[str] = None,
+        usage: Optional[dict] = None,
     ) -> None:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
@@ -417,6 +698,20 @@ class TurnManager:
         / "error" — so
         subscribers can distinguish causes without resorting to two
         event types per cause.
+
+        `usage` — when given — is a `trace_collector._normalize_token_usage`
+        -shaped dict (`input_tokens`/`output_tokens`/
+        `cache_creation_input_tokens`/`cache_read_input_tokens`, every call
+        site sources it via `extract_provider_result_token_usage(primary_
+        result)`, the SAME helper `record_turn_result`'s own token_usage
+        already uses). `chat_adapter._on_lifecycle` reads it straight off
+        this SAME bus event to build the live `TurnLifecycle` frame's
+        `Usage` — this event is `persist=False` (live-plane only, matching
+        the wire's `UsageWire` living only on `TurnLifecycleFrame`, never
+        REST/`CompactTurn`), so a turn's usage summary is only ever shown
+        while it completes in the current browser session, not after a
+        cold reload — an accepted trade-off, not a bug (same as `TurnPhase`
+        itself).
         """
         self._validate_lifecycle_identity(
             user_turn_id=user_turn_id,
@@ -441,6 +736,10 @@ class TurnManager:
                 payload["reason"] = reason
             if provider_kind is not None:
                 payload["provider_kind"] = provider_kind
+            if prompt_uuid is not None:
+                payload["prompt_uuid"] = prompt_uuid
+            if usage is not None:
+                payload["usage"] = usage
             event_type = (
                 "lifecycle.turn_complete" if kind == "complete"
                 else "lifecycle.turn_stopped"
@@ -512,6 +811,23 @@ class TurnManager:
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"lifecycle fact requires {name}")
+
+    @staticmethod
+    def _resolve_prompt_uuid(user_msg: dict) -> Optional[str]:
+        """The initiating user prompt's journal-row uuid, when known.
+
+        Populated onto `user_msg["agent_message_uuid"]` by
+        `OrchestrationStrategy.apply_event` (orchs/base.py) once the
+        provider's own CLI-echoed `type: "user"` row has been folded —
+        see `session_manager.set_user_agent_uuid`. `user_msg` is the
+        SAME dict object session_manager holds (returned by
+        `_init_turn_messages`/`append_user_msg`), so this always reads
+        the freshest known value at call time. Genuinely unset (None)
+        before that fold has happened — e.g. at turn_start, before the
+        provider has run — never guessed/synthesized here.
+        """
+        value = user_msg.get("agent_message_uuid")
+        return value if isinstance(value, str) and value else None
 
     # ======================================================================
     # The `user_message_*` lifecycle (requested / queued / sent /
@@ -857,6 +1173,49 @@ class TurnManager:
             entries,
         )
 
+    def _publish_run_state_fact(
+        self, fact_type: str, app_session_id: str, run_id: str, **fields: Any,
+    ) -> None:
+        """Single publication point for every `run.state.*` fact —
+        `RunsSurfaceAdapter` (backend/adapters/runs_adapter.py) is the
+        subscriber, folding these into its own live overlay. A fact
+        describes what just happened to `_run_state`, never a command;
+        this method never decides what the projection does with it.
+
+        `bus.publish_threadsafe` is used (never `bus.publish`) because
+        `_run_state` mutators are called from BOTH the owner event loop
+        (most turn-lifecycle call sites) AND a plain background OS
+        thread (`tick_running_state`'s 2 s tick, which drives
+        `_prune_dead_entries`/`_update_startup_stalls`) — delivery is
+        handed off via `call_soon_threadsafe`, which is safe from either
+        context, so this never needs the loop-affinity dance
+        `emit_run_state`'s cross-thread callers do (see
+        `tick_running_state`), and never blocks a run-state mutation on
+        bus delivery. `persist=False`: `_run_state` is in-memory-only —
+        disk (`RunRecord`, the `runner_alive` sentinel) remains the
+        durable source of truth (see runs_adapter.py's persistence-
+        honesty split) — these facts have no replay/WAL role and are
+        never expected to survive a backend restart.
+        """
+        try:
+            root_id = session_manager._root_id_for(app_session_id) or app_session_id
+        except Exception:
+            root_id = app_session_id
+        try:
+            bus.publish_threadsafe(BusEvent(
+                type=fact_type,
+                root_id=root_id,
+                sid=app_session_id,
+                payload={"run_id": run_id, "session_id": app_session_id, **fields},
+                run_id=run_id,
+                persist=False,
+            ))
+        except Exception:
+            logger.exception(
+                "run-state fact publish failed type=%s sid=%s run=%s",
+                fact_type, app_session_id[:8], (run_id or "?")[:8],
+            )
+
     def run_state_add(
         self,
         app_session_id: str,
@@ -893,6 +1252,12 @@ class TurnManager:
                 "pid": pid,
                 "last_event_at": now,
             })
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+                kind=kind, target_message_id=target_message_id,
+                delegation_id=delegation_id, pid=pid,
+                started_at=entry.get("started_at"),
+            )
             if project_streaming:
                 self._maybe_flip_streaming(
                     app_session_id, target_message_id, True, kind,
@@ -911,6 +1276,11 @@ class TurnManager:
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)
+        self._publish_run_state_fact(
+            _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+            kind=kind, target_message_id=target_message_id,
+            delegation_id=delegation_id, pid=pid, started_at=entry["started_at"],
+        )
         if project_streaming:
             self._maybe_flip_streaming(
                 app_session_id, target_message_id, True, kind,
@@ -942,6 +1312,11 @@ class TurnManager:
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
             self._turn_creators.pop(app_session_id, None)
+        for r in removed:
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_REMOVED, app_session_id,
+                r.get("run_id") or run_id, reason="explicit",
+            )
         if project_streaming:
             for r in removed:
                 self._maybe_flip_streaming(
@@ -1201,6 +1576,13 @@ class TurnManager:
             run_id = r.get("run_id")
             if run_id:
                 self._pop_run_id(sid, run_id)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_REMOVED, sid, run_id,
+                    reason=(
+                        "pruned_pidless_orphan" if r.get("pid") is None
+                        else "pruned_dead_pid"
+                    ),
+                )
             self._maybe_flip_streaming(
                 sid,
                 r.get("target_message_id"),
@@ -1237,6 +1619,14 @@ class TurnManager:
             run["startup_phase"] = "stalled"
             run["stalled_at"] = now.isoformat()
             changed = True
+            run_id = run.get("run_id")
+            if run_id:
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, sid, run_id,
+                    startup_phase="stalled",
+                    stalled_at=run["stalled_at"],
+                    provider_kind=run.get("provider_kind"),
+                )
             logger.warning(
                 "TURN_START_STALLED sid=%s run=%s provider=%s expected=%s "
                 "silence_seconds=%s threshold_seconds=%s",
@@ -1543,6 +1933,16 @@ class TurnManager:
                     if silence_threshold_seconds is not None
                     else self._load_task_start_silence_seconds()
                 )
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                startup_phase=run["startup_phase"],
+                provider_kind=provider_kind,
+                startup_expected_activity=expected,
+                startup_silence_threshold_seconds=run.get(
+                    "startup_silence_threshold_seconds",
+                ),
+                stalled_at=None,
+            )
             logger.info(
                 "TURN_START_MONITORING sid=%s run=%s provider=%s expected=%s "
                 "threshold_seconds=%s",
@@ -1587,6 +1987,13 @@ class TurnManager:
                 run["startup_phase_started_at"] = now
                 run["startup_expected_activity"] = "turn_context"
                 run.pop("stalled_at", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                    startup_phase=run["startup_phase"],
+                    startup_expected_activity="turn_context",
+                    last_activity_kind=activity_kind,
+                    stalled_at=None,
+                )
                 logger.info(
                     "TURN_START_ACCEPTED sid=%s run=%s provider=%s "
                     "next_expected=turn_context recovered_from_stall=%s",
@@ -1603,6 +2010,26 @@ class TurnManager:
                 return False
             run["startup_phase"] = "running"
             run.pop("stalled_at", None)
+            if activity_kind == "recovered_run":
+                # The ONE recovery-classification signal reachable from
+                # inside this module: `run_recovery.py`'s startup
+                # reattachment path (out of this file's edit scope) marks
+                # a reattached run's first activity as "recovered_run",
+                # never fired for a freshly-started run. Sticky for the
+                # projection's overlay (see runs_adapter.py) even after
+                # `startup_phase` moves on to "running" below in this same
+                # mutation — RunPhase.RECONNECTING/UNKNOWN_AFTER_RECOVERY
+                # key off this, not off startup_phase alone.
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_RECOVERY_CLASSIFIED, app_session_id, run_id,
+                    classification="recovered_at_startup",
+                )
+            self._publish_run_state_fact(
+                _RUN_STATE_FACT_STARTUP_PHASE_CHANGED, app_session_id, run_id,
+                startup_phase=run["startup_phase"],
+                last_activity_kind=activity_kind,
+                stalled_at=None,
+            )
             logger.info(
                 "TURN_START_ACKNOWLEDGED sid=%s run=%s provider=%s activity=%s "
                 "recovered_from_stall=%s",
@@ -1630,6 +2057,9 @@ class TurnManager:
             if r.get("run_id") == run_id:
                 r["pid"] = pid
                 r.pop("retrying", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_PID_CHANGED, app_session_id, run_id, pid=pid,
+                )
                 self._dbg_runstate(
                     app_session_id, f"set_pid:{run_id[:8]}:{pid}",
                 )
@@ -1651,6 +2081,9 @@ class TurnManager:
         for r in runs:
             if r.get("run_id") == run_id:
                 r.pop("pid", None)
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_PID_CHANGED, app_session_id, run_id, pid=None,
+                )
                 self._dbg_runstate(app_session_id, f"clear_pid:{run_id[:8]}")
                 return
 
@@ -1661,6 +2094,9 @@ class TurnManager:
         for r in runs:
             if r.get("run_id") == run_id:
                 r["retrying"] = True
+                self._publish_run_state_fact(
+                    _RUN_STATE_FACT_RETRYING, app_session_id, run_id,
+                )
                 self._dbg_runstate(app_session_id, f"retrying:{run_id[:8]}")
                 return
 
@@ -1695,6 +2131,10 @@ class TurnManager:
                         target_message_id,
                         True,
                         r.get("kind"),
+                    )
+                    self._publish_run_state_fact(
+                        _RUN_STATE_FACT_ANCHOR_CHANGED, app_session_id, run_id,
+                        target_message_id=target_message_id,
                     )
                 return
 
@@ -2271,6 +2711,17 @@ class TurnManager:
                 lifecycle_message_id=owning_lifecycle_message_id,
                 assistant_message_id=new_msg["id"],
                 manager_session_id=session.get(session_id_field),
+                prompt_uuid=self._resolve_prompt_uuid(user_msg),
+            )
+            await self._publish_prompt_meta(
+                app_session_id=app_session_id,
+                user_msg=user_msg,
+                assistant_message_id=new_msg["id"],
+            )
+            await self._publish_typed_prompt_journal(
+                app_session_id=app_session_id,
+                user_msg=user_msg,
+                assistant_message_id=new_msg["id"],
             )
             turn_lifecycle_started = True
 
@@ -2489,6 +2940,8 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
             else:
                 await finish_execution("failed")
@@ -2504,6 +2957,8 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
 
         except _Cancelled:
@@ -2560,6 +3015,8 @@ class TurnManager:
                 provider_kind=(
                     primary_result.get("provider_kind") or frozen_provider_kind
                 ),
+                prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                usage=extract_provider_result_token_usage(primary_result),
             )
 
         except asyncio.CancelledError:
@@ -2670,6 +3127,14 @@ class TurnManager:
                 )
             except Exception:
                 logger.exception("Failed to persist user message during error handling")
+            if error_meta is not None and assistant_msg_holder[0] is not None:
+                await self._publish_turn_error_meta(
+                    app_session_id=app_session_id,
+                    user_msg=user_msg,
+                    assistant_message_id=assistant_msg_holder[0]["id"],
+                    error_text=error_text,
+                    error_meta=error_meta,
+                )
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
@@ -2702,6 +3167,8 @@ class TurnManager:
                     provider_kind=(
                         primary_result.get("provider_kind") or frozen_provider_kind
                     ),
+                    prompt_uuid=self._resolve_prompt_uuid(user_msg),
+                    usage=extract_provider_result_token_usage(primary_result),
                 )
 
         finally:

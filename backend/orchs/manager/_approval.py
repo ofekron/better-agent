@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from i18n import t
 from stores import pending_approvals, worker_store
+import pending_approvals_api
 from orchs._subprocess_agent import SubprocessAgent
 from prompt_templates import render_prompt
 from session_manager import manager as session_manager
@@ -166,6 +167,21 @@ async def await_fresh_worker_approval(
         "instructions_preview": instructions_preview,
         "node_id": node_id,
     }})
+    # v2 UserInteraction fact (ADR 0006 §5) — makes the approval card
+    # appear live for a client on the native path, not only on the next
+    # cold hydration/reconnect. Fired at the SAME convergence point as the
+    # legacy WS broadcast above (both the fresh-create and re-entry-pending
+    # branches reach here), so a reconnecting frontend that missed the
+    # first announcement still sees it re-fired, same as legacy.
+    pending_approvals_api.publish_requested_fact(
+        delegation_id, app_session_id,
+        {
+            "cwd": cwd,
+            "justification": justification,
+            "proposed_description": proposed_description,
+            "proposed_orchestration_mode": proposed_orchestration_mode,
+        },
+    )
 
     # Set up the future the REST handler resolves. If a stranded
     # prior coroutine was awaiting this same delegation_id (runner

@@ -31,6 +31,7 @@
     "@capacitor/background-runner": "3.0.0",
     "@capacitor/core": "8.4.2",
     "@monaco-editor/react": "^4.7.0",
+    "@tanstack/react-virtual": "^3.14.9",
     "@types/papaparse": "^5.5.2",
     "@uiw/react-markdown-preview": "^5.2.0",
     "framer-motion": "^12.40.0",

@@ -15,6 +15,14 @@ import type {
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
 import type { BuiltinExtensionKey } from "../../src/extensionIds";
 import { finalizeTerminalAssistant } from "../../src/hooks/useSession";
+import type {
+  ChatFrame,
+  CompactTurnWire,
+  NodeWire,
+  RunWire,
+  SnapshotIdentity,
+  UserInteractionWire,
+} from "../../src/adapter/wire";
 
 /** Logical key -> extension id served by GET /api/extensions/builtin-ids.
  *  Single source for the `/api/extensions/<id>/backend/...` proxy family:
@@ -52,6 +60,77 @@ function canonicalizeExtensionBackendPath(path: string): string {
     return `/api${match[2]}`;
   }
   return path;
+}
+
+/** Mock native-surface state for one session's `/api/v2/surface/...` +
+ *  `/ws/v2/surface` mock. `childrenByNodeId` is intentionally generic —
+ *  SurfaceClient.fetchTurnBody() itself handles the explanation-wrapper
+ *  indirection (backend/adapters/derive.py's `derive_body`) by recursing
+ *  into `children(explanation.node_id)`, so this map can hold either a
+ *  turn's direct content children OR an explanation node's members —
+ *  whatever a seeded/live turn's shape needs — without the mock having to
+ *  understand that indirection itself. */
+export interface SurfaceSessionState {
+  identity: SnapshotIdentity;
+  instructionWidget: NodeWire | null;
+  turns: CompactTurnWire[];
+  liveTurnNodes: NodeWire[];
+  runs: RunWire[];
+  /** Cold-hydration source for `CompactSessionSnapshotWire.interactions`
+   *  (ADR 0006 §5) — every currently-pending UserInteraction on this
+   *  session. Live updates project via `applySurfaceFrame`'s
+   *  `user_interaction_upsert` case below, same real-backend-consistency
+   *  rationale as every other frame kind here. */
+  interactions: UserInteractionWire[];
+  olderCursor: string | null;
+  childrenByNodeId: Map<string, NodeWire[]>;
+  /** Page served by GET `/api/v2/surface/sessions/:id/older` when the
+   *  snapshot's `olderCursor` is non-null. Absent (undefined) keeps the
+   *  MVP always-empty-page stub (no seeded-pagination support); present
+   *  (including an explicit empty page) serves this instead — see
+   *  `seedSurface`'s doc and message-pagination migration notes. */
+  olderPage?: { turns: CompactTurnWire[]; runs: RunWire[]; olderCursor: string | null };
+}
+
+function emptySurfaceSessionState(): SurfaceSessionState {
+  return {
+    identity: { incarnation: "mock", render_rev: 0, hist_rev: 0 },
+    instructionWidget: null,
+    turns: [],
+    liveTurnNodes: [],
+    runs: [],
+    interactions: [],
+    olderCursor: null,
+    childrenByNodeId: new Map(),
+  };
+}
+
+/** Mirrors backend/user_input_store.py's `interaction_request_dict` +
+ * `chat_adapter._map_pending_interactions` (ADR 0006 §5, Package A
+ * backend outcomes): the SAME real-backend-consistency rationale
+ * `applySurfaceFrame`'s docstring states for live frames applies to cold
+ * hydration too — a session seeded with legacy `userInputs` (the
+ * `/api/user-input/pending` route's source) must serve the SAME pending
+ * rows through the v2 `/snapshot` route's `interactions` field, or a
+ * suite exercising ONLY the legacy seed (most of this suite, pre-dating
+ * the v2 hydration path) would see its pending card silently vanish once
+ * `usePendingUserInteractions`'s v2 hydration for the open session lands
+ * and finds nothing. One seed (`userInputs`), two routes, always
+ * consistent — never a second interactions fixture list to keep in sync. */
+function toWireUserInteraction(request: UserInteractionRequest): UserInteractionWire {
+  const base = {
+    interaction_ref: `user_input:${request.request_id}`,
+    kind: "input" as const,
+    state: "pending" as const,
+    response: null,
+  };
+  if (request.kind === "approval") {
+    return { ...base, request: { schema: { kind: "approval" }, prompt: request.prompt } };
+  }
+  if (request.kind === "memory") {
+    return { ...base, request: { schema: { kind: "memory", memory_proposal: request.memory_proposal }, prompt: "" } };
+  }
+  return { ...base, request: { schema: { kind: "questions", questions: request.questions }, prompt: "" } };
 }
 
 export interface InstallationProfileState {
@@ -96,6 +175,13 @@ export interface BackendState {
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
   files: Record<string, string>;
+  /** Native Contract-Node surface (`/api/v2/surface/...` + `/ws/v2/surface`)
+   * mock state, keyed by session id. Absent entry = the route falls back
+   * to the always-empty "ok" envelope (backward-compatible default for
+   * the hundreds of legacy-content suites that never seed this and don't
+   * care). See seedSurface()/emitSurface() below and the harness's
+   * `h.seedSurface`/`h.emitSurface`. */
+  surface: Map<string, SurfaceSessionState>;
 }
 
 function modelCatalog(
@@ -250,6 +336,7 @@ function emptyState(): BackendState {
       appearance_theme: "default",
     },
     files: {},
+    surface: new Map(),
   };
 }
 
@@ -376,6 +463,125 @@ export class MockBackend {
         interruptedByMsgId: d.interrupted_by_msg_id,
         errorText: event.type === "error" ? (d.error ?? "") : undefined,
       });
+    }
+  }
+
+  /** Pre-populate one session's native-surface mock state (served by GET
+   *  `/api/v2/surface/sessions/:id/snapshot` + `/nodes/:nodeId/children`).
+   *  Merges onto any existing seeded state for that session id; a field
+   *  omitted here keeps its prior/default value. `render_rev` bumps by
+   *  the same amount `resetIdentity` implies unless `identity` is passed
+   *  explicitly, so a re-seed after `emitSurface` calls doesn't silently
+   *  regress the cursor the client already advanced past. */
+  seedSurface(sessionId: string, partial: Partial<Omit<SurfaceSessionState, "childrenByNodeId">> & {
+    childrenByNodeId?: Record<string, NodeWire[]>;
+  }): void {
+    const existing = this.state.surface.get(sessionId) ?? emptySurfaceSessionState();
+    const next: SurfaceSessionState = {
+      ...existing,
+      ...partial,
+      childrenByNodeId: partial.childrenByNodeId
+        ? new Map(Object.entries(partial.childrenByNodeId))
+        : existing.childrenByNodeId,
+    };
+    this.state.surface.set(sessionId, next);
+  }
+
+  /** Apply one live `/ws/v2/surface` ChatFrame onto the mock's surface
+   *  state, same real-backend-consistency rationale as `applyWsEvent`
+   *  above: a later REST snapshot refetch (resync_required, or a fresh
+   *  mount) must see what the live frame already delivered. Called by the
+   *  harness's `emitSurface` before delivering the frame to the mock
+   *  socket. sidecar_upsert/session_state/notice are not part of the CHAT
+   *  CONTENT plane this mock models — no-ops here, mirroring
+   *  useSurfaceSession.ts's own historical gap list (now the native
+   *  store's, see surface/state.ts). user_interaction_upsert IS modeled
+   *  (below) since it's the cold-hydration/live-projection pair a suite
+   *  seeding interactions needs to stay consistent, same as run_upsert. */
+  applySurfaceFrame(sessionId: string, frame: ChatFrame): void {
+    const state = this.state.surface.get(sessionId) ?? emptySurfaceSessionState();
+    this.state.surface.set(sessionId, state);
+    switch (frame.type) {
+      case "node_upsert": {
+        state.identity = frame.snapshot;
+        const node = frame.node;
+        if (node.kind === "instruction_widget") {
+          state.instructionWidget = node;
+          break;
+        }
+        const turnIdx = state.turns.findIndex((t) => t.turn.turn_id === node.turn_id);
+        if (node.kind === "typed_prompt" && turnIdx !== -1) {
+          state.turns[turnIdx] = { ...state.turns[turnIdx], prompt: node };
+          break;
+        }
+        if (node.kind === "result" && turnIdx !== -1) {
+          const results = state.turns[turnIdx].results.filter((n) => n.node_id !== node.node_id);
+          state.turns[turnIdx] = { ...state.turns[turnIdx], results: [...results, node] };
+          break;
+        }
+        // Everything else: upsert into this turn's content-children list
+        // (the same generic table fetchTurnBody's children() call reads).
+        const children = state.childrenByNodeId.get(node.turn_id) ?? [];
+        const idx = children.findIndex((n) => n.node_id === node.node_id);
+        const nextChildren = [...children];
+        if (idx === -1) nextChildren.push(node);
+        else nextChildren[idx] = node;
+        state.childrenByNodeId.set(node.turn_id, nextChildren);
+        // Also project onto live_turn_nodes for the LAST turn, matching
+        // fetchSnapshot's real contract (the last turn's body arrives via
+        // `live_turn_nodes`, not a children() round trip).
+        if (turnIdx === state.turns.length - 1) {
+          const liveIdx = state.liveTurnNodes.findIndex((n) => n.node_id === node.node_id);
+          const nextLive = [...state.liveTurnNodes];
+          if (liveIdx === -1) nextLive.push(node);
+          else nextLive[liveIdx] = node;
+          state.liveTurnNodes = nextLive;
+        }
+        break;
+      }
+      case "text_delta": {
+        const patchText = (n: NodeWire): NodeWire => {
+          if (n.node_id !== frame.node_id) return n;
+          const payload = (n.payload ?? {}) as Record<string, unknown>;
+          const text = typeof payload.text === "string" ? payload.text : "";
+          return { ...n, payload: { ...payload, text: text + frame.appended_text } };
+        };
+        state.liveTurnNodes = state.liveTurnNodes.map(patchText);
+        for (const [turnId, nodes] of state.childrenByNodeId) {
+          state.childrenByNodeId.set(turnId, nodes.map(patchText));
+        }
+        break;
+      }
+      case "node_status": {
+        const patchStatus = (n: NodeWire): NodeWire =>
+          n.node_id === frame.node_id ? { ...n, status: frame.status } : n;
+        state.liveTurnNodes = state.liveTurnNodes.map(patchStatus);
+        for (const [turnId, nodes] of state.childrenByNodeId) {
+          state.childrenByNodeId.set(turnId, nodes.map(patchStatus));
+        }
+        break;
+      }
+      case "run_upsert": {
+        const idx = state.runs.findIndex((r) => r.run_ref === frame.run.run_ref);
+        if (idx === -1) state.runs.push(frame.run);
+        else state.runs[idx] = frame.run;
+        break;
+      }
+      case "user_interaction_upsert": {
+        const idx = state.interactions.findIndex(
+          (i) => i.interaction_ref === frame.user_interaction.interaction_ref,
+        );
+        if (idx === -1) state.interactions.push(frame.user_interaction);
+        else state.interactions[idx] = frame.user_interaction;
+        break;
+      }
+      // turn_lifecycle/sidecar_upsert/session_state/notice: not modeled by
+      // this mock's REST snapshot shape (turn_lifecycle's phase/reason/
+      // usage isn't part of CompactTurnWire — the real backend derives it
+      // live-only; a snapshot refetch never carries it either, so there's
+      // nothing to project here).
+      default:
+        break;
     }
   }
 
@@ -666,7 +872,6 @@ export class MockBackend {
     // patch turns into a `window.setTimeout(send, 0)` POST to
     // /api/logs/frontend — a real timer with no unmount hook that can fire
     // during a LATER, unrelated test and pollute ITS fetch mock/call count.
-    if (method === "GET" && path === "/api/startup_tasks") return [];
     if (method === "GET" && path === "/api/extensions/app-settings") {
       return { sections: [] };
     }
@@ -1545,8 +1750,66 @@ export class MockBackend {
       if (this.state.installationProfile.setup_required) return setupGate();
       return this.runtimeProfilesSnapshot();
     }
+    // Closure 3 (ADR 0007 RuntimeProfile v2 parity): `useRuntimeProfiles.ts`
+    // now sources its cold-hydrate from this v2 route instead of the
+    // legacy one above — same underlying snapshot, reshaped onto
+    // `RuntimeProfilesSnapshotWire`'s field names
+    // (`runtime_profile_id`/`deleted_providers[].provider_id`).
+    if (method === "GET" && path === "/api/v2/surface/runtime-profiles") {
+      if (this.state.installationProfile.setup_required) return setupGate();
+      const legacy = this.runtimeProfilesSnapshot();
+      return {
+        kind: "ok",
+        profiles: legacy.runtime_profiles.map((p) => ({
+          runtime_profile_id: p.id,
+          provider_id: p.provider_id,
+          runner: p.runner,
+          default_model: p.default_model,
+          default_reasoning_effort: p.default_reasoning_effort || null,
+          name: p.name,
+          deleted_at: p.deleted_at,
+          created_at: p.created_at,
+          updated_at: p.updated_at,
+        })),
+        default_runtime_profile_id: legacy.default_runtime_profile_id,
+        last_models: legacy.last_models,
+        last_reasoning_efforts: legacy.last_reasoning_efforts,
+        deleted_providers: legacy.deleted_providers.map((d) => ({
+          provider_id: d.id,
+          name: d.name,
+          nickname: (d as { nickname?: string }).nickname ?? "",
+          kind: d.kind,
+          deleted_at: d.deleted_at,
+        })),
+      };
+    }
     if (method === "GET" && path === "/api/config") return this.state.config;
     if (method === "POST" && path === "/api/config") return { ok: true };
+    // `HarnessProfileSelector` (mounted inside `NewSessionModal`, gates its
+    // create button on this resolving) — mirrors
+    // `backend/harness_profiles_api.py::list_harness_profiles`'s always-
+    // present synthetic "default" entry. No suite currently needs to seed
+    // named profiles, so this stays a fixed always-empty-of-named-profiles
+    // response rather than a `BackendState` field.
+    if (method === "GET" && path === "/api/harness-profiles") {
+      return {
+        profiles: [{
+          id: "default",
+          name: "Default",
+          description: "The live harness state before any profile override is applied.",
+          revision: "",
+          base_profile_id: null,
+          base_profile_revision: null,
+          default_runtime_profile_id: null,
+          default_model: null,
+          default_reasoning_effort: null,
+          provisioning_prompt: null,
+          read_only: false,
+          source: "",
+          extension_id: "",
+        }],
+      };
+    }
     const traceMatch = path.match(/^\/api\/traces\/([^/]+)$/);
     if (traceMatch && method === "GET") {
       return this.state.traces[traceMatch[1]] ?? notFound();
@@ -1563,6 +1826,90 @@ export class MockBackend {
 
     if (method === "POST" && /^\/api\/sessions\/[^/]+\/project-suggestion$/.test(path))
       return { suggestion: this.state.projectSuggestion };
+
+    // Chat Surface Contract v2 (backend/adapter_api.py). ChatSurfaceView
+    // (native) fetches this unconditionally whenever ba.surface_native is
+    // on — which is every renderApp() test by default in production, but
+    // tests/setup.ts pins it OFF, so most suites never reach this route.
+    // A suite testing native chat content calls `h.seedSurface(sessionId,
+    // {...})` before selecting the session; an unseeded session id still
+    // gets the always-empty "ok" envelope (no turns/runs) so a stray fetch
+    // from a session that never opted into native content stays harmless.
+    const surfaceSnapshotMatch = path.match(/^\/api\/v2\/surface\/sessions\/([^/]+)\/snapshot$/);
+    if (surfaceSnapshotMatch && method === "GET") {
+      const sessionId = decodeURIComponent(surfaceSnapshotMatch[1]);
+      const seeded = this.state.surface.get(sessionId);
+      // Derived-then-explicit merge, keyed by interaction_ref: an explicit
+      // `h.seedSurface(sessionId, { interactions: [...] })` entry (raw wire
+      // shape, used by tests exercising kinds `userInputs` can't express —
+      // tool/worker approval, malformed shapes) wins over the auto-derived
+      // one for the same ref; every other pending `userInputs` row for this
+      // session is included automatically (see `toWireUserInteraction`).
+      const interactionsByRef = new Map<string, UserInteractionWire>();
+      for (const request of this.state.userInputs) {
+        if (request.status !== "pending" || request.app_session_id !== sessionId) continue;
+        const wire = toWireUserInteraction(request);
+        interactionsByRef.set(wire.interaction_ref, wire);
+      }
+      for (const wire of seeded?.interactions ?? []) interactionsByRef.set(wire.interaction_ref, wire);
+      const interactions = [...interactionsByRef.values()];
+      if (!seeded) {
+        return {
+          kind: "ok",
+          session_id: sessionId,
+          surface_id: sessionId,
+          instruction_widget: null,
+          turns: [],
+          live_turn_nodes: [],
+          runs: [],
+          interactions,
+          older_cursor: null,
+          snapshot_identity: { incarnation: "mock", render_rev: 0, hist_rev: 0 },
+        };
+      }
+      return {
+        kind: "ok",
+        session_id: sessionId,
+        surface_id: sessionId,
+        instruction_widget: seeded.instructionWidget,
+        turns: seeded.turns,
+        live_turn_nodes: seeded.liveTurnNodes,
+        runs: seeded.runs,
+        interactions,
+        older_cursor: seeded.olderCursor,
+        snapshot_identity: seeded.identity,
+      };
+    }
+    const surfaceChildrenMatch = path.match(
+      /^\/api\/v2\/surface\/sessions\/([^/]+)\/nodes\/([^/]+)\/children$/,
+    );
+    if (surfaceChildrenMatch && method === "GET") {
+      const sessionId = decodeURIComponent(surfaceChildrenMatch[1]);
+      const nodeId = decodeURIComponent(surfaceChildrenMatch[2]);
+      const seeded = this.state.surface.get(sessionId);
+      const identity = seeded?.identity ?? { incarnation: "mock", render_rev: 0, hist_rev: 0 };
+      return {
+        kind: "ok",
+        value: seeded?.childrenByNodeId.get(nodeId) ?? [],
+        snapshot_identity: identity,
+      };
+    }
+    const surfaceOlderMatch = path.match(/^\/api\/v2\/surface\/sessions\/([^/]+)\/older$/);
+    if (surfaceOlderMatch && method === "GET") {
+      const sessionId = decodeURIComponent(surfaceOlderMatch[1]);
+      const seeded = this.state.surface.get(sessionId);
+      const identity = seeded?.identity ?? { incarnation: "mock", render_rev: 0, hist_rev: 0 };
+      // A suite seeds a page via `seedSurface(id, { olderPage: {...} })`;
+      // absent that, every session reports no older page (MVP default).
+      const page = seeded?.olderPage;
+      return {
+        kind: "ok",
+        turns: page?.turns ?? [],
+        runs: page?.runs ?? [],
+        older_cursor: page?.olderCursor ?? null,
+        snapshot_identity: identity,
+      };
+    }
 
     throw new Error(`MockBackend: unhandled ${method} ${path}`);
   }

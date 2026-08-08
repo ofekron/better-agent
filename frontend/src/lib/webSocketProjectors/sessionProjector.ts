@@ -326,7 +326,8 @@ export function projectSessionEvent(
   }
   if (event.type === "workers_changed") callbacks.onWorkersChanged?.();
   if (event.type === "session_organization_changed") callbacks.onSessionOrganizationChanged?.();
-  if (event.type === "project_mappings_changed") callbacks.onProjectMappingsChanged?.();
+  // `project_mappings_changed` deleted (confirmed dead code, ADR 0008
+  // Package B plan §1) — see types.ts's WSEvent union note.
 
   return {};
 }

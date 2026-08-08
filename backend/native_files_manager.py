@@ -240,6 +240,7 @@ class NativeFilesManager:
             "native_files_fork_target",
             "native_files_processed",
             "native_files_demand",
+            "native_files_running_changed",
         ):
             bus.unsubscribe(name)
         bus.subscribe(
@@ -255,6 +256,10 @@ class NativeFilesManager:
         )
         bus.subscribe(
             "native_files.demand", self._on_demand, name="native_files_demand",
+        )
+        bus.subscribe(
+            "session.running_changed", self._on_running_changed,
+            name="native_files_running_changed",
         )
         logger.info("native_files: bound supply + demand subscribers")
 
@@ -380,6 +385,20 @@ class NativeFilesManager:
                 continue
             if sid == owning or sid == tgt.fork_agent_session_id:
                 tgt.start_offset = max(tgt.start_offset, int(n))
+
+    # ── in-flight-turn guard resweep ────────────────────────────────────
+    async def _on_running_changed(self, event: BusEvent) -> None:
+        """A session's active-run state flipped. `_reconcile_locked`'s
+        close loop defers stopping a tailer whose demand already hit zero
+        while `session_manager.is_running(owning)` is still True (see
+        there) — only a transition to NOT running can newly satisfy that
+        deferred close. Re-running reconcile here is what sweeps it,
+        instead of leaking the tailer open until some unrelated demand
+        fact happens to fire again."""
+        payload = event.payload or {}
+        if payload.get("value") is not False:
+            return
+        await self._reconcile()
 
     # ── demand fold ───────────────────────────────────────────────────
     async def _on_demand(self, event: BusEvent) -> None:
@@ -747,11 +766,21 @@ class NativeFilesManager:
                 persist=False,
             ))
 
-        # Close what is running but no longer demanded.
+        # Close what is running but no longer demanded. An in-flight
+        # turn's tailer must survive transient demand loss (e.g. a WS
+        # reconnect loop briefly dropping every subscriber) — stopping it
+        # mid-turn starves the journal that /ws/v2/surface reads from for
+        # the remainder of the turn. Defer the close while the owning
+        # session is still running; `_on_running_changed` re-triggers
+        # reconcile the instant the run ends, so a target whose demand
+        # never comes back still gets swept (no leak, no timer).
         for key in list(self._tailers):
             if key in desired:
                 continue
-            owned = self._tailers.pop(key)
+            owned = self._tailers[key]
+            if session_manager.is_running(owned.app_session_id):
+                continue
+            self._tailers.pop(key)
             stop_task = owned.release()
             await bus.publish(BusEvent(
                 type="native_files.tailing_closed",

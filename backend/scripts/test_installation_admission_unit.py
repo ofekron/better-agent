@@ -63,7 +63,6 @@ P = installation_profile.PROVIDER_CONVERSATIONS
         ({"type": "http", "path": "/api/installation-profile"}, B),
         ({"type": "http", "path": "/api/auth/callback"}, B),
         ({"type": "http", "path": "/api/desktop/whatever"}, B),
-        ({"type": "http", "path": "/api/startup_tasks"}, B),
         # capability-toggle endpoint stays reachable while the capability is off
         ({"type": "http", "path": "/api/installation-profile/capabilities/mobile"}, B),
         # mobile

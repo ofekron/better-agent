@@ -735,6 +735,67 @@ except Exception:
 from native_files_manager import native_files
 native_files.bind()
 
+
+def _wire_surface_adapter() -> None:
+    """Compose the Chat Surface Contract adapter (ADR 0006) onto its
+    versioned transport (backend/adapter_api.py).
+
+    The bare<->dotted infra-singleton aliasing this used to perform inline
+    now lives in backend/adapters/__init__.py itself (see that module's
+    docstring): it is self-canonicalizing, firing for every importer of
+    backend.adapters rather than only callers that run after this
+    function — so it belongs to the package, not the composition root.
+    All that is left here is resolving the `backend` namespace package
+    (needed before the first `backend.*` import below can succeed at all)
+    and the actual composition-root wiring.
+    """
+    import importlib
+    import sys
+    import types
+    from pathlib import Path
+
+    if "backend" not in sys.modules:
+        try:
+            importlib.import_module("backend")
+        except ImportError:
+            backend_pkg = types.ModuleType("backend")
+            backend_pkg.__path__ = [str(Path(__file__).resolve().parent)]
+            sys.modules["backend"] = backend_pkg
+
+    from backend.adapters import build_adapter
+    import adapter_api
+    import session_commands
+    import surface_commands
+    import system_commands
+
+    command_port = surface_commands.build_chat_command_port(coordinator=coordinator)
+    # Same `_delete_session_tree` capability `session_listing_api.configure()`
+    # receives above (lines 454/700) — one cascade-deletion implementation,
+    # reused by delete_folder's `delete_sessions` mode.
+    session_command_port = session_commands.build_session_command_port(
+        delete_session_tree=lambda sid: _delete_session_tree(sid),
+    )
+    system_command_port = system_commands.build_system_command_port()
+    surface_adapter = build_adapter(
+        command_port=command_port,
+        session_command_port=session_command_port,
+        system_command_port=system_command_port,
+    )
+    adapter_api.configure(surface_adapter)
+    app.include_router(adapter_api.router)
+
+
+_wire_surface_adapter()
+
+# Phase G: proxy-fed model-traffic thread facts (parallel, flag-gated path
+# — see backend/traffic_facts_api.py's module docstring). Mounted only
+# when BA_SURFACE_TRAFFIC_SOURCE is on, so with it off the route doesn't
+# exist at all, same shape as the node_link conditional mount below.
+import traffic_facts_api
+
+if traffic_facts_api.feature_enabled():
+    app.include_router(traffic_facts_api.router)
+
 # Working-mode owners subscribe to `session.parent_deleted` and route by
 # `working_mode`; cascade-delete only publishes the fact.
 import working_mode as _working_mode_mod

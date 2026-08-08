@@ -7,6 +7,11 @@ import {
 
 const BASE_CORE_PAYLOAD_CASES = [
   {
+    type: "background_work_changed",
+    valid: { epoch: "epoch-1", cleared: true },
+    invalid: { cleared: true },
+  },
+  {
     type: "messages_replay",
     valid: { app_session_id: "session-a", messages: [] },
     invalid: { app_session_id: "session-a", messages: "not-an-array" },
@@ -102,11 +107,6 @@ const BASE_CORE_PAYLOAD_CASES = [
     type: "queue_consumed",
     valid: { app_session_id: "session-a", queued_id: null },
     invalid: { app_session_id: "session-a", queued_id: 7 },
-  },
-  {
-    type: "session_running_changed",
-    valid: { session_id: "session-a", value: false },
-    invalid: { session_id: "session-a", value: 0 },
   },
   {
     type: "session_unread_changed",
@@ -247,7 +247,6 @@ const NO_FIELD_CORE_TYPES = [
   "projects_changed",
   "workers_changed",
   "session_organization_changed",
-  "project_mappings_changed",
   "user_prefs_changed",
   "credential_consent_changed",
   "provider_changed",
@@ -531,9 +530,27 @@ describe("parseWireEvent", () => {
   });
 
   it("keeps registry proof complete", () => {
-    expect(CORE_PAYLOAD_CASES.map(({ type }) => type).sort()).toEqual(
+    // A wire type may appear more than once here to cover multiple valid
+    // payload shapes (e.g. "background_work_changed" has both a "cleared"
+    // and an "item upsert" case) — dedupe before comparing against the
+    // registry, which has exactly one validator per type.
+    expect([...new Set(CORE_PAYLOAD_CASES.map(({ type }) => type))].sort()).toEqual(
       Object.keys(knownCoreEventValidators).sort(),
     );
+  });
+
+  it("treats the frontend-synthesized failure type as unprojected/opaque", () => {
+    // Chat Surface Contract v2 FAILURE node (mapToRenderModel.ts) —
+    // no backend WS emit site ever produces a raw `{"type":"failure"}`
+    // wire frame, so it must never require a payload validator (same
+    // category as "diagnostic"/"lifecycle_notice"/"tool_result"/
+    // "pr_link"). Regression guard for TS2741/TS1360: knownCoreEvent
+    // Validators missing the "failure" key after WSEventType grew it.
+    expect(knownCoreEventValidators).not.toHaveProperty("failure");
+    expect(parseWireEvent({ type: "failure", data: { anything: "goes" } })).toEqual({
+      ok: true,
+      event: { type: "failure", data: { anything: "goes" } },
+    });
   });
 
   it.each(CORE_PAYLOAD_CASES)("accepts a valid $type core payload", ({ type, valid }) => {

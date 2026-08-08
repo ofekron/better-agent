@@ -5,6 +5,7 @@ import { afterEach } from "vitest";
 import App from "../../src/App";
 import { loadBuiltinExtensionIds } from "../../src/extensionIds";
 import type { Session, WSEvent } from "../../src/types";
+import type { ChatFrame } from "../../src/adapter/wire";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
 import { extractView, type AppView } from "./view";
@@ -36,6 +37,26 @@ export interface Harness {
   emit(event: WSEvent): void;
   /** Push many WS events in sequence. */
   emitMany(events: WSEvent[]): void;
+  /** Pre-populate a session's native Contract-Node surface mock state
+   *  (served by GET /api/v2/surface/sessions/:id/{snapshot,nodes/*
+   *  /children,older}) — see MockBackend.seedSurface. Call before
+   *  `selectSession`/mounting ChatSurfaceView so its initial fetchSnapshot
+   *  sees the seeded content instead of the always-empty default. */
+  seedSurface(sessionId: string, partial: Parameters<MockBackend["seedSurface"]>[1]): void;
+  /** Push one live `/ws/v2/surface` ChatFrame into the app AND project it
+   *  onto the mock's surface state (mirrors `emit`'s applyWsEvent
+   *  pairing) — targets the native socket specifically via
+   *  MockWebSocketController.emitTo, since a legacy `/ws/chat` socket may
+   *  also be open concurrently in the same test. */
+  emitSurface(sessionId: string, frame: ChatFrame): void;
+  /** Delivers a raw message onto the native `/ws/v2/surface` socket
+   *  WITHOUT touching MockBackend's surface projection state — for wire
+   *  shapes outside the `ChatFrame` union (e.g. the command plane's
+   *  IntentAccepted/IntentRejected acks, adapter/wire.ts's
+   *  TransportAckFrame — no `snapshot`/`cv`, never part of surface state).
+   *  `emitSurface` above remains the right call for anything that IS a
+   *  ChatFrame. */
+  emitSurfaceRaw(raw: unknown): void;
   /** Emit `session_monitoring_changed` — the backend-owned source of truth
    * for the Running dimension (docs/session-states.md). In production the
    * monitoring loop announces active/stopped alongside `run_state`, so tests
@@ -63,9 +84,9 @@ export interface Harness {
   denyCredential(consentId: string): Promise<void>;
   /** Direct backend state — useful for in-test seeding/inspection. */
   readonly backend: MockBackend;
-  /** Drop the WS connection (exercises reconnect path). */
+  /** Drop the legacy `/ws/chat` connection (exercises reconnect path). */
   dropConnection(): void;
-  /** Re-open the current WS immediately. */
+  /** Re-open the legacy `/ws/chat` connection immediately. */
   reopenConnection(): void;
   /** Force a microtask + timer flush so React effects settle. */
   flush(): Promise<void>;
@@ -167,11 +188,32 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     },
     emit: (event) => {
       backend.applyWsEvent(event);
-      wsController.emit(event);
+      // Targeted, not `wsController.emit` (last-created-socket) — a
+      // concurrent `/ws/v2/surface` feed connection (interactionResolveSocket,
+      // systemFeedRegistry, runSummaryRegistry, ...) may already be open
+      // alongside the legacy `/ws/chat` socket a legacy `WSEvent` belongs
+      // on, and "last created" is not necessarily `/ws/chat` (see
+      // MockWebSocketController.getCurrentByUrl's own docstring).
+      wsController.emitTo("/ws/chat", event);
     },
     emitMany: (events) => {
       for (const event of events) backend.applyWsEvent(event);
-      wsController.emitMany(events);
+      wsController.emitManyTo("/ws/chat", events);
+    },
+    seedSurface: (sessionId, partial) => backend.seedSurface(sessionId, partial),
+    emitSurface: (sessionId, frame) => {
+      backend.applySurfaceFrame(sessionId, frame);
+      // Targeted by surface_id, not `emitTo("/ws/v2/surface", ...)`
+      // (last-created-matching-URL) — once a feed-only registry (e.g.
+      // `runSummaryRegistry`'s "runs" feed, opened lazily the moment a
+      // live RunningIndicator resolves a kind) also opens a `/ws/v2/
+      // surface` connection, a bare URL match can no longer tell it apart
+      // from the chat-content SurfaceStore's own socket. See
+      // MockWebSocketController.emitToSurface's own docstring.
+      wsController.emitToSurface(sessionId, frame);
+    },
+    emitSurfaceRaw: (raw) => {
+      wsController.emitTo("/ws/v2/surface", raw);
     },
     setMonitoring: (sessionId, state) => {
       const event = {
@@ -179,7 +221,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
         data: { session_id: sessionId, monitoring_state: state },
       } as WSEvent;
       backend.applyWsEvent(event);
-      wsController.emit(event);
+      wsController.emitTo("/ws/chat", event);
     },
     typeAndSend: async (text: string) => {
       const ta = result.container.querySelector(
@@ -255,8 +297,12 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     backend,
-    dropConnection: () => wsController.closeCurrent(),
-    reopenConnection: () => wsController.reopenCurrent(),
+    // Targeted, not `wsController.closeCurrent`/`reopenCurrent` (last-
+    // created-socket) — see `emit`'s own comment above on why "last
+    // created" is not necessarily `/ws/chat` once a concurrent
+    // `/ws/v2/surface` feed connection is also open.
+    dropConnection: () => wsController.closeCurrentByUrl("/ws/chat"),
+    reopenConnection: () => wsController.reopenCurrentByUrl("/ws/chat"),
     flush: flushAll,
     waitFor: async (predicate: () => boolean, timeoutMs = 300) => {
       const deadline = Date.now() + timeoutMs;

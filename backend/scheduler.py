@@ -15,6 +15,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+from event_bus import BusEvent, bus
 from session_manager import manager as session_manager
 from stores import schedule_store
 from stores import task_trigger_store
@@ -50,6 +51,18 @@ async def broadcast_schedules(coordinator, app_session_id: str) -> None:
         await coordinator.broadcast_global("schedules_changed", {})
     except Exception:
         logger.debug("schedules_changed broadcast failed", exc_info=True)
+    # ADR 0011 §6 fact for backend/adapters/system_adapter.py's
+    # `ScheduleSummary` live push (upsert + removed-diff, computed
+    # adapter-side from a fresh `list_schedule_records` re-read).
+    try:
+        await bus.publish(BusEvent(
+            type="schedule.fire.changed",
+            root_id=app_session_id or "system", sid=app_session_id or "system",
+            payload={"app_session_id": app_session_id},
+            persist=False,
+        ))
+    except Exception:
+        logger.debug("schedule.fire.changed publish failed", exc_info=True)
 
 
 class Scheduler:

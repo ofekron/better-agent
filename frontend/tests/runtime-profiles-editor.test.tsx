@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 import { SettingsPage } from "../src/components/SettingsPage";
+import { toRuntimeProfilesSnapshotEnvelope } from "./fixtures";
+import type { RuntimeProfilesSnapshot } from "../src/types";
 
 // Locks the C3 management section: profile rail with default + tombstone
 // badges, name/defaults edits via PATCH, Activate via the profile activate
@@ -88,7 +90,7 @@ const snapshot = {
   ],
   last_models: {},
   last_reasoning_efforts: {},
-};
+} satisfies RuntimeProfilesSnapshot;
 
 function mockFetch() {
   return vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
@@ -119,6 +121,9 @@ function mockFetch() {
     }
     if (url.match(/\/api\/runtime-profiles\/[^/]+$/) && method === "DELETE") {
       return response({ deleted: true });
+    }
+    if (url.includes("/api/v2/surface/runtime-profiles")) {
+      return response(toRuntimeProfilesSnapshotEnvelope(snapshot));
     }
     if (url.includes("/api/runtime-profiles")) return response(snapshot);
     if (url.includes("/api/providers")) {

@@ -757,6 +757,28 @@ class SessionManager:
             )
             # Fire-and-forget; subscribers run after the lock releases.
             self.schedule_on_bound_loop(bus.publish(ev))
+        # Owner-side fact — additive, uniform "a _fire happened" signal in
+        # the `session.fire.*` namespace, distinct from the `session.<kind>`
+        # WS-broadcaster-consumed event published above. Uses
+        # `publish_threadsafe` (not `bus.publish`/`schedule_on_bound_loop`)
+        # so it fires even when no loop is bound yet (some unit-test /
+        # early-startup contexts call `_fire` before `bind_loop`).
+        # Exception-isolated: a bus/subscriber failure must never break
+        # session mutation, and a no-subscriber-match publish is O(1)
+        # beyond the call itself.
+        try:
+            root_id = self._node_root_id.get(sid, sid)
+            bus.publish_threadsafe(BusEvent(
+                type=f"session.fire.{change.get('kind') or 'unknown'}",
+                root_id=root_id,
+                sid=sid,
+                payload=dict(change),
+                persist=False,
+            ))
+        except Exception:
+            logger.exception(
+                "session.fire.* bus publish failed: %s", change.get("kind"),
+            )
         # Legacy listener fan-out — kept for the deprecation window.
         for fn in list(self._listeners):
             try:
@@ -4840,11 +4862,18 @@ class SessionManager:
             # `deleted_sids` carries the whole removed subtree (the target
             # plus every descendant fork) so projections that key off session
             # ids — e.g. the ui_selection open-tab list — can prune all of
-            # them, not just the root of the delete.
+            # them, not just the root of the delete. `root_id` is `rid`
+            # taken directly from this call's own parameter, NOT derived
+            # from `self._node_root_id` (which is already popped for every
+            # id in `deleted_sids`, `sid` included, by the loop right
+            # above) — a subscriber that needs to know which SURVIVING root
+            # a fork-only deletion belongs to (`sid != rid`) has no other
+            # reliable way to learn it once this fires.
             self._fire(sid, {
                 "kind": "deleted",
                 "deleted_sids": deleted_sids,
                 "deleted_incarnations": deleted_incarnations,
+                "root_id": rid,
             })
         return True, revocations
 

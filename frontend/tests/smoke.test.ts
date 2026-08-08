@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeOperatorMsg, makeSession, makeUserMsg } from "./fixtures";
+import { promptNode, assistantTextNode } from "./surface/fixtures";
 
 describe("harness smoke", () => {
   it("boots with a seeded session and lists it in the sidebar", async () => {
@@ -119,67 +120,66 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
-  it("send → messages_replay populates the chat (new architecture)", async () => {
-    const session = makeSession();
+  it("native surface: send confirms via typed_prompt + assistant_text node_upsert frames", async () => {
+    // Native send (Phase I stage 2c): the composer routes through
+    // SurfaceStore.sendPrompt over `/ws/v2/surface` — a provisional
+    // "sending" typed_prompt appears IMMEDIATELY (ChatSurfaceView's own
+    // optimistic echo, tests/surface/nativeSend.test.tsx covers this
+    // mechanism in isolation); it is replaced in place, not appended
+    // alongside, once the backend's confirmed node arrives carrying the
+    // SAME intent_id `sendPrompt` generated (see fixtures.ts's `promptNode`
+    // trailing `intentId` param).
+    localStorage.setItem("ba.surface_native", "1");
+    const session = makeSession({ id: "sess-send", messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    let view = h.toJSON();
-    expect(view.chat.visible).toBe(true);
-    expect(view.input.disabled).toBe(false);
+    await h.selectSession("sess-send");
+    await h.waitFor(() => h.$('[data-testid="surface-chat-view"]') !== null);
 
     await h.typeAndSend("hello");
 
-    expect(h.outbound.find((f) => f.type === "send_message")).toMatchObject({
-      type: "send_message",
-      prompt: "hello",
-      app_session_id: session.id,
-      orchestration_mode: "native",
-      client_id: expect.stringMatching(/^pending-/),
-    });
-    view = h.toJSON();
-    expect(
-      view.chat.messages.some((m) => m.role === "user" && m.status === "sending"),
-    ).toBe(true);
+    const sent = (h.outbound as { intent?: { kind?: string; intent_id?: string; text?: string; session_id?: string } }[])
+      .find((f) => f.intent?.kind === "send_prompt");
+    expect(sent).toMatchObject({ intent: { kind: "send_prompt", text: "hello", session_id: "sess-send" } });
+    const intentId = sent!.intent!.intent_id!;
 
-    // Backend echoes the canonical user_message with client_id, then sends
-    // messages_replay carrying the freshly-persisted assistant message.
-    const sentFrame = h.outbound.find((f) => f.type === "send_message")!;
-    const clientId = sentFrame.client_id as string;
-    const userMsg = makeUserMsg({
-      id: "u1",
-      content: "hello",
-      client_id: clientId,
-      seq: 0,
+    // The optimistic provisional turn is already visible, pre-confirmation.
+    expect(h.$('[data-testid="surface-turn"]')).not.toBeNull();
+    expect(h.$('[data-testid="surface-prompt-status"]')?.className).toContain("status-sending");
+
+    h.emitSurface("sess-send", {
+      type: "node_upsert",
+      cv: 1,
+      surface_id: "sess-send",
+      snapshot: { incarnation: "mock", render_rev: 1, hist_rev: 0 },
+      node: promptNode("t1", "hello", "sess-send", intentId),
     });
-    const assistantMsg = makeAssistantMsg({
-      id: "a1",
-      content: "hi there",
-      seq: 1,
+    // A turn born entirely from live frames (never present at hydrate, so
+    // never eager-seeded) is live, which makes TurnView's useChildren fire
+    // an on-demand `ensureChildren` REST fetch for its body the moment it
+    // mounts (surface/useChildren.ts) — delivered here back-to-back with no
+    // wait, so that fetch's response is guaranteed to still be in flight
+    // when this live node_upsert lands. `SurfaceStore.setChildrenTable`
+    // merges a late-resolving fetch response by node identity/cv instead of
+    // replacing the table wholesale, so the assistant text below must
+    // survive regardless of which one resolves last (regression coverage
+    // for the ensureChildren-vs-live-upsert clobber race).
+    h.emitSurface("sess-send", {
+      type: "node_upsert",
+      cv: 2,
+      surface_id: "sess-send",
+      snapshot: { incarnation: "mock", render_rev: 2, hist_rev: 0 },
+      node: assistantTextNode("t1", "a1", "hi there", "turn:t1"),
     });
 
-    h.emit({
-      type: "user_message_persisted",
-      data: { session_id: session.id, user_message: userMsg },
+    await h.waitFor(() => {
+      const el = h.$('[data-testid="surface-assistant-text"]');
+      return !!el && (el.textContent ?? "").includes("hi there");
     });
-    h.emit({
-      type: "messages_replay",
-      data: { app_session_id: session.id, messages: [userMsg, assistantMsg] },
-    });
-    h.emit({ type: "turn_complete", data: { session_id: session.id, success: true } });
-    await h.flush();
-    // Completed turns default to collapsed; expand to see the assistant.
-    await h.expandTurn("u1");
 
-    view = h.toJSON();
-    expect(view.chat.messages.find((m) => m.id === "u1")?.role).toBe("user");
-    const assistant = view.chat.messages.find((m) => m.id === "a1");
-    expect(assistant?.role).toBe("assistant");
-    expect(assistant?.text).toContain("hi there");
-    // Optimistic pending was matched and removed by client_id.
-    expect(
-      view.chat.messages.some((m) => m.role === "user" && m.status === "sending"),
-    ).toBe(false);
+    // Reconciled in place — one turn, no leftover "sending" chrome.
+    expect(h.$$('[data-testid="surface-turn"]').length).toBe(1);
+    expect(h.$('[data-testid="surface-prompt-status"]')).toBeNull();
+    expect(h.$('[data-testid="surface-typed-prompt"]')?.textContent).toContain("hello");
     h.unmount();
   });
 
@@ -329,34 +329,14 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
-  it("native-mode session does not show the manager-scope chip", async () => {
-    const session = makeSession({ id: "sess-native", orchestration_mode: "native" });
-    const userMsg = makeUserMsg({ id: "un", content: "hi" });
-    // Native mode: assistantMessage carries no `manager` field.
-    const assistantMsg = makeAssistantMsg({
-      id: "an",
-      content: "ok",
-      manager: undefined,
-    });
-    session.messages = [userMsg, assistantMsg];
-    session.native_claude_session_id = "claude-sid-1";
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    await h.flush();
-    // Completed turns default to collapsed; expand to see the assistant.
-    await h.expandTurn("un");
-
-    const view = h.toJSON();
-    expect(view.chat.messages.map((m) => m.id)).toEqual(["un", "an"]);
-    // Manager-scope wrapper renders a "Manager" chip; native mode must not.
-    const container = h.raw.container as HTMLElement;
-    expect(container.querySelector(".manager-scope")).toBeNull();
-    expect(container.querySelector(".role-label-manager")).toBeNull();
-    // The workers panel only renders in manager mode + cwd present.
-    expect(view.sidebar.workersPanelVisible).toBe(false);
-
-    h.unmount();
-  });
+  // The legacy "native-mode session does not show the manager-scope chip"
+  // case is DELETED, not ported — it asserted the ABSENCE of legacy
+  // MessageBubble/TurnGroup markup (`.manager-scope`, `.role-label-
+  // manager`). Under `ba.surface_native`, ChatSurfaceView replaces that
+  // whole render tree; no session, in any orchestration_mode, ever
+  // produces those classes there. There is no native manager-scope
+  // concept to test the absence of (see grep across src/surface/ — zero
+  // hits), so porting the assertion would be vacuously true by construction.
 
   it("workers_changed WS event triggers a refetch of /api/workers", async () => {
     const session = makeSession();

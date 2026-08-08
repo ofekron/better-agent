@@ -69,7 +69,8 @@ def _unsubscribe(handler) -> None:
 # ---------------------------------------------------------------------------
 def test_textual_check_no_other_bus_publish_in_module() -> None:
     """Per-file bus.publish funnels after the UPM split:
-      turn_manager.py: 3 (start + user terminal + worker terminal funnels)
+      turn_manager.py: 5 (start + user terminal + worker terminal +
+        prompt_meta + turn_error_meta funnels)
       user_prompt_manager.py: 1 (user lifecycle funnel)
     Each file's count locks down exactly-one-funnel-per-responsibility.
     """
@@ -81,11 +82,13 @@ def test_textual_check_no_other_bus_publish_in_module() -> None:
     assert "_publish_terminal_lifecycle" in tm_src
     # Count actual call sites (`bus.publish(`), not docstring mentions.
     n_tm = tm_src.count("bus.publish(")
-    assert n_tm == 3, (
-        f"expected exactly 3 `bus.publish` calls in turn_manager.py "
-        f"(inside lifecycle funnels), got {n_tm} — "
+    assert n_tm == 5, (
+        f"expected exactly 5 `bus.publish` calls in turn_manager.py "
+        f"(lifecycle funnels + _publish_prompt_meta + "
+        f"_publish_turn_error_meta), got {n_tm} — "
         f"an unexpected emit site exists"
     )
+    assert "_publish_prompt_meta" in tm_src
     # Defeat alias-based evasion of the runtime spy.
     assert "= bus.publish" not in tm_src
     assert "from event_bus import publish" not in tm_src
@@ -282,6 +285,56 @@ def test_publish_terminal_emits_exactly_once_complete() -> None:
             events[0].payload.get("assistant_message_id")
             == "assistant-message"
         )
+    finally:
+        _unsubscribe(h)
+
+
+def test_publish_terminal_carries_usage_dict_when_given() -> None:
+    """`usage` (Item 4) — when a call site sources it from
+    `extract_provider_result_token_usage(primary_result)` — is forwarded
+    verbatim onto the bus event's payload, closed-set (omitted, never a
+    null placeholder, when absent)."""
+    captured, h = _subscribe_capture("tm-test-usage")
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_terminal_lifecycle(
+            "complete",
+            app_session_id="sid-usage",
+            user_turn_id="user-turn",
+            execution_turn_id="execution-turn",
+            lifecycle_message_id="lifecycle-message",
+            assistant_message_id="assistant-message",
+            reason="success",
+            usage={
+                "input_tokens": 100, "output_tokens": 40,
+                "cache_creation_input_tokens": 5, "cache_read_input_tokens": 12,
+            },
+        ))
+        events = [e for e in captured if e.sid == "sid-usage"]
+        assert len(events) == 1
+        assert events[0].payload.get("usage") == {
+            "input_tokens": 100, "output_tokens": 40,
+            "cache_creation_input_tokens": 5, "cache_read_input_tokens": 12,
+        }
+    finally:
+        _unsubscribe(h)
+
+
+def test_publish_terminal_omits_usage_key_when_none() -> None:
+    captured, h = _subscribe_capture("tm-test-usage-none")
+    try:
+        tm = TurnManager(_StubCoordinator())
+        asyncio.run(tm._publish_terminal_lifecycle(
+            "complete",
+            app_session_id="sid-usage-none",
+            user_turn_id="user-turn",
+            execution_turn_id="execution-turn",
+            lifecycle_message_id="lifecycle-message",
+            assistant_message_id="assistant-message",
+            reason="success",
+        ))
+        events = [e for e in captured if e.sid == "sid-usage-none"]
+        assert "usage" not in events[0].payload
     finally:
         _unsubscribe(h)
 
@@ -677,6 +730,8 @@ if __name__ == "__main__":
     test_run_turn_records_provider_result_before_user_done()
     test_runtime_spy_bus_publish_only_through_helper()
     test_publish_terminal_emits_exactly_once_complete()
+    test_publish_terminal_carries_usage_dict_when_given()
+    test_publish_terminal_omits_usage_key_when_none()
     test_turn_lifecycle_helpers_require_complete_identity()
     test_publish_turn_start_emits_lifecycle_start()
     test_worker_terminal_is_distinct_from_parent_turn_terminal()

@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
+from event_bus import BusEvent, bus
 from stores import node_provider_credential_grants as grants
 
 
@@ -166,6 +167,17 @@ async def _emit(node_id: str) -> None:
                 "node provider credential status listener failed for %s",
                 node_id,
             )
+    # ADR 0011 §9 fact for backend/adapters/system_adapter.py's
+    # `NodeProviderCredentialStatus` live push.
+    try:
+        await bus.publish(BusEvent(
+            type="machines.fire.credential_changed",
+            root_id=node_id or "system", sid=node_id or "system",
+            payload={"node_id": node_id},
+            persist=False,
+        ))
+    except Exception:
+        logger.exception("machines.fire.credential_changed publish failed for %s", node_id)
 
 
 def _assert_secure_transport(node_id: str, expected_connection=None):

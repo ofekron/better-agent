@@ -115,7 +115,7 @@ def _sdk_cache_payload_root(
     resolved_root = resolved_roots.pop()
     fingerprint = resolved_root.parent.name
     try:
-        cache_root = sdk_launch_cache_root().resolve(strict=True)
+        cache_root = sdk_launch_cache_root()
         payload_root_resolved = payload_root.resolve(strict=True)
     except OSError as exc:
         _fail("payload root is unavailable", exc)

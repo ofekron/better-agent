@@ -6,6 +6,7 @@ import {
   setOpenSessionTabIds,
   setSelectedProject,
 } from "../src/utils/uiSelection";
+import { flushWriteBacklog } from "../src/utils/writeBacklog";
 import i18n from "../src/i18n";
 
 async function waitFor(
@@ -26,7 +27,7 @@ function tabIds(h: Awaited<ReturnType<typeof renderApp>>): string[] {
 }
 
 describe("session tabs with paged sessions", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     vi.stubGlobal(
       "fetch",
@@ -34,6 +35,14 @@ describe("session tabs with paged sessions", () => {
     );
     setSelectedProject("", "primary");
     setOpenSessionTabIds([]);
+    // `writeBacklog`'s `backlog`/`inflight` are module-level singletons —
+    // without draining here, the write-through sweep these two calls just
+    // queued keeps running (unawaited) into the NEXT test's window. If that
+    // next test also queues a write while this stale sweep still holds
+    // `inflight`, `flushWriteBacklog()` returns the stale promise instead of
+    // starting a fresh sweep, so the next test's own write silently misses
+    // its assertion window (test pollution, not a product bug).
+    await flushWriteBacklog();
     vi.unstubAllGlobals();
     localStorage.removeItem("better-agent-open-session-ids");
     localStorage.removeItem("better-agent-open-session-joined-at");
@@ -392,7 +401,15 @@ describe("session tabs with paged sessions", () => {
       cwd: "/tmp/project-a",
       last_opened_at: "2026-01-01T00:00:00.000Z",
     });
-    setOpenSessionTabIds([session.id]);
+    // Seed via localStorage directly (not `setOpenSessionTabIds()`) — the
+    // setter queues a real write-through PATCH, and calling it before
+    // `renderApp()` installs the mock backend sends that write out over
+    // the real (unmocked) `fetch`. Matches every other pre-render tab-list
+    // seed in this file (see "hydrates saved tab sessions...").
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([session.id]),
+    );
     const h = await renderApp({ seed: { sessions: [session] } });
 
     expect(
@@ -1152,7 +1169,15 @@ describe("session tabs with paged sessions", () => {
       cwd: "/tmp/project-a",
       last_opened_at: "2026-01-01T00:00:00.000Z",
     });
-    setOpenSessionTabIds([existing.id]);
+    // Seed via localStorage directly (not `setOpenSessionTabIds()`) — the
+    // setter queues a real write-through PATCH, and calling it before
+    // `renderApp()` installs the mock backend sends that write out over
+    // the real (unmocked) `fetch`, racing this test's own later PATCH
+    // assertion. Matches every other pre-render tab-list seed in this file.
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([existing.id]),
+    );
     const h = await renderApp({
       seed: {
         sessions: [existing],

@@ -1,11 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Provider, ReasoningEffort, Permission } from "../types";
-import {
-  availableModesForForm,
-  apiEnvCopyForKind,
-  showConfigDirForKind,
-} from "./providerFormShape";
+import type { FormFieldWire } from "../adapter/wire";
+import { fieldHintKey, fieldLabelKey, fieldPlaceholderKey, modesFromSchema, schemaHasField } from "./providerFormFields";
 import { Select } from "./Select";
 import Icon from "./Icon";
 
@@ -13,6 +10,17 @@ import Icon from "./Icon";
 // Provider ACCOUNT templates + creation/edit form (auth-shaped). Execution
 // selection (runner, default model/effort) lives on runtime profiles — see
 // RuntimeProfileWizard / RuntimeProfilesEditor.
+//
+// Descriptor-driven per ADR 0007 (Package D): the installable-kind catalog
+// (id/label/defaults/allowed-mode/field-presence data) comes from the
+// backend's `GET /api/v2/surface/providers/installable` — see
+// `frontend/src/hooks/useInstallableProviders.ts`, the ONE source of
+// `Template[]` now (the static `TEMPLATES` array + `providerFormShape.ts`'s
+// per-kind mode-restriction/field-visibility tables that used to live here
+// are deleted). `default_permission`/per-capability tri-state overrides
+// have no backend `form_schema` equivalent (documented gap,
+// `backend/adapters/provider_adapter.py`'s `_form_schema_for` docstring) —
+// those sections below stay kind-based, by design, not a leftover.
 // ---------------------------------------------------------------------------
 
 export interface Template {
@@ -32,281 +40,23 @@ export interface Template {
     api_key?: string;
     suspended?: boolean;
   };
+  /** Backend-derived field list (`InstallableDescriptor.form_schema`) —
+   * which base fields `ProviderForm` below should render/gate for this
+   * kind. See `useInstallableProviders.ts`'s `formSchemaForProviderKind`
+   * for how an EDIT-mode form (no template id, only a `kind`) resolves one
+   * of these. */
+  formSchema: FormFieldWire[];
 }
 
-export const TEMPLATES = [
-  {
-    id: "claude",
-    label: "Claude",
-    blurb: "Anthropic subscription — OAuth via the Claude Code CLI.",
-    defaults: {
-      name: "Claude",
-      kind: "claude",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "claude-opus-5[1m]",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "codex",
-    label: "Codex",
-    blurb: "OpenAI Codex subscription — uses the Codex CLI with your ChatGPT account.",
-    defaults: {
-      name: "Codex",
-      kind: "codex",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "gpt-5.5",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "agy",
-    label: "Antigravity",
-    blurb: "Google Antigravity subscription — uses the agy CLI.",
-    defaults: {
-      name: "Antigravity",
-      kind: "agy",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "$HOME/.gemini/antigravity-cli",
-      default_model: "Gemini 3.5 Flash (Medium)",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "copilot",
-    label: "Copilot",
-    blurb: "GitHub Copilot subscription — uses the `copilot` CLI, OAuth via `gh auth login`.",
-    defaults: {
-      name: "Copilot",
-      kind: "copilot",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "pi",
-    label: "pi",
-    blurb: "Minimal open-source coding agent (pi-mono). Bring any Anthropic/OpenAI/Google API key or a ChatGPT/Claude/Copilot subscription via its /login.",
-    defaults: {
-      name: "pi",
-      kind: "pi",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "anthropic/claude-opus-4-7",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "qwen",
-    label: "Qwen Code",
-    blurb: "Alibaba's Qwen Code CLI — free Qwen OAuth tier or a DashScope/OpenAI-compatible API key.",
-    defaults: {
-      name: "Qwen Code",
-      kind: "qwen",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "coder-model",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "cursor",
-    label: "Cursor",
-    blurb: "Cursor's cursor-agent CLI — headless agent runs with your Cursor subscription (`cursor-agent login`).",
-    defaults: {
-      name: "Cursor",
-      kind: "cursor",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "kimi",
-    label: "Kimi CLI",
-    blurb: "Moonshot AI's Kimi coding agent (kimi-k2) — sign in with its /login or KIMI_API_KEY.",
-    defaults: {
-      name: "Kimi",
-      kind: "kimi",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "kimi-code/kimi-for-coding",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "amp",
-    label: "Amp",
-    blurb: "Sourcegraph's coding agent CLI. Headless (execute) mode needs paid Amp credits; sign in with `amp login`.",
-    defaults: {
-      name: "Amp",
-      kind: "amp",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "auto",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "opencode",
-    label: "OpenCode",
-    blurb: "Open-source multi-provider coding agent. Works out of the box with free models; connect providers via `opencode auth login`.",
-    defaults: {
-      name: "OpenCode",
-      kind: "opencode",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "",
-      default_model: "opencode/big-pickle",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "fugu",
-    label: "Sakana Fugu",
-    blurb: "Sakana Fugu multi-agent system via the `codex-fugu` launcher. Install it first (sakana.ai/fugu), then add it here.",
-    defaults: {
-      name: "Fugu",
-      kind: "fugu",
-      mode: "subscription",
-      base_url: "",
-      config_dir: "$HOME/.codex",
-      default_model: "fugu",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "sakana",
-    label: "Sakana Fugu (API)",
-    blurb: "Sakana Fugu via its native OpenAI-compatible API, driven by Better Agent's own agent loop. Needs an API key.",
-    defaults: {
-      name: "Sakana Fugu (API)",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.sakana.ai/v1",
-      config_dir: "",
-      default_model: "fugu",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "meta-muse",
-    label: "Meta Muse Spark",
-    blurb: "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key.",
-    defaults: {
-      name: "Meta Muse Spark",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.meta.ai/v1",
-      config_dir: "",
-      default_model: "muse-spark-1.1",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "ollama",
-    label: "Ollama",
-    blurb: "Local Anthropic-compatible models via Claude Code.",
-    defaults: {
-      name: "Ollama",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "http://localhost:11434",
-      config_dir: "$HOME/.claude-ollama",
-      default_model: "qwen3-coder",
-      default_reasoning_effort: "medium",
-      api_key: "ollama",
-    },
-  },
-  {
-    id: "zai",
-    label: "Z.AI (Claude)",
-    blurb: "Z.AI's Anthropic-compatible API via the `claude` CLI. Needs an API key.",
-    defaults: {
-      name: "Z.AI (Claude)",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "https://api.z.ai/api/anthropic",
-      config_dir: "~/.claude-zai",
-      default_model: "glm-4.6",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "zai-openai",
-    label: "Z.AI (OpenAI)",
-    blurb: "Z.AI's native OpenAI endpoint (Coding plan key) driven by Better Agent's own agent loop. This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Needs an API key.",
-    defaults: {
-      name: "Z.AI (OpenAI)",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://api.z.ai/api/coding/paas/v4",
-      config_dir: "",
-      default_model: "glm-5.2",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "hetzner",
-    label: "Hetzner Inference",
-    blurb: "Hetzner's OpenAI-compatible inference endpoint, driven by Better Agent's own agent loop. Free experimental service with no SLA. Needs an API token from experiments.hetzner.com.",
-    defaults: {
-      name: "Hetzner Inference",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "https://inference.hetzner.com/api/v1",
-      config_dir: "",
-      default_model: "Qwen/Qwen3.6-35B-A3B-FP8",
-      default_reasoning_effort: "",
-    },
-  },
-  {
-    id: "custom",
-    label: "Custom API",
-    blurb: "Any Anthropic-compatible endpoint. Provide URL + key yourself.",
-    defaults: {
-      name: "Custom API",
-      kind: "claude",
-      mode: "api_key",
-      base_url: "",
-      config_dir: "",
-      default_model: "",
-      default_reasoning_effort: "medium",
-    },
-  },
-  {
-    id: "custom-openai",
-    label: "Custom OpenAI",
-    blurb: "Any OpenAI-compatible endpoint. Driven by Better Agent's own agent loop. Provide URL, key, and model.",
-    defaults: {
-      name: "Custom OpenAI",
-      kind: "openai",
-      mode: "api_key",
-      base_url: "",
-      config_dir: "",
-      default_model: "",
-      default_reasoning_effort: "",
-    },
-  },
-] as const satisfies readonly Template[];
-
-export type TemplateId = (typeof TEMPLATES)[number]["id"];
-
-const TEMPLATE_KEYS: Record<TemplateId, { labelKey: string; blurbKey: string }> = {
+/** Card grid of installable provider kinds — shared by the settings "new
+ * provider" flow and the runtime-profile wizard's inline provider
+ * creation. `templates` comes from `useInstallableProviders()` (backend
+ * `GET /providers/installable`, ADR 0007 Package D) — no static list here
+ * anymore. Per-kind blurb copy (the descriptor carries none) is resolved
+ * via `_TEMPLATE_COPY_KEYS`, falling back to the descriptor's raw
+ * `display.label` (no blurb) for any kind not in that presentation-only
+ * table — never a crash, never fabricated business data. */
+const _TEMPLATE_COPY_KEYS: Record<string, { labelKey: string; blurbKey: string }> = {
   claude: { labelKey: "setup.templateClaudeLabel", blurbKey: "setup.templateClaudeBlurb" },
   codex: { labelKey: "setup.templateCodexLabel", blurbKey: "setup.templateCodexBlurb" },
   copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
@@ -328,14 +78,46 @@ const TEMPLATE_KEYS: Record<TemplateId, { labelKey: string; blurbKey: string }> 
   "custom-openai": { labelKey: "setup.templateCustomOpenAILabel", blurbKey: "setup.templateCustomOpenAIBlurb" },
 };
 
-/** Card grid of provider templates — shared by the settings "new provider"
- * flow and the runtime-profile wizard's inline provider creation. */
-export function TemplateGrid({ onPick }: { onPick: (id: TemplateId) => void }) {
+export function TemplateGrid({
+  templates,
+  loading,
+  error,
+  onRetry,
+  onPick,
+}: {
+  templates: Template[];
+  /** A9: while the backend catalog fetch is in flight and no templates have
+   * arrived yet, show a loading placeholder instead of a blank grid. */
+  loading?: boolean;
+  /** A9: fetch failed and no templates are available — show the error with
+   * a retry affordance instead of silently rendering an empty grid. */
+  error?: string | null;
+  onRetry?: () => void;
+  onPick: (id: string) => void;
+}) {
   const { t } = useTranslation();
+
+  if (templates.length === 0 && loading) {
+    return <div className="settings-hint">{t("common.loading", "Loading…")}</div>;
+  }
+
+  if (templates.length === 0 && error) {
+    return (
+      <div className="provider-catalog-error" role="alert" data-testid="provider-catalog-error">
+        <span>{error}</span>
+        {onRetry && (
+          <button type="button" className="btn-secondary" onClick={onRetry}>
+            {t("common.retry", "Retry")}
+          </button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="provider-templates">
-      {TEMPLATES.map((tpl) => {
-        const keys = TEMPLATE_KEYS[tpl.id];
+      {templates.map((tpl) => {
+        const keys = _TEMPLATE_COPY_KEYS[tpl.id];
         return (
           <button
             key={tpl.id}
@@ -343,47 +125,13 @@ export function TemplateGrid({ onPick }: { onPick: (id: TemplateId) => void }) {
             className="provider-template-card"
             onClick={() => onPick(tpl.id)}
           >
-            <div className="provider-template-name">{t(keys.labelKey)}</div>
-            <div className="provider-template-blurb">{t(keys.blurbKey)}</div>
+            <div className="provider-template-name">{keys ? t(keys.labelKey) : tpl.label}</div>
+            <div className="provider-template-blurb">{keys ? t(keys.blurbKey) : ""}</div>
           </button>
         );
       })}
     </div>
   );
-}
-
-export function configDirCopyForKind(kind: string): {
-  labelKey: string;
-  placeholderKey: string;
-  hintKey: string;
-} {
-  if (kind === "codex" || kind === "fugu") {
-    // Fugu deploys its profile into the Codex CLI config dir (~/.codex).
-    return {
-      labelKey: "setup.configDirLabelCodex",
-      placeholderKey: "setup.configDirPlaceholderCodex",
-      hintKey: "setup.configDirHintCodex",
-    };
-  }
-  if (kind === "agy") {
-    return {
-      labelKey: "setup.configDirLabelAgy",
-      placeholderKey: "setup.configDirPlaceholderAgy",
-      hintKey: "setup.configDirHintAgy",
-    };
-  }
-  if (kind === "copilot") {
-    return {
-      labelKey: "setup.configDirLabelCopilot",
-      placeholderKey: "setup.configDirPlaceholderCopilot",
-      hintKey: "setup.configDirHintCopilot",
-    };
-  }
-  return {
-    labelKey: "setup.configDirLabelClaude",
-    placeholderKey: "setup.configDirPlaceholderClaude",
-    hintKey: "setup.configDirHintClaude",
-  };
 }
 
 /** Provider account payload — auth + capabilities only. */
@@ -448,6 +196,7 @@ export function ProviderForm({
   initial,
   initialHasKey,
   credentialBlocked = false,
+  formSchema,
   onClose,
   onBack,
   onSubmit,
@@ -461,6 +210,11 @@ export function ProviderForm({
   };
   initialHasKey: boolean;
   credentialBlocked?: boolean;
+  /** `InstallableDescriptor.form_schema` for this provider's kind (ADR
+   * 0007 Package D) — drives which of the base fields below render/gate.
+   * For CREATE, the picked template's own schema; for EDIT,
+   * `formSchemaForProviderKind(templates, provider.kind)`. */
+  formSchema: FormFieldWire[];
   onClose: () => void;
   onBack: () => void;
   onSubmit: (payload: FormPayload) => Promise<void>;
@@ -469,14 +223,13 @@ export function ProviderForm({
   const [name, setName] = useState(initial.name);
   const [nickname, setNickname] = useState(initial.nickname ?? "");
   const [kind] = useState(initial.kind || "claude");
-  const modes = availableModesForForm(kind, mode, initial.mode);
+  const modes = modesFromSchema(formSchema, mode, initial.mode);
   const [mode_, setMode] = useState<Provider["mode"]>(
     modes.includes(initial.mode) ? initial.mode : modes[0],
   );
   const [baseUrl, setBaseUrl] = useState(initial.base_url);
   const [configDir, setConfigDir] = useState(initial.config_dir);
-  const configDirCopy = configDirCopyForKind(kind);
-  const apiEnvCopy = apiEnvCopyForKind(kind);
+  const showConfigDir = schemaHasField(formSchema, "config_dir");
   const permissionOptions = permissionOptionsForKind(kind);
   const seedPermission = (): Permission => {
     const opts = permissionOptions;
@@ -604,13 +357,19 @@ export function ProviderForm({
         {mode_ === "api_key" && (
           <div className="setup-fields">
             <div className="setup-field">
-              <label>{t(apiEnvCopy.keyLabelKey)}</label>
+              {/* label_key/placeholder_key come from `form_schema`'s
+               * "api_key" field — per-kind now (closure 4: restores the
+               * deleted `apiEnvCopyForKind`'s OpenAI-flavored
+               * "setup.apiKeyLabelOpenai"/"setup.apiKeyPlaceholderEmptyOpenai"
+               * copy for kind="openai", generic ANTHROPIC_* copy for every
+               * other kind — the backend descriptor is the one source now). */}
+              <label>{t(fieldLabelKey(formSchema, "api_key", "setup.apiKeyLabel"))}</label>
               {credentialBlocked && (
                 <div className="setup-error">{t('setup.apiKeyBlockedReentryHint')}</div>
               )}
               <input
                 type="password"
-                aria-label={t(apiEnvCopy.keyLabelKey)}
+                aria-label={t(fieldLabelKey(formSchema, "api_key", "setup.apiKeyLabel"))}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder={
@@ -618,14 +377,14 @@ export function ProviderForm({
                     ? t('setup.apiKeyReenterPlaceholder')
                     : initialHasKey
                     ? t('setup.apiKeyPlaceholderKeep')
-                    : t(apiEnvCopy.keyPlaceholderKey)
+                    : t(fieldPlaceholderKey(formSchema, "api_key", "setup.apiKeyPlaceholderEmpty"))
                 }
                 spellCheck={false}
               />
               <span className="setup-field-hint">{t("setup.apiKeySecurityHint")}</span>
             </div>
             <div className="setup-field">
-              <label>{t(apiEnvCopy.urlLabelKey)}</label>
+              <label>{t(fieldLabelKey(formSchema, "base_url", "setup.baseUrlLabel"))}</label>
               <input
                 type="text"
                 value={baseUrl}
@@ -637,18 +396,22 @@ export function ProviderForm({
           </div>
         )}
 
-        {showConfigDirForKind(kind) && (
+        {showConfigDir && (
           <div className="setup-field">
-            <label>{t(configDirCopy.labelKey)}</label>
+            {/* label_key/placeholder_key/hint_key come from `form_schema`'s
+             * "config_dir" field — per-kind now (closure 4: restores the
+             * deleted `configDirCopyForKind`'s codex/agy/copilot-flavored
+             * copy; generic Claude-flavored copy for every other kind). */}
+            <label>{t(fieldLabelKey(formSchema, "config_dir", "setup.configDirLabelClaude"))}</label>
             <input
               type="text"
               value={configDir}
               onChange={(e) => setConfigDir(e.target.value)}
-              placeholder={t(configDirCopy.placeholderKey)}
+              placeholder={t(fieldPlaceholderKey(formSchema, "config_dir", "setup.configDirPlaceholderClaude"))}
               spellCheck={false}
             />
             <span className="setup-field-hint">
-              {t(configDirCopy.hintKey)}
+              {t(fieldHintKey(formSchema, "config_dir", "setup.configDirHintClaude") ?? "setup.configDirHintClaude")}
             </span>
           </div>
         )}

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import { API } from "../api";
+import type { AttentionMarkerDetailWire, SessionSummaryWire } from "../adapter/wire";
 import {
   SESSION_STATUS_KEYS,
   type ProjectAggregateRecord,
@@ -11,6 +12,7 @@ import {
   type TodoItem,
 } from "../types";
 import { subscribeMany } from "./eventBus";
+import { sessionSurfaceRegistry } from "./sessionSurfaceRegistry";
 
 export type MonitoringState =
   | "active"
@@ -123,6 +125,44 @@ function entryFromRow(row: SessionRegistryRow): SessionEntry {
   };
 }
 
+/** `SessionSummaryWire.attention_marker_details` (ADR 0008) -> the legacy
+ * `Record<extension_id, MarkerInfo>` shape `onMarker` used to build one
+ * delta at a time from `/ws/chat`'s `session_marker_changed` — same field
+ * set (`color`/`tooltip`/`sound`/`sound_setting`/`tag`), sourced from the
+ * SAME underlying per-extension marker dict backend-side (`store_access
+ * .py`'s `_attention_marker_details`), just delivered as a full snapshot
+ * per upsert instead of one add/remove delta per marker. */
+function markersFromDetails(details: AttentionMarkerDetailWire[]): Record<string, MarkerInfo> {
+  if (details.length === 0) return EMPTY_MARKERS;
+  const out: Record<string, MarkerInfo> = {};
+  for (const d of details) {
+    out[d.extension_id] = {
+      color: d.color ?? "",
+      tooltip: d.tooltip ?? "",
+      ...(d.sound ? { sound: true } : {}),
+      ...(d.sound_setting ? { sound_setting: d.sound_setting } : {}),
+      ...(d.tag ? { tag: d.tag } : {}),
+    };
+  }
+  return out;
+}
+
+function markersEqual(a: Record<string, MarkerInfo>, b: Record<string, MarkerInfo>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => {
+    const av = a[k];
+    const bv = b[k];
+    return !!bv
+      && av.color === bv.color
+      && av.tooltip === bv.tooltip
+      && !!av.sound === !!bv.sound
+      && av.sound_setting === bv.sound_setting
+      && av.tag === bv.tag;
+  });
+}
+
 const EMPTY_MARKERS: Record<string, MarkerInfo> = {};
 const EMPTY_SESSION: SessionMeta = {
   is_running: false,
@@ -147,9 +187,7 @@ type Listener = () => void;
 type BufferedDelta =
   | { type: "session_monitoring_changed"; payload: SessionMonitoringPayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
-  | { type: "session_error_changed"; payload: SessionErrorPayload }
   | { type: "session_user_input_changed"; payload: SessionUserInputPayload }
-  | { type: "session_marker_changed"; payload: SessionMarkerPayload }
   | { type: "session_created"; payload: SessionCreatedPayload }
   | { type: "session_deleted"; payload: SessionDeletedPayload }
   | { type: "session_metadata_updated"; payload: SessionMetadataPayload };
@@ -179,23 +217,12 @@ interface SessionUnreadPayload {
   cwd?: string;
   node_id?: string;
 }
-interface SessionErrorPayload {
-  session_id: string;
-  has_error: boolean;
-  cwd?: string;
-  node_id?: string;
-}
 interface SessionUserInputPayload {
   session_id?: string;
   app_session_id?: string;
   pending_user_input_count: number;
   cwd?: string;
   node_id?: string;
-}
-interface SessionMarkerPayload {
-  session_id: string;
-  extension_id: string;
-  marker: MarkerInfo | null;
 }
 interface SessionCreatedPayload {
   session: {
@@ -254,6 +281,7 @@ class SessionRegistry {
 
   private busUnsub: (() => void) | null = null;
   private domUnsub: (() => void) | null = null;
+  private summaryV2Unsub: (() => void) | null = null;
 
   // Bootstrap state machine. `_bootstrapped` flips ONLY after a
   // successful bootstrap; a network-failed bootstrap leaves it false
@@ -296,6 +324,10 @@ class SessionRegistry {
       this.domUnsub();
       this.domUnsub = null;
     }
+    if (this.summaryV2Unsub) {
+      this.summaryV2Unsub();
+      this.summaryV2Unsub = null;
+    }
   }
 
   /** Wire bus subscriptions + DOM lifecycle. Idempotent — calling
@@ -311,14 +343,19 @@ class SessionRegistry {
       ["session_unread_changed", (p) => {
         this.dispatch("session_unread_changed", p as SessionUnreadPayload);
       }],
-      ["session_error_changed", (p) => {
-        this.dispatch("session_error_changed", p as SessionErrorPayload);
-      }],
+      // `session_error_changed`/`session_marker_changed` migrated off
+      // `/ws/chat` — see `onSummaryV2` below, wired via
+      // `sessionSurfaceRegistry.subscribeAllSummaries` a few lines down in
+      // this same `bind()`. Both fields are real on `SessionSummary` now
+      // (`has_error`/`attention_marker_details`, ADR 0008) and neither
+      // handler ever materializes a NEW session from a bare delta (see
+      // `onError`/`onMarker`'s original "doesn't materialize a session"
+      // guards, preserved verbatim in `onSummaryV2`), so there is no
+      // hidden-session-routing regression risk the way `unread`/
+      // `monitoring` still have (see those two subscriptions' own
+      // unchanged kept-legacy status).
       ["session_user_input_changed", (p) => {
         this.dispatch("session_user_input_changed", p as SessionUserInputPayload);
-      }],
-      ["session_marker_changed", (p) => {
-        this.dispatch("session_marker_changed", p as SessionMarkerPayload);
       }],
       ["session_created", (p) => {
         this.dispatch("session_created", p as SessionCreatedPayload);
@@ -358,6 +395,10 @@ class SessionRegistry {
         void this.refreshProjectSnapshot();
       }],
     ]);
+
+    this.summaryV2Unsub = sessionSurfaceRegistry.subscribeAllSummaries((summary) => {
+      this.onSummaryV2(summary);
+    });
 
     // Drift recovery: when the tab comes back into focus, re-snapshot.
     // With the single-REST bootstrap this is one `/api/sessions` call.
@@ -499,12 +540,8 @@ class SessionRegistry {
         return this.onMonitoring(ev.payload);
       case "session_unread_changed":
         return this.onUnread(ev.payload);
-      case "session_error_changed":
-        return this.onError(ev.payload);
       case "session_user_input_changed":
         return this.onUserInput(ev.payload);
-      case "session_marker_changed":
-        return this.onMarker(ev.payload);
       case "session_created":
         return this.onCreated(ev.payload);
       case "session_deleted":
@@ -535,13 +572,26 @@ class SessionRegistry {
     this.notifySession(sid);
   }
 
-  private onError(d: SessionErrorPayload) {
-    if (!d.session_id) return;
-    const prev = this.sessions.get(d.session_id);
-    if (!prev) return; // error dot doesn't materialize a session
-    const next = !!d.has_error;
-    if (prev.has_error === next) return;
-    this.commitEntry(d.session_id, { ...prev, has_error: next });
+  /** `has_error`/markers off the v2 `session_summary_upsert` feed
+   * (`sessionSurfaceRegistry.subscribeAllSummaries`) — replaces the
+   * legacy `session_error_changed`/`session_marker_changed` `/ws/chat`
+   * frames now that both are real `SessionSummary` fields (ADR 0008).
+   * Preserves `onError`/`onMarker`'s original "doesn't materialize a new
+   * session" guard verbatim: a summary for a sid this registry hasn't
+   * seen yet (via `/api/sessions` or `session_created`) is dropped, same
+   * as before. */
+  private onSummaryV2(summary: SessionSummaryWire) {
+    const prev = this.sessions.get(summary.session_id);
+    if (!prev) return;
+    let next = prev;
+    if (prev.has_error !== summary.has_error) {
+      next = { ...next, has_error: summary.has_error };
+    }
+    const markers = markersFromDetails(summary.attention_marker_details);
+    if (!markersEqual(next.markers, markers)) {
+      next = { ...next, markers };
+    }
+    if (next !== prev) this.commitEntry(summary.session_id, next);
   }
 
   private onUserInput(d: SessionUserInputPayload) {
@@ -552,24 +602,6 @@ class SessionRegistry {
     const next = Math.max(0, Number(d.pending_user_input_count) || 0);
     if (prev.pending_user_input_count === next) return;
     this.commitEntry(sid, { ...prev, pending_user_input_count: next });
-  }
-
-  private onMarker(d: SessionMarkerPayload) {
-    if (!d.session_id || !d.extension_id) return;
-    const prev = this.sessions.get(d.session_id);
-    if (!prev) return; // markers don't materialize a session
-    const markers = { ...prev.markers };
-    if (d.marker) {
-      markers[d.extension_id] = {
-        color: d.marker.color,
-        tooltip: d.marker.tooltip,
-        ...(d.marker.sound ? { sound: true } : {}),
-        ...(d.marker.tag ? { tag: d.marker.tag } : {}),
-      };
-    } else {
-      delete markers[d.extension_id];
-    }
-    this.commitEntry(d.session_id, { ...prev, markers });
   }
 
   /** Shared delta-apply path for monitoring-state + unread. The

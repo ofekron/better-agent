@@ -21,7 +21,13 @@ from background_work import background_work_registry
 
 logger = logging.getLogger(__name__)
 
-_OWNER = "startup"
+# Public — the owner id background-work items report under for every
+# startup step. `backend/adapters/store_access.py`'s `list_host_startup_tasks`
+# and `backend/adapters/system_adapter.py`'s live-push handler both filter
+# the shared registry down to this owner, so it is the single source of
+# truth for "what counts as a startup task" rather than a string repeated
+# in three places.
+OWNER = "startup"
 
 # Startup rows are the first thing a user sees on a cold boot, so they linger
 # a beat longer after success than the registry default.
@@ -34,7 +40,7 @@ def _begin(task_id: str, label: str) -> str:
     when a locale lacks the string."""
     return background_work_registry.report(
         owner_kind=background_work.OWNER_CORE,
-        owner_id=_OWNER,
+        owner_id=OWNER,
         local_id=task_id,
         label=label,
         title_key=label,

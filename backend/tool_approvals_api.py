@@ -8,15 +8,47 @@ composition root (see `configure`).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Header, HTTPException
 
 import internal_guards
 import tool_approval
+from backend.event_bus import BusEvent, bus
+from backend.surface_contract.nodes import (
+    ApprovalDecision,
+    TOOL_APPROVAL_REF_PREFIX,
+    UserInteractionKind,
+    UserInteractionState,
+    interaction_fact_payload,
+)
 from i18n import t
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# v2 UserInteraction fact producer (ADR 0006 §5) — additive to the legacy
+# `tool_approval_requested`/`tool_approval_resolved` WS broadcasts below,
+# which stay as-is; `backend/adapters/chat_adapter.py`'s
+# `_on_interaction_fact` is the one consumer.
+
+
+def _tool_approval_request_dict(rec: "tool_approval.ToolApproval") -> dict:
+    return {
+        "subject": "tool", "tool_name": rec.tool_name,
+        "summary": dict(rec.summary or {}), "risk_scope": rec.provider_kind,
+    }
+
+
+def _publish_interaction_fact(fact_type: str, app_session_id: str, payload: dict) -> None:
+    try:
+        bus.publish_threadsafe(BusEvent(
+            type=fact_type, root_id=app_session_id, sid=app_session_id,
+            payload=payload, persist=False,
+        ))
+    except Exception:
+        logger.exception("tool_approvals_api: %s publish failed", fact_type)
 
 _coordinator_ref: Any = None
 
@@ -58,6 +90,13 @@ async def internal_tool_approval_request(
         tool_name=str(body.get("tool_name") or ""),
         summary=body.get("summary") if isinstance(body.get("summary"), dict) else {},
     )
+    _publish_interaction_fact(
+        "interaction.fire.requested", app_session_id,
+        interaction_fact_payload(
+            f"{TOOL_APPROVAL_REF_PREFIX}{rec.approval_id}", UserInteractionKind.APPROVAL,
+            _tool_approval_request_dict(rec),
+        ),
+    )
     coordinator = _coordinator()
     await coordinator.broadcast_session(
         app_session_id,
@@ -88,6 +127,16 @@ async def decide_tool_approval(session_id: str, approval_id: str, body: dict = B
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     approved = bool((body or {}).get("approved"))
     ok = tool_approval.registry.decide(approval_id, approved)
+    if ok:
+        _publish_interaction_fact(
+            "interaction.fire.resolved", session_id,
+            interaction_fact_payload(
+                f"{TOOL_APPROVAL_REF_PREFIX}{approval_id}", UserInteractionKind.APPROVAL,
+                _tool_approval_request_dict(rec),
+                state=UserInteractionState.RESOLVED,
+                response={"decision": (ApprovalDecision.APPROVE if approved else ApprovalDecision.DENY).value},
+            ),
+        )
     return {"ok": ok}
 
 

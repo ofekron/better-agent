@@ -50,12 +50,10 @@ export interface BusEventMap {
   ws_connection_changed: {
     connected: boolean;
   };
-  // New unified running / unread frames (replace the old
-  // `active_process_counts_changed` window event).
-  session_running_changed: {
-    session_id: string;
-    value: boolean;
-  };
+  // `session_running_changed` (would-be unified running frame) deleted —
+  // confirmed dead code (zero `eventBus.subscribe` consumers anywhere in
+  // `frontend/src`, ADR 0008 Package B plan §1); `session_monitoring_changed`
+  // (`sessionRegistry.ts`) is the real running-badge signal.
   session_unread_changed: {
     session_id: string;
     unread_count: number;
@@ -211,6 +209,9 @@ export interface BusEventMap {
   // on start; end carries nothing.
   session_drag_start: { session_id: string; name?: string };
   session_drag_end: Record<string, never>;
+  // User-preference patch broadcast (backend WS frame + client-local publishes
+  // from the background-work visibility toggle). Open payload: pref keys vary.
+  user_prefs_changed: Record<string, unknown>;
 }
 
 type Handler<T> = (payload: T) => void;

@@ -4,6 +4,7 @@ import { renderApp } from "./harness";
 import { makeAssistantMsg, makeRun, makeSession, makeUserMsg } from "./fixtures";
 import { buildInlineTagsPreamble } from "../src/utils/inlineTagsPrompt";
 import type { InlineTag } from "../src/types/inlineTag";
+import { node, promptNode, turnNode, compactTurn } from "./surface/fixtures";
 
 function setViewportWidth(width: number) {
   Object.defineProperty(window, "innerWidth", {
@@ -53,17 +54,6 @@ async function pressEmptyEnter(h: Awaited<ReturnType<typeof renderApp>>) {
   await h.flush();
 }
 
-async function waitForNoSendingMessages(h: Awaited<ReturnType<typeof renderApp>>) {
-  for (let i = 0; i < 10; i++) {
-    const messages = h.toJSON().chat.messages;
-    if (!messages.some((m) => m.role === "user" && m.status === "sending")) {
-      return messages;
-    }
-    await h.flush();
-  }
-  return h.toJSON().chat.messages;
-}
-
 async function waitForOutboundSend(h: Awaited<ReturnType<typeof renderApp>>, prompt: string) {
   for (let i = 0; i < 10; i++) {
     const sent = h.outbound.find((f) => f.type === "send_message" && f.prompt === prompt);
@@ -71,15 +61,6 @@ async function waitForOutboundSend(h: Awaited<ReturnType<typeof renderApp>>, pro
     await h.flush();
   }
   return h.outbound.find((f) => f.type === "send_message" && f.prompt === prompt);
-}
-
-async function waitForSteerSend(h: Awaited<ReturnType<typeof renderApp>>) {
-  for (let i = 0; i < 10; i++) {
-    const sent = h.outbound.find((f) => f.type === "send_message" && f.send_mode === "steer");
-    if (sent) return sent;
-    await h.flush();
-  }
-  return h.outbound.find((f) => f.type === "send_message" && f.send_mode === "steer");
 }
 
 describe("steer prompt events", () => {
@@ -401,50 +382,66 @@ describe("steer prompt events", () => {
     h.unmount();
   });
 
-  it("renders the steer prompt inside the assistant turn and removes the optimistic user bubble", async () => {
-    const userMessage = makeUserMsg({ id: "u1", content: "start work" });
-    const assistantMessage = makeAssistantMsg({
-      id: "a1",
-      isStreaming: true,
-    });
-    const session = makeSession({
-      provider_id: "codex",
-      messages: [userMessage, assistantMessage],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    h.setMonitoring(session.id, "active");
-    h.emit({
-      type: "run_state",
-      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
-    });
-    await h.flush();
-
-    await typeAndSteer(h, "steer inside turn");
-    const sent = await waitForSteerSend(h);
-    expect(sent).toMatchObject({ send_mode: "steer" });
-    const clientId = sent!.client_id as string;
-
-    h.emit({
-      type: "steer_prompt",
-      data: {
-        app_session_id: session.id,
-        uuid: "steer-1",
-        prompt: "steer inside turn",
+  it("native surface: steer prompt renders inside the running turn, not as a new turn", async () => {
+    // Native equivalent of the legacy "steer renders inside the assistant
+    // turn, optimistic user bubble removed" case. Native has no separate
+    // optimistic user bubble to remove (ChatSurfaceView never locally
+    // projects a just-sent prompt — see smoke.test.ts's send test) so the
+    // portable intent is narrower: a steer confirmed by the backend
+    // arrives as a `steering_message` node parented under the SAME turn
+    // that is running, and never spawns a second `surface-turn`/
+    // `surface-typed-prompt`.
+    localStorage.setItem("ba.surface_native", "1");
+    const session = makeSession({ id: "sess-steer", messages: [] });
+    const h = await renderApp({
+      seed: { sessions: [session] },
+      configureBackend: (backend) => {
+        backend.seedSurface("sess-steer", {
+          turns: [compactTurn(turnNode("t1"), promptNode("t1", "start work"), [])],
+        });
       },
     });
-    h.emit({
-      type: "steer_prompt_persisted",
-      data: {
-        app_session_id: session.id,
-        client_id: clientId,
-      },
-    });
-    await h.flush();
+    await h.selectSession("sess-steer");
+    await h.waitFor(() => h.$$('[data-testid="surface-turn"]').length === 1);
 
-    const messages = await waitForNoSendingMessages(h);
-    expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
-    expect(messages.some((m) => m.role === "user" && m.status === "sending")).toBe(false);
+    h.emitSurface("sess-steer", {
+      type: "turn_lifecycle",
+      cv: 1,
+      surface_id: "sess-steer",
+      snapshot: { incarnation: "mock", render_rev: 1, hist_rev: 0 },
+      turn_id: "t1",
+      phase: "running",
+      reason: null,
+      usage: null,
+    });
+    // The turn just went live, which makes TurnView's useChildren fire an
+    // on-demand `ensureChildren` REST fetch for its (still-empty) body —
+    // delivered here back-to-back with no wait, so that fetch is guaranteed
+    // to still be in flight when this live steering_message upsert lands
+    // (regression coverage for the ensureChildren-vs-live-upsert clobber
+    // race; see smoke.test.ts's send test for the fuller writeup, and
+    // SurfaceStore.setChildrenTable for the fix).
+    h.emitSurface("sess-steer", {
+      type: "node_upsert",
+      cv: 2,
+      surface_id: "sess-steer",
+      snapshot: { incarnation: "mock", render_rev: 2, hist_rev: 0 },
+      node: node({
+        node_id: "t1:steer-1",
+        turn_id: "t1",
+        kind: "steering_message",
+        parent_id: "turn:t1",
+        payload: { text: "steer inside turn", target: "a1", attachments: [] },
+      }),
+    });
+
+    await h.waitFor(() => h.$('[data-testid="surface-steering-message"]') !== null);
+    expect(h.$('[data-testid="surface-steering-message"]')?.textContent).toContain(
+      "steer inside turn",
+    );
+    // The steer did not spawn a separate turn or prompt.
+    expect(h.$$('[data-testid="surface-turn"]')).toHaveLength(1);
+    expect(h.$$('[data-testid="surface-typed-prompt"]')).toHaveLength(1);
     h.unmount();
   });
 

@@ -182,9 +182,9 @@ export interface AppWebSocketOptions {
   /** Virtual session folders/tags changed. Caller refetches organization
    * snapshot and session summaries. */
   onSessionOrganizationChanged?: () => void;
-  /** Project mapping groups changed (auto-match rebuild or user edit).
-   * Caller refetches GET /api/project-mappings. */
-  onProjectMappingsChanged?: () => void;
+  // `onProjectMappingsChanged` deleted (confirmed dead code, ADR 0008
+  // Package B plan §1: `GET /api/project-mappings`, its only intended
+  // refetch, was never called by the frontend at all).
   /** Backend-emitted notification that supervisor verdict failed
    * (kind=verdict_failed), hit MAX_VERDICTS_PER_TURN
    * (kind=verdict_capped), or terminated because the worker is

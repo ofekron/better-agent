@@ -5,6 +5,24 @@ import { SessionList } from "../src/components/SessionList";
 import { MobileActionSheetProvider } from "../src/components/MobileActionSheet";
 import type { Provider, Session } from "../src/types";
 import { makeSession, makeWorker } from "./fixtures";
+// ADR 0008 (Package B): SessionList.tsx sources its folder/tag CATALOG
+// from `useFoldersV2`/`useTagsV2` now (real-time v2 push), not the legacy
+// `/api/session-organization` snapshot these tests stub below — the
+// global `tests/setup.ts` mock of that module returns `[]` by default, so
+// tests asserting on folder/tag catalog content seed it explicitly here
+// too, same objects already passed to the legacy fetch stub. Test-only
+// helper on the MOCKED module (not the real one's exported type, hence
+// the cast) — see `tests/setup.ts`'s `vi.mock("../src/lib/
+// sessionSurfaceRegistry", ...)`.
+import * as sessionSurfaceRegistryMock from "../src/lib/sessionSurfaceRegistry";
+const setMockSessionOrganizationV2 = (
+  sessionSurfaceRegistryMock as unknown as {
+    __setMockSessionOrganizationV2: (snapshot: {
+      folders?: Array<{ id: string; project_id: string; parent_folder_id?: string | null; name: string; order: number }>;
+      tags?: Array<{ id: string; project_id?: string | null; name: string; color?: string | null }>;
+    }) => void;
+  }
+).__setMockSessionOrganizationV2;
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -263,6 +281,12 @@ describe("SessionList advanced filters", () => {
         );
       }),
     );
+    setMockSessionOrganizationV2({
+      folders: [
+        { id: "folder-client", project_id: "/tmp/project", parent_folder_id: null, name: "Client", order: 0 },
+      ],
+      tags: [{ id: "tag-important", project_id: "/tmp/project", name: "Important", color: null }],
+    });
 
     render(
       <SessionList
@@ -679,6 +703,13 @@ describe("SessionList advanced filters", () => {
         );
       }),
     );
+    setMockSessionOrganizationV2({
+      folders: [
+        { id: "folder-parent", project_id: "/tmp/project", parent_folder_id: null, name: "Parent", order: 0 },
+        { id: "folder-child", project_id: "/tmp/project", parent_folder_id: "folder-parent", name: "Child", order: 0 },
+      ],
+      tags: [],
+    });
 
     render(
       <SessionList
@@ -806,6 +837,13 @@ describe("SessionList advanced filters", () => {
         );
       }),
     );
+    setMockSessionOrganizationV2({
+      folders: [
+        { id: "folder-client", project_id: "/tmp/project", parent_folder_id: null, name: "Client", order: 0 },
+      ],
+      tags: [],
+    });
+
 
     render(
       <SessionList
@@ -1103,6 +1141,13 @@ describe("SessionList advanced filters", () => {
         );
       }),
     );
+    setMockSessionOrganizationV2({
+      folders: [
+        { id: "folder-client", project_id: "/tmp/project", parent_folder_id: null, name: "Client", order: 0 },
+      ],
+      tags: [{ id: "tag-important", project_id: "/tmp/project", name: "Important", color: null }],
+    });
+
 
     render(
       <SessionList

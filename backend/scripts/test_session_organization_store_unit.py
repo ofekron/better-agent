@@ -393,11 +393,40 @@ def test_patch_session_tags_rejects_unknown_tag() -> None:
         store.patch_session_tags("sess-1", add=["nope"])
 
 
-def test_sync_session_tags_rejects_manual_source() -> None:
-    with pytest.raises(ValueError, match="cannot target manual tags"):
-        store.sync_session_tags_by_source(
-            "sess-1", tag_ids=[], source=store.TAG_SOURCE_MANUAL,
-        )
+def test_sync_session_tags_allows_manual_source() -> None:
+    """ADR 0008's `assign_tags` intent syncs by `source`, defaulting to
+    `manual` — `sync_session_tags_by_source` no longer special-cases
+    `manual` as forbidden (the restriction predates that contract); a
+    manual-source sync now behaves exactly like any other source's,
+    including the source-isolation guarantee (a differently-sourced entry
+    is left untouched — see `test_sync_session_tags_source_isolation`
+    below)."""
+    tag = store.create_tag(name="manual-syncable")
+    org = store.sync_session_tags_by_source(
+        "sess-manual-sync", tag_ids=[tag["id"]], source=store.TAG_SOURCE_MANUAL,
+    )
+    assert org["tag_ids"] == [tag["id"]]
+    assert org["tag_sources"][tag["id"]] == store.TAG_SOURCE_MANUAL
+
+
+def test_sync_session_tags_source_isolation() -> None:
+    manual_tag = store.create_tag(name="manual-kept")
+    auto_tag = store.create_tag(name="auto-kept")
+    store.set_session_tags("sess-isolation", [manual_tag["id"]], source=store.TAG_SOURCE_MANUAL)
+    store.patch_session_tags(
+        "sess-isolation", add=[auto_tag["id"]], add_source=store.TAG_SOURCE_AUTO_TAGGING,
+    )
+
+    # A manual-source sync replacing manual entries must leave the
+    # auto_tagging-sourced entry untouched (source-isolation invariant).
+    new_manual_tag = store.create_tag(name="manual-replacement")
+    org = store.sync_session_tags_by_source(
+        "sess-isolation", tag_ids=[new_manual_tag["id"]], source=store.TAG_SOURCE_MANUAL,
+    )
+    assert set(org["tag_ids"]) == {new_manual_tag["id"], auto_tag["id"]}
+    assert org["tag_sources"][auto_tag["id"]] == store.TAG_SOURCE_AUTO_TAGGING
+    assert org["tag_sources"][new_manual_tag["id"]] == store.TAG_SOURCE_MANUAL
+    assert manual_tag["id"] not in org["tag_ids"]
 
 
 def test_sync_session_tags_rejects_non_list() -> None:

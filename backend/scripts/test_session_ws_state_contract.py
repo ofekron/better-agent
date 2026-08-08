@@ -54,6 +54,24 @@ def test_direct_event_kind_is_authoritative_and_mismatch_is_visible() -> None:
     assert _broadcaster_frames(change) == []
 
 
+def test_fire_namespace_facts_are_skipped_without_warning() -> None:
+    """`session.fire.*` is the owner-side dual-publish namespace consumed by
+    adapters (session_adapter's own `session.fire.*` subscription) — it is
+    not the legacy `session.<kind>` shape the WS broadcaster mapper expects.
+    The mapper must skip these cleanly with no mismatch warning."""
+    event = BusEvent(
+        type="session.fire.created",
+        root_id="root",
+        sid="sid",
+        payload={"kind": "created", "value": 1},
+        persist=False,
+    )
+    with mock.patch("event_bus_subscribers.logger.error") as error:
+        change = _session_change_from_event(event)
+    assert change is None
+    error.assert_not_called()
+
+
 def test_completed_at_emits_one_authoritative_delta_per_tab() -> None:
     session = session_manager.create(
         name="completed",

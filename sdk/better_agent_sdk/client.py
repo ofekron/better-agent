@@ -1348,6 +1348,17 @@ class Client:
             timeout=timeout,
         )
 
+    # ── proxy-observed traffic facts (Phase G) ─────────────────────────
+    def publish_traffic_facts(self, facts: list[dict[str, Any]], *, timeout: float = 10.0) -> dict[str, Any]:
+        """Push already-minted `traffic.thread_*` fact payloads (see
+        `ofek-dev.model-traffic`'s `backend/thread_facts.py`) to core's
+        `POST /api/internal/traffic-facts`, gated by
+        `BA_SURFACE_TRAFFIC_SOURCE` on the core side. Core republishes each
+        as an ordinary bus fact; this call never raises for a disabled or
+        rejected batch under normal fire-and-forget use — callers that
+        care about the outcome can still inspect the returned dict."""
+        return self._post("/api/internal/traffic-facts", {"facts": facts}, timeout=timeout)
+
     def background_work(
         self,
         label: str,

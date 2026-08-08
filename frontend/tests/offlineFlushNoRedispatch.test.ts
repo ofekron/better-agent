@@ -46,7 +46,14 @@ async function renderWithBacklog() {
   return h;
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  // This suite's own clear() wipes the global Chat Surface Contract v2
+  // kill-switch pin (tests/setup.ts) since this file's beforeEach runs
+  // after it — re-pin so selectSession stays on the legacy hydration/WS
+  // path this suite's outbound-frame assertions are written against.
+  localStorage.setItem("ba.surface_v2", "0");
+});
 afterEach(() => {
   localStorage.clear();
   Reflect.deleteProperty(navigator, "locks");

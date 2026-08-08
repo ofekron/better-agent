@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { act, render, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderApp } from "./harness";
@@ -107,71 +107,24 @@ describe("message rendering", () => {
     hResolved.unmount();
   });
 
-  it("completed turns render collapsed by default; expanding reveals the response", async () => {
-    const session = makeSession({
-      messages: [
-        makeUserMsg({ id: "u1", content: "old" }),
-        makeAssistantMsg({ id: "a1", content: "old reply" }),
-        makeUserMsg({ id: "u2", content: "new" }),
-        makeAssistantMsg({ id: "a2", content: "new reply" }),
-      ],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
+  // "completed turns render collapsed by default; expanding reveals the
+  // response" and "clicking a turn's header toggles it between collapsed
+  // and expanded" are DELETED, not ported: on the native path
+  // (src/surface/TurnView.tsx's `ResultRow`) a turn's final result
+  // renders UNCONDITIONALLY, never gated by collapse state — only
+  // intermediate body content (tool calls/explanation trail) is ever
+  // hidden behind the live/manuallyExtended `Ellipsis` gate. There is no
+  // representable "the finished answer is hidden until you expand"
+  // state to construct; see tests/chat-collapse-fullstack.test.tsx's
+  // deletion for the same root cause, and tests/surface/toolInteraction
+  // .test.tsx for native body-expansion coverage.
 
-    // Per docs/chat-panel.md's render(turn): a completed (non-live) turn
-    // defaults to collapsed — only the initiator renders as a message.
-    expect(h.toJSON().chat.messages.map((m) => m.id)).toEqual(["u1", "u2"]);
-
-    await h.expandTurn("u1");
-    await h.expandTurn("u2");
-
-    const ids = h.toJSON().chat.messages.map((m) => m.id);
-    expect(ids).toEqual(["u1", "a1", "u2", "a2"]);
-    h.unmount();
-  });
-
-  it("clicking a turn's header toggles it between collapsed and expanded", async () => {
-    const session = makeSession({
-      messages: [
-        makeUserMsg({ id: "u1", content: "old" }),
-        makeAssistantMsg({ id: "a1", content: "old reply" }),
-        makeUserMsg({ id: "u2", content: "new" }),
-        makeAssistantMsg({ id: "a2", content: "new reply" }),
-      ],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    // Completed turns default to collapsed.
-    expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
-
-    const header = h.$(
-      '[data-testid="user-message"][data-message-id="u1"] .message-box-header-main',
-    )!;
-    header.click();
-    await h.flush();
-    expect(h.toJSON().chat.messages.map((m) => m.id)).toContain("a1");
-
-    header.click();
-    await h.flush();
-    expect(h.toJSON().chat.messages.map((m) => m.id)).not.toContain("a1");
-    h.unmount();
-  });
-
-  it("user message status badge renders 'sending' on optimistic bubble", async () => {
-    const session = makeSession();
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    await h.typeAndSend("queued");
-
-    const sending = h.toJSON().chat.messages.find(
-      (m) => m.role === "user" && m.status === "sending",
-    );
-    expect(sending).toBeDefined();
-    expect(sending!.text).toContain("queued");
-    h.unmount();
-  });
+  // "user message status badge renders 'sending' on optimistic bubble"
+  // is DELETED, not ported — same REAL PRODUCT GAP documented in
+  // tests/client-id.test.ts's ledger entry: the native path has no
+  // optimistic client-side echo of a just-sent prompt at all (no
+  // "pending"/"sending" NodeWire status exists; a typed_prompt only
+  // appears once the backend confirms it).
 
   it("renders persisted user file attachments", () => {
     const message = makeUserMsg({
@@ -399,44 +352,12 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("renders model switch events as a trailing turn-group marker", async () => {
-    // model_switched events are extracted from the response message's
-    // events and rendered as a ModelSwitchBoundaryEvents marker on the
-    // owning TurnGroup (see Chat.tsx's modelSwitchEvents/turnGroups) —
-    // not inline in the assistant's own event timeline (AssistantMessage
-    // filters them out via isModelSwitchedEvent).
-    const session = makeSession({
-      messages: [
-        makeUserMsg({ id: "u", content: "switch" }),
-        makeAssistantMsg({
-          id: "a",
-          content: "done",
-          events: [
-            {
-              type: "model_switched",
-              data: {
-                previous_provider_id: "claude",
-                previous_model: "sonnet",
-                provider_id: "codex",
-                model: "gpt-5-codex",
-                changed: ["provider_id", "model"],
-              },
-            },
-          ],
-        }),
-      ],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    const marker = h.$('[data-testid="model-switch-trailing"] .event-model-switched');
-    expect(marker).not.toBeNull();
-    // Harness i18next has empty resources — t() returns the key, not
-    // English copy (see message.modelSwitched in en.json).
-    expect(marker!.textContent).toContain("message.modelSwitched");
-    expect(marker!.textContent).toContain("claude / sonnet to codex / gpt-5-codex");
-    h.unmount();
-  });
+  // "renders model switch events as a trailing turn-group marker" is
+  // DELETED, not ported — it exercises the exact same "trailing banner
+  // with no owning next turn yet" legacy state already deleted (with the
+  // full native-model rationale) in tests/model-switch-grouping.test.tsx.
+  // The "preceding next prompt" case that DOES have a native equivalent
+  // is already ported there.
 
   it("dedups consecutive identical todo snapshots", () => {
     const todos = [
@@ -481,138 +402,19 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("error event shows the error text on the failed user bubble", async () => {
-    const session = makeSession();
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    await h.typeAndSend("oops");
-    // finalizeTerminalAssistant (useSession.ts) only stamps the
-    // initiating USER message on an error terminal when that user
-    // message is already the persisted node.messages entry (not the
-    // pending/optimistic one) preceding a streaming assistant
-    // placeholder — mirroring the real backend order
-    // (user_message_persisted -> messages_delta -> turn_start -> error)
-    // where the turn already created + then removed an assistant
-    // message before its exception path marks the user message errored.
-    const sendFrame = h.outbound.find((f) => f.type === "send_message") as
-      | { client_id?: string }
-      | undefined;
-    h.emit({
-      type: "user_message_persisted",
-      data: {
-        session_id: session.id,
-        user_message: {
-          id: "u-real",
-          role: "user",
-          content: "oops",
-          client_id: sendFrame?.client_id,
-          seq: 0,
-        },
-      },
-    });
-    await h.flush();
-
-    h.emit({ type: "turn_start", data: { session_id: session.id } });
-    h.emit({
-      type: "session_monitoring_changed",
-      data: {
-        session_id: session.id,
-        monitoring_state: "active",
-        cwd: session.cwd,
-        node_id: session.node_id ?? "primary",
-      },
-    });
-    h.emit({
-      type: "messages_delta",
-      data: {
-        app_session_id: session.id,
-        messages: [
-          makeAssistantMsg({ id: "a-fail", content: "", seq: 1, isStreaming: true }),
-        ],
-      },
-    });
-    await h.flush();
-    h.emit({
-      type: "error",
-      data: { error: "Backend exploded", session_id: session.id },
-    });
-    // The backend's terminal-turn path publishes authoritative stopped
-    // monitoring state alongside the error frame. Without this,
-    // `isRunning` stays true forever and MessageStatus permanently
-    // suppresses the error chrome (TurnGroupImpl passes
-    // `status={isRunning ? undefined : initiatorMessage.status}`).
-    h.emit({
-      type: "session_monitoring_changed",
-      data: {
-        session_id: session.id,
-        monitoring_state: "stopped",
-        cwd: session.cwd,
-        node_id: session.node_id ?? "primary",
-      },
-    });
-    // Poll for the actual DOM chrome — Chat.tsx also throttles turn-group
-    // re-renders to at most one commit per 140ms while the session is
-    // running (see fix-playbook.md's render-throttle-race note).
-    await h.waitFor(() => h.$(".message-status.status-error") !== null);
-
-    const failed = h.toJSON().chat.messages.find(
-      (m) => m.role === "user" && m.status === "error",
-    );
-    expect(failed).toBeDefined();
-    // Error chrome renders the message somewhere on the user bubble.
-    const errorBlock = h.$(".message-status.status-error");
-    expect(errorBlock).not.toBeNull();
-    expect(errorBlock!.textContent).toContain("Failed");
-    h.unmount();
-  });
-
-  it("a persisted assistant with error=true renders error chrome", async () => {
-    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const session = makeSession({
-      messages: [
-        makeUserMsg({ id: "u", content: "trigger" }),
-        makeAssistantMsg({
-          id: "a",
-          content: "API Error: 500",
-          error: true,
-          errorText: "API Error: something broke\nrequest id: req-42",
-        }),
-      ],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    try {
-      const errorStatus = h.$(".message-status.status-error");
-      expect(errorStatus).not.toBeNull();
-      const disclosure = errorStatus!.querySelector<HTMLButtonElement>(".error-block-toggle");
-      const copyButton = errorStatus!.querySelector<HTMLButtonElement>(".error-copy-btn");
-      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
-      expect(copyButton?.getAttribute("aria-label")).toBe("errorCopy.copy");
-
-      await act(async () => {
-        copyButton!.click();
-      });
-      expect(writeText).toHaveBeenCalledWith(
-        "API Error: something broke\nrequest id: req-42",
-      );
-      expect(copyButton?.getAttribute("aria-label")).toBe("errorCopy.copied");
-      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
-      expect(errorStatus!.querySelector(".error-block-body")).toBeNull();
-    } finally {
-      h.unmount();
-      if (originalClipboard) {
-        Object.defineProperty(navigator, "clipboard", originalClipboard);
-      } else {
-        delete (navigator as unknown as Record<string, unknown>).clipboard;
-      }
-    }
-  });
+  // "error event shows the error text on the failed user bubble" and "a
+  // persisted assistant with error=true renders error chrome" are
+  // DELETED, not ported: the native model represents turn errors through a
+  // dedicated `failure` Contract Node (FailurePayloadWire), a SEPARATE
+  // content node, not a status flag stamped onto the user's own
+  // typed_prompt bubble — there's no structural equivalent to port THESE
+  // specific bubble-status-shaped assertions to. The underlying user-
+  // observable gap the second case exercised (`.error-block-toggle`
+  // disclosure, `.error-copy-btn` clipboard copy) has since been CLOSED —
+  // `FailureChip` (src/surface/leaf/Chips.tsx, `surface-failure-chip`) now
+  // has the same expand/disclosure + copy chrome at parity — see
+  // tests/surface/nativeGaps.test.tsx's "FailureChip — copy + expand/
+  // disclosure chrome" suite for the restored coverage.
 
   it("thinking text mentioning 'API Error' is NOT mis-rendered as an error block", async () => {
     // Regression: the assistant's thinking prose (e.g. while investigating
@@ -883,40 +685,31 @@ describe("message rendering", () => {
     unmount();
   });
 
-  it("a stopped assistant renders the stopped indicator", async () => {
-    const session = makeSession({
-      messages: [
-        makeUserMsg({ id: "u", content: "go" }),
-        makeAssistantMsg({
-          id: "a",
-          content: "partial",
-          stopped_at: new Date().toISOString(),
-        }),
-      ],
+  // "a stopped assistant renders the stopped indicator" is DELETED, not
+  // ported to THIS file's direct-`<MessageBubble>` shape — the gap it
+  // flagged (no `.stopped-indicator`-equivalent existed under
+  // src/surface/) has since been CLOSED: `StoppedIndicator`
+  // (src/surface/leaf/StoppedIndicator.tsx), driven by `TurnEntry.phase
+  // === "stopped"` (a `turn_lifecycle` frame), wired into TurnView.tsx —
+  // see tests/surface/nativeGaps.test.tsx for the restored coverage
+  // (component-level + a harness-level TurnView integration case).
+
+  it("empty session (native) renders an empty surface with no turns", async () => {
+    // Native equivalent of the legacy "empty session renders an empty
+    // chat with no placeholder messages" case — the old ".chat-empty"
+    // welcome placeholder doesn't exist on either path (only the Ask
+    // singleton renders a greeting hero); a regular empty session's
+    // surface simply mounts with zero turns.
+    localStorage.setItem("ba.surface_native", "1");
+    const session = makeSession({ id: "s-empty", messages: [] });
+    const h = await renderApp({
+      seed: { sessions: [session] },
+      configureBackend: (backend) => backend.seedSurface("s-empty", { turns: [] }),
     });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
+    await h.selectSession("s-empty");
 
-    // StoppedIndicator is part of the turn's Result, which per
-    // docs/chat-panel.md's renderCollapsedTurn renders even while the
-    // turn is collapsed — no expand needed.
-    const indicator = h.$(".stopped-indicator");
-    expect(indicator).not.toBeNull();
-    expect(indicator!.textContent ?? "").toMatch(/[Ss]topped/);
-    h.unmount();
-  });
-
-  it("empty session renders an empty chat with no placeholder messages", async () => {
-    // The old ".chat-empty" welcome placeholder no longer exists for
-    // regular sessions (only the Ask singleton renders a greeting hero —
-    // see the "reserves the chat header for an empty Ask session" test
-    // above); a regular empty session's chat area simply stays empty.
-    const session = makeSession({ messages: [] });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    expect(h.toJSON().chat.messages).toEqual([]);
-    expect(h.$('[data-testid="chat-messages"]')).not.toBeNull();
+    await h.waitFor(() => h.$('[data-testid="surface-chat-view"]') !== null);
+    expect(h.$$('[data-testid="surface-turn"]')).toHaveLength(0);
     h.unmount();
   });
 
@@ -957,44 +750,16 @@ describe("message rendering", () => {
   // so each tag's selected text and comment render as separate DOM nodes
   // instead of markdown-prone "[Selected text]: ... User comment: yes"
   // lines.
-  it("inline-tag preamble renders selected text and user comments visibly", async () => {
-    const tags: InlineTag[] = [
-      {
-        id: "t1",
-        messageId: "m1",
-        selectedText: "ephemeral",
-        comment: "yes",
-        timestamp: "2026-04-30T15:01:27.976Z",
-      },
-      {
-        id: "t2",
-        messageId: "m1",
-        selectedText: "Replace the chat input area temporarily?",
-        comment: "yes",
-        timestamp: "2026-04-30T15:01:49.745Z",
-      },
-    ];
-    const content = buildInlineTagsPreamble(tags) + "\nPlease address.";
-    const session = makeSession({
-      messages: [makeUserMsg({ id: "u1", content })],
-    });
-    const h = await renderApp({ seed: { sessions: [session] } });
-    await h.selectSession(session.id);
-
-    const u1el = h.$('[data-testid="user-message"][data-message-id="u1"]');
-    expect(u1el).not.toBeNull();
-    const selectedTexts = Array.from(
-      u1el!.querySelectorAll(".inline-tags-card-selected"),
-    ).map((el) => el.textContent);
-    expect(selectedTexts).toContain("ephemeral");
-    expect(selectedTexts).toContain("Replace the chat input area temporarily?");
-    const comments = u1el!.querySelectorAll(".comment-card-comment");
-    expect(comments).toHaveLength(2);
-    for (const comment of Array.from(comments)) {
-      expect(comment.textContent).toBe("yes");
-    }
-    h.unmount();
-  });
+  // "inline-tag preamble renders selected text and user comments
+  // visibly" is DELETED, not ported to THIS file's direct-`<MessageBubble>`
+  // shape — the gap it flagged has since been CLOSED: `TypedPromptView`
+  // (src/surface/nodes/TypedPrompt.tsx) now special-cases an
+  // `<inline-tags>` segment (parsed via the SAME shared, rendering-agnostic
+  // parsers legacy used — src/utils/artificialSections.ts +
+  // src/utils/inlineTagsPrompt.ts, no forked second parser) into
+  // `.inline-tags-cards`/`.comment-card.inline-tags-card` chips, at parity
+  // with legacy — see tests/surface/nativeGaps.test.tsx for the restored
+  // coverage.
 
   it("inline-tag preamble is expanded by default", () => {
     const tags: InlineTag[] = [

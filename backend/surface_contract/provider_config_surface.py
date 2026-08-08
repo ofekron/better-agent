@@ -9,7 +9,7 @@ from backend.surface_contract.descriptors import (
     InstallableDescriptor,
     ModelCatalog,
     ProviderDescriptor,
-    RuntimeProfile,
+    RuntimeProfilesSnapshot,
 )
 from backend.surface_contract.identity import Emit, ProviderId, Subscription
 from backend.surface_contract.intents import ProviderIntent, TransportAck
@@ -26,7 +26,10 @@ class ProviderConfigSurface(ABC):
     def model_catalog(self, provider_id: ProviderId) -> ModelCatalog: ...
 
     @abstractmethod
-    def runtime_profiles(self) -> tuple[RuntimeProfile, ...]: ...
+    def runtime_profiles(self) -> RuntimeProfilesSnapshot:
+        """Closure 3: the FULL plane snapshot (profiles incl. tombstones,
+        default_runtime_profile_id, last_models/last_reasoning_efforts,
+        deleted_providers) — not just a bare list of live profiles."""
 
     @abstractmethod
     def subscribe(self, emit: Emit) -> Subscription:

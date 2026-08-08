@@ -135,7 +135,11 @@ export type WSEventType =
   | "project_aggregates_changed"
   | "session_status_changed"
   | "project_updates_changed"
-  | "project_mappings_changed"
+  // NOTE: `project_mappings_changed` deleted (confirmed dead code: handled
+  // but its only intended refetch, `GET /api/project-mappings`, was never
+  // called by the frontend at all, and no listener existed for the
+  // `CustomEvent` this used to dispatch either — ADR 0008 Package B plan
+  // §1).
   | "turn_started"
   | "turn_stopped"
   | "turn_detached"
@@ -223,12 +227,13 @@ export type WSEventType =
   // Backend reconcile completed (fast or slow). Initial GET may have
   // returned stale cache; frontend silently refetches the session tree.
   | "session_reconciled"
-  // Per-session running-flag transition. Authoritative state is the
-  // backend's `session_manager._running_sids` (transient — rebuilt
-  // by run_recovery via the same hook). The frontend's
-  // `sessionRegistry` mirrors and powers `<SessionStatusBadge>` /
-  // `<ProjectStatusBadge>` consumers via the typed eventBus.
-  | "session_running_changed"
+  // NOTE: `session_running_changed` (a "per-session running-flag
+  // transition" frame) was declared/validated/logged here but had ZERO
+  // `eventBus.subscribe` consumers anywhere in `frontend/src` (confirmed
+  // dead code, ADR 0008 Package B plan §1) — deleted. The REAL
+  // running-badge signal, `<SessionStatusBadge>`/`<ProjectStatusBadge>`'s
+  // actual source via `sessionRegistry`, is `session_monitoring_changed`
+  // below.
   | "session_monitoring_changed"
   // Per-session unread-cursor transition. Fires on every event-append
   // in `apply_event` AND on ack via POST /api/sessions/{id}/seen.
@@ -248,9 +253,12 @@ export type WSEventType =
   | "node_provider_credentials_changed"
   // Multi-machine: a brand-new worker-node is awaiting operator
   // approval (requested) or its request was resolved (approve/deny).
-  // `useAppWebSocket` publishes both on the typed event bus so
-  // `usePendingNodeRegistrations` converges; authoritative snapshot
-  // comes from the machine-nodes extension's pending-node snapshot.
+  // `useAppWebSocket` publishes both on the typed event bus; the one-time
+  // consumer (`hooks/usePendingNodeRegistrations.ts`) was confirmed dead
+  // (zero importers) and deleted — these two frame types are now also
+  // unconsumed (declared/validated/logged only, same shape as the
+  // confirmed-dead `session_running_changed`), flagged here rather than
+  // deleted since machine/node topology is outside this pass's scope.
   | "node_registration_requested"
   | "node_registration_resolved"
   // Sidebar convergence: a session was deleted in another tab.
@@ -264,6 +272,10 @@ export type WSEventType =
   // Known provider lifecycle notices that should render in the timeline
   // without becoming assistant output text.
   | "lifecycle_notice"
+  // Chat Surface Contract v2 FAILURE node (mapToRenderModel.ts) — a
+  // taxonomized failure (code/severity/retryable/resolution), rendered
+  // as MessageBubble.FailureChip.
+  | "failure"
   // Frontend-flattened provider tool result. Matched results are paired
   // with their tool card; orphaned results render as standalone output.
   | "tool_result"

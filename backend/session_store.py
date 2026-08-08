@@ -142,6 +142,7 @@ def _infer_user_initiated(session: dict) -> bool:
 
 
 _SESSIONS_DIR: Path | None = None
+_SESSIONS_DIR_RAW: Path | None = None
 _SESSIONS_DIR_READY = False
 _SESSIONS_DIR_READY_LOCK = threading.Lock()
 _STORAGE_IDENTITY = contextvars.ContextVar[Path | None](
@@ -158,8 +159,23 @@ _root_file_dirs_lock = threading.Lock()
 
 
 def _sessions_dir() -> Path:
-    global _SESSIONS_DIR, _SESSIONS_DIR_READY
-    resolved = _STORAGE_IDENTITY.get() or (ba_home() / "sessions")
+    global _SESSIONS_DIR, _SESSIONS_DIR_RAW, _SESSIONS_DIR_READY
+    identity = _STORAGE_IDENTITY.get()
+    raw = ba_home() / "sessions" if identity is None else identity
+    # `identity` (set by `_storage_identity_scope`) is already canonicalized
+    # via `.resolve()`. The no-scope default path must canonicalize the same
+    # way, or a symlinked home (e.g. the `~/.better-agent` alias pointing at
+    # `~/.better-claude`) compares unequal to a lease taken on its real path
+    # even though both name the identical directory. Memoize the resolve()
+    # on `raw` so the hot no-scope request path only pays the realpath
+    # syscall when `ba_home()` itself changes, same as `ba_home()`'s own
+    # env-keyed memoization.
+    if identity is not None:
+        resolved = identity
+    elif _SESSIONS_DIR_RAW == raw and _SESSIONS_DIR is not None:
+        resolved = _SESSIONS_DIR
+    else:
+        resolved = raw.resolve()
     with _STORAGE_IDENTITY_LEASE_LOCK:
         if (
             _active_storage_identity is not None
@@ -174,6 +190,7 @@ def _sessions_dir() -> Path:
             if _SESSIONS_DIR == resolved:
                 return resolved
             _SESSIONS_DIR = resolved
+            _SESSIONS_DIR_RAW = raw
             _SESSIONS_DIR_READY = False
             _reset_home_scoped_caches()
             return resolved

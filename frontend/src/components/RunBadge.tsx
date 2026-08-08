@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import type { RunInfo } from "../types";
+import { useRunSummary } from "../hooks/useRunSummary";
 import { RunDetailsModal } from "./RunDetailsModal";
 import { runtimeKindLabelKey } from "./modelPicker";
 
@@ -19,6 +20,19 @@ import { runtimeKindLabelKey } from "./modelPicker";
  * with the runner PID, descendant process tree (CPU%, status, cmd),
  * and provider-side jsonl_path / run_dir so the user can see WHY the
  * backend still considers this run alive.
+ *
+ * Stalled honesty (ADR 0009): the message-anchored `run: RunInfo` prop
+ * (`target_message_id`) has no v2 equivalent — `RunSummary` carries no
+ * message anchor at all (a confirmed backend gap, not an oversight; see
+ * this package's report) — so `run` itself stays legacy-sourced. Layered
+ * on top, `useRunSummary` correlates the SAME `run_id` against the v2
+ * `runs` feed's disk-heartbeat-derived `phase`: `run.startup_phase ===
+ * "stalled"` (legacy's `turn_manager`-heuristic detection, unchanged) OR
+ * v2's `phase === "stalled"` (heartbeat-file-derived, independent of
+ * `turn_manager`'s in-memory state — e.g. still honest across a backend
+ * restart that resets `turn_manager` but not the on-disk `runner_alive`
+ * sentinel) renders the stalled card — the union of two honest signals,
+ * never a regression from either alone.
  */
 export function RunBadge({
   run,
@@ -38,6 +52,7 @@ export function RunBadge({
   const [modalOpen, setModalOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState(false);
+  const v2Summary = useRunSummary(sessionId, run.run_id);
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
@@ -57,7 +72,20 @@ export function RunBadge({
       ? ""
       : run.kind;
 
-  const isStalled = run.startup_phase === "stalled";
+  // Legacy's own `startup_phase` heuristic (turn_manager, in-memory,
+  // richer — carries a real threshold + started_at) stays primary; v2's
+  // heartbeat-file-derived `phase` (runs_adapter.py, disk-backed,
+  // survives a backend restart) is an ADDITIONAL honest signal — see the
+  // component docstring. Rendered distinguishably: the legacy signal
+  // keeps the existing rich card verbatim, the v2-only signal gets a
+  // minimal variant (no fabricated threshold text to show).
+  const legacyStalled = run.startup_phase === "stalled";
+  const v2Stalled = v2Summary?.phase === "stalled";
+  const isStalled = legacyStalled || v2Stalled;
+  const heartbeatSilenceSec =
+    v2Summary?.last_heartbeat_at != null
+      ? Math.max(0, Math.floor(now / 1000 - v2Summary.last_heartbeat_at))
+      : null;
   const cancel = async () => {
     if (!sessionId || cancelling) return;
     setCancelling(true);
@@ -74,7 +102,59 @@ export function RunBadge({
     }
   };
 
-  if (isStalled) {
+  if (isStalled && !legacyStalled) {
+    // v2-only signal: legacy's own heuristic doesn't (yet) agree, so
+    // there is no threshold/started_at to show honestly — a minimal
+    // variant reusing the same `turn-stalled-card` styling idiom, never
+    // fabricating the richer legacy copy's numbers.
+    return (
+      <div className="turn-stalled-card" role="status" aria-live="polite">
+        <div className="turn-stalled-card__icon" aria-hidden="true">!</div>
+        <div className="turn-stalled-card__body">
+          <strong>{t("runBadge.stalledTitleUnknown")}</strong>
+          <span>
+            {t("runBadge.stalledDescriptionHeartbeat", {
+              seconds: heartbeatSilenceSec ?? 0,
+            })}
+          </span>
+          {cancelError && (
+            <span className="turn-stalled-card__error">
+              {t("runBadge.cancelFailed")}
+            </span>
+          )}
+          <div className="turn-stalled-card__actions">
+            <button
+              type="button"
+              className="turn-stalled-card__cancel"
+              onClick={() => void cancel()}
+              disabled={!sessionId || cancelling}
+            >
+              {cancelling ? t("runBadge.cancelling") : t("runBadge.cancel")}
+            </button>
+            {sessionId && (
+              <button
+                type="button"
+                className="turn-stalled-card__details"
+                onClick={() => setModalOpen(true)}
+              >
+                {t("runBadge.details")}
+              </button>
+            )}
+          </div>
+        </div>
+        {sessionId && (
+          <RunDetailsModal
+            open={modalOpen}
+            sessionId={sessionId}
+            runId={run.run_id}
+            onClose={() => setModalOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (legacyStalled) {
     const rawKind = run.provider_kind || "";
     const capitalized = rawKind
       ? rawKind.charAt(0).toUpperCase() + rawKind.slice(1)

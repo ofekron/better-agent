@@ -2,6 +2,12 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
+import {
+  submitSystemIntent,
+  submitSystemIntentAwaitingUpsert,
+  subscribeSystemFrames,
+} from "../lib/systemFeedRegistry";
+import type { HarnessProfileUpsertFrame } from "../adapter/wire";
 import { trackedFetch } from "../progress/store";
 import { ProgressButton } from "../progress/ProgressButton";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
@@ -56,6 +62,74 @@ function allGroups(
   groups.push({ group: descriptor.builtin_extensions, extensionId: null });
   groups.push({ group: descriptor.runtime_skills, extensionId: null });
   return groups;
+}
+
+/** Writes `writes` against `profile_id`/`revision` — native-when-open
+ * (`save_harness_profile`'s intent, the same `{revision, writes}` shape
+ * `harness/api.ts`'s `writeFields` sends over REST), REST fallback
+ * otherwise. A `stale_revision`/`not_found` rejection is re-thrown as the
+ * SAME `REVISION_MISMATCH`/`PROFILE_NOT_FOUND` sentinels `writeFields`
+ * itself throws, so `runMutation`'s existing catch handling below needs
+ * no transport-specific branch. Resolves via the legacy REST GET either
+ * way — the deep field tree only that endpoint carries (see this file's
+ * live-refresh effect comment). */
+function saveHarnessProfileWrites(
+  profileId: string, writes: HarnessFieldWrite[], revision: string,
+): Promise<HarnessProfile> {
+  const native = submitSystemIntent({
+    kind: "save_harness_profile",
+    harness_profile_id: profileId,
+    config: {},
+    revision,
+    writes: writes as unknown as Record<string, unknown>[],
+  });
+  if (!native) return writeFields(profileId, writes, revision);
+  return native.then((ack) => {
+    if (ack.type === "intent_rejected") {
+      if (ack.code === "stale_revision") throw new Error(REVISION_MISMATCH);
+      if (ack.code === "not_found") throw new Error(PROFILE_NOT_FOUND);
+      throw new Error(ack.message || ack.code);
+    }
+    return fetchProfile(profileId);
+  });
+}
+
+/** Creates a profile from `name` — native-when-open via
+ * `submitSystemIntentAwaitingUpsert` (a CREATE has no synchronous ref;
+ * the server-generated id is learned from the intent_id-stamped
+ * `harness_profile_upsert` `backend/adapters/system_adapter.py`'s
+ * `_run_command` forces out — same event-driven-completion idiom
+ * `sessionSurfaceRegistry.ts`'s `submitIntentAwaitingRef` established for
+ * `create_folder`/`create_tag`), REST fallback otherwise. */
+async function createHarnessProfileNativeOrRest(name: string): Promise<{ id: string }> {
+  const result = await submitSystemIntentAwaitingUpsert(
+    { kind: "save_harness_profile", harness_profile_id: null, config: { name }, revision: null, writes: [] },
+    (frame, intentId): frame is HarnessProfileUpsertFrame =>
+      frame.type === "harness_profile_upsert" && frame.intent_id === intentId,
+  );
+  if (!result) return createProfile(name);
+  if (!result.ok) throw new Error(result.message || result.code);
+  const id = result.frame?.profile.harness_profile_id;
+  if (!id) throw new Error("harness profile created but its id was not observed");
+  return { id };
+}
+
+/** Deletes `profileId` at `revision` — native-when-open
+ * (`delete_harness_profile`'s intent, same optimistic-concurrency
+ * revision the legacy `DELETE` route checks), REST fallback otherwise.
+ * `404` re-thrown as `PROFILE_NOT_FOUND` for the same reason
+ * `saveHarnessProfileWrites` re-throws its own typed codes. */
+function deleteHarnessProfileNativeOrRest(profileId: string, revision: string): Promise<void> {
+  const native = submitSystemIntent({
+    kind: "delete_harness_profile", harness_profile_id: profileId, revision,
+  });
+  if (!native) return deleteProfile(profileId, revision);
+  return native.then((ack) => {
+    if (ack.type === "intent_rejected") {
+      if (ack.code === "404") throw new Error(PROFILE_NOT_FOUND);
+      throw new Error(ack.message || ack.code);
+    }
+  });
 }
 
 interface HarnessSettingsEditorProps {
@@ -139,10 +213,37 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
     const unsubExtensionConfig = eventBus.subscribe("extension.config", (payload) => reload(payload, "extensions"));
     const unsubDefaultHarness = eventBus.subscribe("extension.harness.default", (payload) => reload(payload, "extensions"));
     const unsubProfiles = eventBus.subscribe("harness_profiles_changed", (payload) => reload(payload, "profiles"));
+    // ADR 0011 §2 `extension_config`/`harness_profiles` feeds — additional
+    // live-refresh triggers alongside the legacy eventBus pings above
+    // (dual SIGNAL only). The READ MODEL stays legacy REST
+    // (`harness/api.ts`'s `fetchDescriptor`/`fetchProfile`): the deep
+    // per-profile field tree this editor renders has no v2 read-model
+    // equivalent at all (`HarnessProfileDescriptor` carries no `fields`)
+    // — genuinely out of this pass's scope (a read-model addition that
+    // size is its own migration). The MUTATIONS below
+    // (`applyWrites`/`handleCreate`/`handleDelete`) DO go native-when-open
+    // now: `save_harness_profile`'s intent carries `revision`/`writes`
+    // (the same optimistic-concurrency + field-write shape
+    // `harness/api.ts`'s `writeFields` sends), stale-revision rejections
+    // arrive as a typed `intent_rejected` code this component maps onto
+    // its EXISTING `REVISION_MISMATCH` handling below, and a CREATE's
+    // server-generated id is learned via `submitSystemIntentAwaitingUpsert`
+    // (event-driven — the ack alone can't carry it, ADR 0006 §5). Every
+    // native path still re-derives the resulting `HarnessProfile` via the
+    // same legacy REST GET (`fetchProfile`) the REST path already used,
+    // since only THAT carries the deep field tree — only the write
+    // ITSELF moved transport, not the subsequent read.
+    const unsubscribeV2 = subscribeSystemFrames((frame) => {
+      if (frame.type === "extension_config_upsert") reload(frame, "extensions");
+      else if (frame.type === "harness_profile_upsert" || frame.type === "harness_default_changed") {
+        reload(frame, "profiles");
+      }
+    });
     return () => {
       unsubExtensionConfig();
       unsubDefaultHarness();
       unsubProfiles();
+      unsubscribeV2();
     };
   }, [load, loadProfiles]);
 
@@ -196,7 +297,7 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
   const applyWrites = useCallback(
     (writes: HarnessFieldWrite[]) => {
       if (!profile || profile.read_only || !writes.length) return;
-      runMutation(() => writeFields(profile.id, writes, profile.revision));
+      runMutation(() => saveHarnessProfileWrites(profile.id, writes, profile.revision));
     },
     [profile, runMutation],
   );
@@ -206,7 +307,7 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
     if (!name) return;
     setCreating(true);
     setError("");
-    createProfile(name)
+    createHarnessProfileNativeOrRest(name)
       .then((created) => {
         setNewProfileName("");
         setSelectedId(created.id);
@@ -219,7 +320,7 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
     if (!profile || isDefault || profile.read_only) return;
     setSaving(true);
     setError("");
-    deleteProfile(profile.id, profile.revision)
+    deleteHarnessProfileNativeOrRest(profile.id, profile.revision)
       .then(() => setSelectedId(DEFAULT_ID))
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);

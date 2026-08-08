@@ -1037,7 +1037,7 @@ class CodexProvider(Provider):
                     if not task.done():
                         task.cancel()
 
-    def _record_child_terminal(
+    async def _record_child_terminal(
         self,
         rs: RunState,
         source_key: str,
@@ -1052,12 +1052,36 @@ class CodexProvider(Provider):
         if not delegation_id:
             return
         child_id = str(source.get("agent_id") or source.get("child_id") or source_key)
+        # Real per-child usage — the SAME `turn.completed`/`turn.failed`
+        # `usage` extraction `_emit_complete_from_file` uses for the
+        # top-level run's own completion (`_read_codex_rollout_complete`);
+        # the child's own rollout file carries the identical event shape,
+        # already-flushed bytes only (the terminal detection that triggers
+        # this call already read past them). None when the span from the
+        # child's own start byte never actually reached a terminal event
+        # (e.g. a forced-False termination on parent shutdown with the
+        # child still mid-turn, `_emit_complete_from_file`'s loop below) —
+        # never guessed.
+        jsonl_path = source.get("jsonl_path")
+        token_usage: Optional[dict[str, int]] = None
+        if isinstance(jsonl_path, str) and jsonl_path:
+            try:
+                start_byte = int(source.get("start_byte") or 0)
+            except (TypeError, ValueError):
+                start_byte = 0
+            complete = await asyncio.to_thread(
+                _read_codex_rollout_complete,
+                jsonl_path, start_byte=start_byte, session_id=child_id,
+            )
+            if complete is not None:
+                token_usage = complete.get("token_usage")
         try:
             rs.queue.put_nowait(StreamEvent("worker_complete", {
                 "delegation_id": delegation_id,
                 "worker_session_id": child_id,
                 "success": terminal_state,
                 "run_mode": "codex_subagent",
+                "token_usage": token_usage,
             }))
         except Exception:
             logger.exception("failed to enqueue codex subagent completion")
@@ -1220,7 +1244,7 @@ class CodexProvider(Provider):
             except Exception:
                 logger.exception("failed to enqueue codex subagent panel")
         if existing_terminal is not None:
-            self._record_child_terminal(rs, source_key, existing_terminal)
+            await self._record_child_terminal(rs, source_key, existing_terminal)
 
         def _dispatch_child(
             event: dict,
@@ -1256,12 +1280,12 @@ class CodexProvider(Provider):
             _rs.child_sources.setdefault(_source_key, {})["processed_byte_offset"] = n
             self._schedule_backend_state_flush(_rs)
 
-        def _on_child_terminal(
+        async def _on_child_terminal(
             terminal_state: bool,
             _rs: RunState = rs,
             _source_key: str = source_key,
         ) -> None:
-            self._record_child_terminal(_rs, _source_key, terminal_state)
+            await self._record_child_terminal(_rs, _source_key, terminal_state)
 
         tailer = CodexRolloutTailer(
             path=path,
@@ -1304,7 +1328,7 @@ class CodexProvider(Provider):
             payload["error"] = "cancelled"
         if payload.get("success") is not True:
             for source_key in rs.child_sources:
-                self._record_child_terminal(rs, source_key, False)
+                await self._record_child_terminal(rs, source_key, False)
         # Codex's runner can't see token_count (it's in the rollout, tailed
         # here), so stamp the context window captured during tailing onto the
         # complete envelope — turn_manager routes it to set_context_window,
