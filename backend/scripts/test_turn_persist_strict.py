@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -302,6 +303,48 @@ def test_root_writer_guard() -> None:
     )
 
 
+def test_reload_root_from_disk_releases_persist_coordinator_accepted_root() -> None:
+    """Regression: a root vanishing right after a persist was enqueued
+    (e.g. redigest rollback, or the `_vanish` listener above) must not
+    leak into the persist coordinator's `accepted_roots`.
+
+    `_is_quiescent_unlocked` treats ANY entry in `accepted_roots` as
+    "not quiescent" for the WHOLE coordinator, regardless of which root
+    it names. Before the fix, `reload_root_from_disk` popped `pending`
+    and cancelled the deadline for the reloaded root but never released
+    it from `accepted_roots` — leaving one phantom entry that poisons
+    every future `shutdown_persistence()` forever, raising "session
+    persistence drain is incomplete" even when nothing is actually
+    pending."""
+    persist = session_manager._persist_coordinator
+
+    sess = session_manager.create(
+        name="reload-quiescence", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    rid = session_manager._root_id_for(sid)
+    assert rid is not None
+
+    # Mirror the `_vanish` listener: a persist gets enqueued for this root,
+    # then the root is reloaded from disk before the debounce fires.
+    with persist.lock:
+        persist.enqueue_unlocked(
+            rid, session_manager._roots[rid], now=time.monotonic(), debounce=999,
+        )
+    assert rid in persist.accepted_roots, "fixture broken: enqueue did not accept the root"
+
+    session_manager.reload_root_from_disk(rid)
+
+    with persist.lock:
+        assert rid not in persist.accepted_roots, (
+            "reload_root_from_disk leaked the reloaded root into "
+            "accepted_roots — this permanently blocks quiescence"
+        )
+        assert rid not in persist.pending
+        assert rid not in persist.deadlines
+
+
 def main() -> int:
     test_append_contracts()
     print(f"{PASS} append strict/lenient contracts")
@@ -313,6 +356,8 @@ def main() -> int:
     print(f"{PASS} pre-registration abort clears the exact pre-begin claim")
     test_root_writer_guard()
     print(f"{PASS} root writer guard (resident skip / non-resident persist)")
+    test_reload_root_from_disk_releases_persist_coordinator_accepted_root()
+    print(f"{PASS} reload_root_from_disk releases the persist coordinator's accepted_roots entry")
     return 0
 
 
