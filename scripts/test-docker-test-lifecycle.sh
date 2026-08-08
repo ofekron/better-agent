@@ -166,12 +166,13 @@ assert_logged "run --name better-agent-test-backend-"
 assert_logged "--label com.better-agent.test.run="
 assert_not_logged "volume rm"
 
-# Resource caps: unset env preserves the long-standing --cpus=2 default and
-# emits neither --memory nor --cpu-shares (both previously absent).
+# Resource caps: unset env now defaults to --cpus=3 (matching the new
+# xdist-workers=3 local default 1:1) and still emits neither --memory nor
+# --cpu-shares (both stay opt-in).
 unset BETTER_AGENT_TEST_CPUS BETTER_AGENT_TEST_MEMORY BETTER_AGENT_TEST_CPU_SHARES
 default_cap_args="$(docker_test_resource_cap_args)"
-[ "$default_cap_args" = "--cpus=2" ] \
-  || fail "default resource cap args changed local behavior: $default_cap_args"
+[ "$default_cap_args" = "--cpus=3" ] \
+  || fail "default resource cap args did not match the new local default: $default_cap_args"
 
 # Setting the knobs must reach the actual docker invocation, memory paired
 # with a matching --memory-swap (no swap thrash), unset shares still absent.
@@ -218,8 +219,44 @@ grep -F 'docker_test_xdist_pytest_args' "$HERE/run-backend-tests.sh" >/dev/null 
 # CPU shares is an independent, still-optional knob (relative weight, not a
 # hard ceiling) — absent unless explicitly set.
 shares_cap_args="$(BETTER_AGENT_TEST_CPU_SHARES=512 docker_test_resource_cap_args)"
-[ "$shares_cap_args" = "$(printf '%s\n%s' '--cpus=2' '--cpu-shares=512')" ] \
+[ "$shares_cap_args" = "$(printf '%s\n%s' '--cpus=3' '--cpu-shares=512')" ] \
   || fail "set BETTER_AGENT_TEST_CPU_SHARES did not produce expected docker flag: $shares_cap_args"
+
+# docker_test_normalize_xdist_workers: the LOCAL escape hatches (see
+# run-backend-tests.sh's header comment) — "0"/"1" and any `no:xdist` pytest
+# arg — must fully disable xdist (empty result); anything else (an explicit
+# worker count, or "auto") must pass through unchanged.
+[ -z "$(docker_test_normalize_xdist_workers 0)" ] \
+  || fail "docker_test_normalize_xdist_workers did not disable for worker count 0"
+[ -z "$(docker_test_normalize_xdist_workers 1)" ] \
+  || fail "docker_test_normalize_xdist_workers did not disable for worker count 1 (--parallel 1 escape hatch)"
+[ "$(docker_test_normalize_xdist_workers 3)" = 3 ] \
+  || fail "docker_test_normalize_xdist_workers changed a plain worker count"
+[ "$(docker_test_normalize_xdist_workers auto)" = auto ] \
+  || fail "docker_test_normalize_xdist_workers changed 'auto'"
+[ -z "$(docker_test_normalize_xdist_workers 3 -k foo -p no:xdist)" ] \
+  || fail "docker_test_normalize_xdist_workers did not honor a user -p no:xdist arg"
+[ "$(docker_test_normalize_xdist_workers 3 -k foo)" = 3 ] \
+  || fail "docker_test_normalize_xdist_workers misfired on an unrelated pytest arg"
+
+# docker_test_timeout_pytest_args: the local default (120, passed explicitly
+# by run-backend-tests.sh as ${BETTER_AGENT_TEST_TIMEOUT:-120}) must emit the
+# per-test timeout flags; "0" (the LOCAL escape hatch) must emit nothing.
+TIMEOUT_ARGS_UNDER_TEST=()
+while IFS= read -r timeout_arg; do
+  TIMEOUT_ARGS_UNDER_TEST+=("$timeout_arg")
+done < <(docker_test_timeout_pytest_args 120)
+[ "${TIMEOUT_ARGS_UNDER_TEST[*]}" = "--timeout=120 --timeout-method=signal" ] \
+  || fail "docker_test_timeout_pytest_args did not produce the local 120s default: ${TIMEOUT_ARGS_UNDER_TEST[*]}"
+[ -z "$(docker_test_timeout_pytest_args 0)" ] \
+  || fail "docker_test_timeout_pytest_args did not honor the BETTER_AGENT_TEST_TIMEOUT=0 escape hatch"
+
+grep -F 'docker_test_normalize_xdist_workers' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not apply the xdist escape-hatch normalization"
+grep -F 'docker_test_timeout_pytest_args "${BETTER_AGENT_TEST_TIMEOUT:-120}"' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not default BETTER_AGENT_TEST_TIMEOUT to 120 locally"
+grep -F 'BETTER_AGENT_TEST_XDIST:-3' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not default BETTER_AGENT_TEST_XDIST to 3 locally"
 
 # BETTER_AGENT_TEST_CHOWN forwarding (docker_test_chown_env_args): must
 # reach the docker invocation on native Linux Docker hosts, so
