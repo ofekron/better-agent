@@ -38,8 +38,6 @@ _STREAM_READ_LIMIT = _LINE_MAX_BYTES + 64 * 1024
 
 _EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 
-_DEFAULT_MAX_CONCURRENCY = 8
-
 
 class ResponseTooLarge(RuntimeError):
     """The extension's response line exceeded RESPONSE_BODY_MAX_BYTES. The

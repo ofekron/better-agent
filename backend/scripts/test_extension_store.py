@@ -2698,7 +2698,7 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
             raise AssertionError("same-generation re-enable did not rotate activation")
         with extension_store._store_lock():
             write_json(extension_store._slow_calls_path(), {"extensions": {
-                extension_id: {"activation_id": old_activation, "slow_asgi": [time.time()]}
+                extension_id: {"activation_id": old_activation, "slow_host_elapsed": [time.time()]}
             }})
 
         results: list[list[str]] = []
@@ -2722,7 +2722,7 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
             raise AssertionError("old activation timeout quarantined current activation")
         history = read_json(extension_store._slow_calls_path(), {"extensions": {}})
         stale_history = history.get("extensions", {}).get(extension_id, {})
-        if stale_history.get("activation_id") != old_activation or len(stale_history.get("slow_asgi", [])) != 1:
+        if stale_history.get("activation_id") != old_activation or len(stale_history.get("slow_host_elapsed", [])) != 1:
             raise AssertionError("old activation completion mutated durable history")
 
         for _ in range(2):

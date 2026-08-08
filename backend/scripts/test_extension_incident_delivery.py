@@ -188,7 +188,7 @@ async def test_primary_dedups_ack_loss_replay_by_authenticated_node_id() -> None
     finally:
         node_store.get_connection = original_conn  # type: ignore[assignment]
 
-    incidents = _history_for(extension_id).get("slow_asgi", [])
+    incidents = _history_for(extension_id).get("slow_host_elapsed", [])
     check(len(incidents) == 1, "primary dedups replayed incident id durably")
     check(incidents[0]["node_id"] == "worker-a", "primary uses authenticated node id for dedup scope")
     check(
