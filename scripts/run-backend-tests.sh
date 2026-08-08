@@ -19,12 +19,21 @@
 #   ./scripts/run-backend-tests.sh --parallel             # run via pytest-xdist, workers = nproc
 #   ./scripts/run-backend-tests.sh --parallel 4            # ...with an explicit worker count
 #
-# --parallel is opt-in, never the default: backend/scripts integration tests
-# spawn real subprocesses against fixed resources (ports, temp homes) that
-# were never audited for cross-worker safety under pytest-xdist. Forcing it
-# on by default would trade a slow-but-correct suite for a fast-but-flaky
-# one — pass --parallel yourself once you've confirmed the target subset is
-# parallel-safe (e.g. -k a single isolated module).
+# --parallel (or its env-var equivalent BETTER_AGENT_TEST_XDIST, read as
+# --parallel's default so CI can opt in without a CLI flag — see the
+# per-runner env in .github/workflows/backend-tests-selfhosted.yml) is opt-in
+# for LOCAL invocations, never the default: an unset knob keeps today's
+# sequential single-process behavior unconditionally. CI itself now opts in
+# by default because `--dist loadfile` (see docker_test_xdist_pytest_args in
+# lib/docker-test-lifecycle.sh) keeps every test in one file on the SAME
+# worker PROCESS — file-level isolation is the property backend/scripts
+# integration tests actually rely on (temp homes engaged per module, fixed
+# ports bound with port=0 for ephemeral assignment), and splitting work
+# across worker processes cannot weaken that: two files on two different
+# workers share no process state at all, which is strictly SAFER than
+# today's single process where every file already shares one process's
+# module table for the whole run. What stays unvetted is splitting a single
+# file's own tests across workers (loadscope/load) — never used here.
 #
 # Coverage (--coverage) mounts an output dir into the container (which runs
 # --rm, so reports written inside the layer would be lost) and appends
@@ -103,7 +112,12 @@ source "$HERE/lib/docker-test-lifecycle.sh"
 
 REF=""
 COVERAGE_DIR=""
-PARALLEL_WORKERS=""
+# BETTER_AGENT_TEST_XDIST is --parallel's default so CI can opt in via env
+# (matching the BETTER_AGENT_TEST_CPUS/_MEMORY/_TIMEOUT pattern already used
+# for per-runner knobs) without needing a CLI flag; an explicit --parallel
+# below still overrides it for manual invocations. Unset in both places
+# leaves this empty, which is the local-dev default (sequential).
+PARALLEL_WORKERS="${BETTER_AGENT_TEST_XDIST:-}"
 PYTEST_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -279,9 +293,14 @@ fi
 # pytest-cov ships built-in support for combining coverage data across
 # pytest-xdist workers, so --parallel + --coverage compose with no extra
 # config beyond both being present.
-if [ -n "$PARALLEL_WORKERS" ]; then
-  PYTEST_ARGS+=(-n "$PARALLEL_WORKERS")
-fi
+#
+# docker_test_xdist_pytest_args (lib/docker-test-lifecycle.sh) is the single
+# source of truth for the actual flags (-n <workers> --dist loadfile) — see
+# that function's header for why --dist loadfile is mandatory, not optional,
+# whenever a worker count is set.
+while IFS= read -r xdist_pytest_arg; do
+  PYTEST_ARGS+=("$xdist_pytest_arg")
+done < <(docker_test_xdist_pytest_args "$PARALLEL_WORKERS")
 
 echo "run-backend-tests: running tests in $IMAGE_TAG"
 TEST_STATUS=0
