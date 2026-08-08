@@ -121,11 +121,29 @@ def _standalone_runner_unresolved_params(item, is_runner_cache):
     return tuple(name for name in argnames if name not in resolved)
 
 
-@pytest.fixture(autouse=True)
-def _ensure_ba_home_dirs(request):
+def _engage_module_home(module_name: str) -> None:
     import paths
-    module_home = _test_home.pytest_home_for_module(request.module.__name__)
+    module_home = _test_home.pytest_home_for_module(module_name)
     _test_home.engage(module_home or _SESSION_ROOT)
     home = paths.ba_home()
     for sub in ("sessions", "runs", "ask-status", "delegate-status"):
         (home / sub).mkdir(parents=True, exist_ok=True)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _ensure_ba_home_dirs_module(request):
+    # Pytest sets up autouse fixtures broadest-scope-first, so a module-scoped
+    # autouse fixture DEFINED IN A TEST FILE (e.g. an extension-store /
+    # config-store seeding fixture) runs before the function-scoped
+    # `_ensure_ba_home_dirs` below ever fires for that module's first test —
+    # at that point `ba_home()` still holds whatever the PREVIOUS module's
+    # last test left behind, so the seeding fixture would write into the
+    # wrong test home. Conftest-defined fixtures of a given scope run before
+    # same-scope fixtures the test module defines, so re-engaging here closes
+    # that gap before any such fixture in the module can execute.
+    _engage_module_home(request.module.__name__)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_ba_home_dirs(request):
+    _engage_module_home(request.module.__name__)

@@ -39,6 +39,7 @@ if str(BACKEND) not in sys.path:
 sys.path.insert(0, str(BACKEND.parent / "sdk"))
 
 import _test_home  # noqa: E402
+from _test_home import scoped_patches  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-session-mcp-harness-profile-")
 
 import communicate_mcp  # noqa: E402
@@ -53,7 +54,18 @@ import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
-installation_profile.integrations_enabled = lambda: True
+# Scoped to this module's tests so the patched callable is not poisoned for
+# later script-style modules collected in the same pytest session.
+_MODULE_PATCHES = [
+    (installation_profile, "integrations_enabled", lambda: True),
+]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _scoped_integrations_enabled_patch():
+    with scoped_patches(_MODULE_PATCHES):
+        yield
+
 
 PROFILE_PARAMS = ("harness_profile_id",)
 
@@ -385,18 +397,19 @@ def test_session_created_without_a_profile_keeps_every_server() -> None:
 
 def main() -> int:
     try:
-        _install_fixture(KEPT_EXT, KEPT_SERVER)
-        _install_fixture(DROPPED_EXT, DROPPED_SERVER)
-        test_registered_communicate_tools_accept_the_profile()
-        test_delegate_task_forwards_the_profile()
-        test_create_worker_forwards_the_profile()
-        test_ensure_named_worker_forwards_the_profile_on_the_spec()
-        test_every_provider_surface_exposes_the_profile()
-        test_session_bridge_delegate_to_session_accepts_the_profile()
-        test_routes_validate_the_selection_before_creating()
-        test_created_session_applies_inclusion_and_exclusion()
-        test_created_sub_session_applies_inclusion_and_exclusion()
-        test_session_created_without_a_profile_keeps_every_server()
+        with scoped_patches(_MODULE_PATCHES):
+            _install_fixture(KEPT_EXT, KEPT_SERVER)
+            _install_fixture(DROPPED_EXT, DROPPED_SERVER)
+            test_registered_communicate_tools_accept_the_profile()
+            test_delegate_task_forwards_the_profile()
+            test_create_worker_forwards_the_profile()
+            test_ensure_named_worker_forwards_the_profile_on_the_spec()
+            test_every_provider_surface_exposes_the_profile()
+            test_session_bridge_delegate_to_session_accepts_the_profile()
+            test_routes_validate_the_selection_before_creating()
+            test_created_session_applies_inclusion_and_exclusion()
+            test_created_sub_session_applies_inclusion_and_exclusion()
+            test_session_created_without_a_profile_keeps_every_server()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print("PASS session-creating MCP tools accept and apply harness profiles")
