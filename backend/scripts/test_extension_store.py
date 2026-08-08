@@ -5052,6 +5052,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
         "manifest": {
             "kind": extension_store.MANIFEST_KIND,
             "id": extension_id,
+            "core_roles": ["requirements"],
             "name": "Requirements",
             "version": "1.0.0",
             "description": "",
