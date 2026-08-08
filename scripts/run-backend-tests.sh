@@ -54,6 +54,15 @@
 # set; CI sets them per self-hosted runner in
 # .github/workflows/backend-tests-selfhosted.yml.
 #
+# Bind-mount ownership on native Linux Docker hosts (docker_test_chown_env_args
+# in lib/docker-test-lifecycle.sh): the working-tree path's /repo bind mount
+# shares host filesystem ownership 1:1 with the container's UID, and the test
+# image runs as root — so a native-Linux run forwards this host's uid:gid as
+# BETTER_AGENT_TEST_CHOWN, and docker/entrypoint-test.sh chowns /repo back
+# after the test run so root-owned junit/cache files don't break the next CI
+# job's checkout. Automatic (uname -s = Linux), not opt-in; a no-op on
+# macOS/Docker Desktop, whose VM already remaps bind-mount ownership.
+#
 # Per-test-file timing telemetry: pass `-- --junitxml=<path>` (plain pytest
 # passthrough, no dedicated flag). For the default working-tree path above,
 # /repo is a live bind-mount of this repo, so a relative --junitxml path
@@ -207,6 +216,13 @@ done < <(docker_test_resource_cap_args)
 if [ -n "${RUN_LLM_TESTS:-}" ]; then
   RUN_ARGS+=(-e "RUN_LLM_TESTS=${RUN_LLM_TESTS}")
 fi
+# BETTER_AGENT_TEST_CHOWN (see docker_test_chown_env_args in
+# lib/docker-test-lifecycle.sh): only emitted on native Linux Docker hosts,
+# where entrypoint-test.sh needs it to hand bind-mounted /repo ownership
+# back to the invoking user; a no-op on macOS/Docker Desktop.
+while IFS= read -r chown_env_arg; do
+  RUN_ARGS+=("$chown_env_arg")
+done < <(docker_test_chown_env_args)
 
 if [ "$BIND_MOUNT_REPO" = "1" ]; then
   # Working-tree path: the `deps` image has no source baked in. Bind-mount

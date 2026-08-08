@@ -72,7 +72,18 @@ hostname() {
 }
 
 id() {
-  [ "${1:-}" = -u ] && printf 'test-%s\n' "$$"
+  case "${1:-}" in
+    # -u's format is load-bearing for the symlink-lock-root test below,
+    # which independently derives TEST_LOCK_ROOT from the same "test-$$"
+    # shape docker_test_prepare_lock_root computes via `id -u`.
+    -u) printf 'test-%s\n' "$$" ;;
+    -g) printf 'test-gid-%s\n' "$$" ;;
+  esac
+}
+
+FAKE_UNAME_S="Darwin"
+uname() {
+  [ "${1:-}" = -s ] && printf '%s\n' "$FAKE_UNAME_S"
 }
 
 docker_test_with_builder_lock() {
@@ -181,6 +192,43 @@ assert_logged "--cpus=4 --memory=2g --memory-swap=2g example -k smoke"
 shares_cap_args="$(BETTER_AGENT_TEST_CPU_SHARES=512 docker_test_resource_cap_args)"
 [ "$shares_cap_args" = "$(printf '%s\n%s' '--cpus=2' '--cpu-shares=512')" ] \
   || fail "set BETTER_AGENT_TEST_CPU_SHARES did not produce expected docker flag: $shares_cap_args"
+
+# BETTER_AGENT_TEST_CHOWN forwarding (docker_test_chown_env_args): must
+# reach the docker invocation on native Linux Docker hosts, so
+# entrypoint-test.sh can hand bind-mounted /repo ownership back to the
+# invoking user, and must be a complete no-op everywhere else (macOS/Docker
+# Desktop already remaps bind-mount ownership).
+FAKE_UNAME_S="Darwin"
+darwin_chown_args="$(docker_test_chown_env_args)"
+[ -z "$darwin_chown_args" ] \
+  || fail "docker_test_chown_env_args emitted flags on Darwin: $darwin_chown_args"
+
+FAKE_UNAME_S="Linux"
+linux_chown_args="$(docker_test_chown_env_args)"
+[ "$linux_chown_args" = "$(printf -- '-e\nBETTER_AGENT_TEST_CHOWN=test-%s:test-gid-%s' "$$" "$$")" ] \
+  || fail "docker_test_chown_env_args did not forward uid:gid on Linux: $linux_chown_args"
+
+CHOWN_ARGS_UNDER_TEST=()
+while IFS= read -r chown_arg; do
+  CHOWN_ARGS_UNDER_TEST+=("$chown_arg")
+done < <(docker_test_chown_env_args)
+: > "$LOG"
+docker_test_run "${CHOWN_ARGS_UNDER_TEST[@]}" example -k smoke
+assert_logged "-e BETTER_AGENT_TEST_CHOWN=test-$$:test-gid-$$ example -k smoke"
+
+FAKE_UNAME_S="Darwin"
+CHOWN_ARGS_UNDER_TEST_DARWIN=()
+while IFS= read -r chown_arg; do
+  CHOWN_ARGS_UNDER_TEST_DARWIN+=("$chown_arg")
+done < <(docker_test_chown_env_args)
+[ "${#CHOWN_ARGS_UNDER_TEST_DARWIN[@]}" -eq 0 ] \
+  || fail "docker_test_chown_env_args produced flags on Darwin: ${CHOWN_ARGS_UNDER_TEST_DARWIN[*]}"
+: > "$LOG"
+docker_test_run ${CHOWN_ARGS_UNDER_TEST_DARWIN[@]+"${CHOWN_ARGS_UNDER_TEST_DARWIN[@]}"} example -k smoke
+assert_not_logged "BETTER_AGENT_TEST_CHOWN"
+
+grep -F 'docker_test_chown_env_args' "$HERE/run-backend-tests.sh" >/dev/null \
+  || fail "run-backend-tests.sh does not forward docker_test_chown_env_args into RUN_ARGS"
 
 for runner in "$HERE/run-backend-tests.sh" "$HERE/run-fullstack-tests.sh"; do
   grep -F 'source "$HERE/lib/docker-test-lifecycle.sh"' "$runner" >/dev/null \
