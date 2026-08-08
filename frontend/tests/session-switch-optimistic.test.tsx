@@ -25,7 +25,6 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 import { useSession } from "../src/hooks/useSession";
 import { isInflight } from "../src/progress/store";
 import type { Session } from "../src/types";
-import { MockWebSocketController } from "./harness/mockWebSocket";
 
 const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
 const SESSION_LIST = /\/api\/sessions\?/;
@@ -984,64 +983,6 @@ describe("useSession.selectSession — optimistic swap", () => {
     expect(result.current.currentSession?.messages?.map((message) => message.id)).toEqual([
       "restored-prompt",
     ]);
-  });
-
-  it("surface v2 ON: reconcile strips the target session's messages but still applies other fields", async () => {
-    localStorage.setItem("ba.surface_v2", "1");
-    const stale = {
-      id: "stale-orphan",
-      role: "assistant" as const,
-      content: "orphaned local row",
-      events: [],
-      timestamp: "2026-07-28T09:46:37.000000",
-      isStreaming: false,
-      seq: 4,
-    };
-    const a = makeSession({ id: "a", messages: [stale], is_running: false });
-
-    // The v2 flag also drives useSurfaceSession (composed inside
-    // useSession): stub its WS + REST snapshot fetch so it hydrates as a
-    // harmless no-op ("stale_cursor" short-circuits before touching any
-    // state this test cares about) instead of erroring on the mock
-    // backend's legacy `{ sessions: [...] }` shape.
-    const ws = new MockWebSocketController();
-    ws.install();
-    gate = installFetchGate({
-      hold: SESSION_FETCH,
-      defaultBody: (url: string) =>
-        url.includes("/api/v2/surface/") ? { kind: "stale_cursor" } : { sessions: [a] },
-    });
-    const { result } = renderHook(() => useSession());
-    await waitFor(() => {
-      expect(result.current.sessions).toHaveLength(1);
-    });
-
-    await act(async () => {
-      void result.current.selectSession("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, a);
-      await Promise.resolve();
-    });
-    // Kill-the-flash strip on select: v2 owns this node's messages.
-    expect(result.current.currentSession?.messages).toEqual([]);
-
-    await act(async () => {
-      void result.current.applySessionReconciled("a");
-      await Promise.resolve();
-      gate!.resolve(SESSION_FETCH, {
-        ...a,
-        is_running: true,
-        messages: [{ ...stale, id: "legacy-reconciled" }],
-      });
-      await Promise.resolve();
-    });
-
-    // The legacy reconcile's messages must NOT clobber v2-owned content...
-    expect(result.current.currentSession?.messages).toEqual([]);
-    // ...but non-content fields on the same node still reconcile.
-    expect(result.current.currentSession?.is_running).toBe(true);
-
-    ws.uninstall();
   });
 
   it("does not preserve an empty terminal assistant removed by authoritative recovery", async () => {

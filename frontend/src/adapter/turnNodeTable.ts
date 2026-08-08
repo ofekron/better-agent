@@ -1,16 +1,12 @@
 // Mutable, node_id-keyed table of one turn's body nodes, kept sorted by
-// (ts, seq) incrementally.
+// (ts, seq) incrementally. Used by the native Contract-Node store
+// (surface/state.ts) to avoid re-sorting/re-deriving a turn's entire body
+// on every live frame — a naive rebuild-the-whole-array-then-resort
+// approach is O(K log K) per frame (O(K^2 log K) total for a turn with K
+// nodes receiving K live frames, a "monster" streaming turn).
 //
-// Problem: useSurfaceSession.ts previously kept a turn's body as a plain
-// NodeWire[] rebuilt via `[...body.filter(n => n.node_id !== id), node]` on
-// every live frame, then handed the WHOLE array to mapTurnToAssistantMessage
-// which re-sorts it (O(K log K)) and re-derives every mapped WSEvent from
-// scratch (O(K) calls to mapNodeToEvents, each allocating/JSON.stringify-ing)
-// — for a turn with K nodes receiving K live frames (a "monster" streaming
-// turn), that is O(K^2 log K) of *expensive* recomputation.
-//
-// Fix here: keep the body as this table instead. A node_upsert/text_delta/
-// node_status frame becomes an O(1) amortized operation:
+// This table instead makes applying a node_upsert/text_delta/node_status
+// frame an O(1) amortized operation:
 //   - existing node_id, same (ts, seq) (the dominant live-update case —
 //     payload/status patched on an already-placed node): O(1) in-place
 //     array-slot replace.
@@ -21,12 +17,11 @@
 //     an existing node_id whose (ts, seq) actually changed): O(K) splice +
 //     reindex — correct but rare, never assumed away.
 //
-// `.nodes` is mutated in place. That is safe ONLY because this table is
-// private per-turn state inside useSurfaceSession's effect closure, never
-// exposed to React state/props/memo deps directly — every read that feeds
-// React (mapTurnToAssistantMessage's `ordered = sortNodes(bodyNodes)`, its
-// own internal `[...nodes]`) copies before use, so external immutability
-// is preserved at the one boundary that needs it.
+// `.nodes` is mutated in place. That is safe ONLY because each table is
+// private per-turn/per-node state inside SurfaceStore (surface/state.ts's
+// `childrenTables`), never exposed to React state/props/memo deps
+// directly — every read that feeds React copies `.nodes` before use, so
+// external immutability is preserved at the one boundary that needs it.
 
 import type { NodeWire } from "./wire";
 

@@ -41,17 +41,6 @@ import { RewindPopover } from "./RewindPopover";
 import { SelectionPopup } from "./SelectionPopup";
 import { userFacingForks } from "../hooks/useSession";
 import { buildThreadColorMap } from "../threadColors";
-import {
-  isActionableUserInteractionEvent,
-  mapUserInteractionEventToRequest,
-  surfaceInstructionWidgetMessageId,
-} from "../adapter/mapToRenderModel";
-
-// Fixed id of the surface-v2 instruction_widget banner message (see
-// mapToRenderModel.ts) — present in `messages` only when the Chat Surface
-// Contract v2 thin client (ba.surface_v2 flag) mapped one; absent
-// otherwise, so every use below is inherently flag-scoped.
-const INSTRUCTION_WIDGET_MESSAGE_ID = surfaceInstructionWidgetMessageId();
 import { ForkSplitView } from "./ForkSplitView";
 import { readNativeSurfaceFlag } from "../surface/flag";
 import { ChatSurfaceView } from "../surface/ChatSurfaceView";
@@ -746,36 +735,10 @@ export function Chat({
     if (last.type !== "credential_consent_changed") return;
     refetchCredentials();
   }, [streamingEvents, refetchCredentials]);
-  // Surface-v2 pending user_interaction nodes (see mapToRenderModel.ts)
-  // whose kind corresponds to an existing legacy request shape, mapped
-  // straight from `messages` (not `allMessages` — independent of the
-  // turn-pairing memo above) so they merge into the SAME actionable-card
-  // list the legacy WS-driven `pendingUserInteractions` prop already
-  // feeds, reusing UserInputCard/UserApprovalCard/MemoryProposalCard
-  // unchanged. A node with no `app_session_id` in its wire payload is
-  // trusted to belong to this session — every node here already arrived
-  // via this session's own surface subscription.
-  const surfaceUserInteractionRequests = useMemo(() => {
-    const sid = session?.id;
-    if (!sid) return [];
-    const out: UserInteractionRequest[] = [];
-    for (const m of messages) {
-      for (const e of m.events ?? []) {
-        if (!isActionableUserInteractionEvent(e)) continue;
-        const req = mapUserInteractionEventToRequest(e);
-        if (!req) continue;
-        if (req.app_session_id && req.app_session_id !== sid) continue;
-        out.push(req.app_session_id ? req : { ...req, app_session_id: sid });
-      }
-    }
-    return out;
-  }, [messages, session?.id]);
-
   const visiblePendingUserInputs = useMemo(() => {
     const sid = session?.id;
-    const legacy = sid ? pendingUserInteractions.filter((req) => req.app_session_id === sid) : [];
-    return [...legacy, ...surfaceUserInteractionRequests];
-  }, [pendingUserInteractions, session?.id, surfaceUserInteractionRequests]);
+    return sid ? pendingUserInteractions.filter((req) => req.app_session_id === sid) : [];
+  }, [pendingUserInteractions, session?.id]);
   // Interactive tool/command approvals (Claude can_use_tool / Codex app-server).
   // Backend holds them in-memory with a fail-closed timeout; rehydrate on
   // mount/reconnect so a missed WS event doesn't silently become a denial.
@@ -1029,17 +992,9 @@ export function Chat({
     [session],
   );
 
-  const allMessages = useMemo(() => {
-    const merged = mergeMessagesSorted(messages, pendingMessages);
-    // The instruction_widget banner is session-level, never a Turn — it
-    // renders separately (see instructionWidgetMessage below) and must
-    // not enter turn-pairing.
-    return merged.filter((m) => m.id !== INSTRUCTION_WIDGET_MESSAGE_ID);
-  }, [messages, pendingMessages]);
-
-  const instructionWidgetMessage = useMemo(
-    () => messages.find((m) => m.id === INSTRUCTION_WIDGET_MESSAGE_ID),
-    [messages],
+  const allMessages = useMemo(
+    () => mergeMessagesSorted(messages, pendingMessages),
+    [messages, pendingMessages],
   );
 
   const lastAssistantText = useMemo(() => {
@@ -1325,19 +1280,6 @@ export function Chat({
         tabIndex={0}
       >
         {headerNode}
-
-        {instructionWidgetMessage && (
-          <motion.div
-            className="event-session"
-            data-testid="instruction-widget-banner"
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.24, ease: "easeOut" }}
-          >
-            <strong>{t("message.instructionWidgetLabel")}</strong>{" "}
-            {instructionWidgetMessage.content}
-          </motion.div>
-        )}
 
         {canLoadOlderMessages && !sessionLoading && (
           <div className="load-older-wrapper">

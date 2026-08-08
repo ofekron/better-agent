@@ -55,6 +55,16 @@ beforeEach(() => {
   // the kill-switch here globally; a v2-specific suite (e.g. flag.test.ts)
   // clears/overrides it in its own beforeEach to exercise the true default.
   localStorage.setItem("ba.surface_v2", "0");
+  // Native Contract-Node surface (frontend/src/surface/flag.ts) defaults
+  // ON as of Phase I stage 2b — production's sole chat content plane. The
+  // existing suite (TurnGroup/MessageBubble via renderApp's fixture-seeded
+  // `tree.messages`, and messages_replay/messages_delta/agent_message
+  // frame emission through the legacy `/ws/chat` mock) is written against
+  // that pre-existing render path, so pin the kill-switch here globally
+  // too, same pattern as ba.surface_v2 above; a native-specific suite
+  // (surface/*.test.ts) overrides it in its own setup to exercise the
+  // true default.
+  localStorage.setItem("ba.surface_native", "0");
   // Route state leaks across tests otherwise: a prior test's /s/<id> URL
   // makes App's route-sync effect fetch/select that session in the next
   // test's fresh mock backend.

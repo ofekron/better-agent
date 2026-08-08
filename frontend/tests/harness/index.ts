@@ -5,6 +5,7 @@ import { afterEach } from "vitest";
 import App from "../../src/App";
 import { loadBuiltinExtensionIds } from "../../src/extensionIds";
 import type { Session, WSEvent } from "../../src/types";
+import type { ChatFrame } from "../../src/adapter/wire";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
 import { extractView, type AppView } from "./view";
@@ -36,6 +37,18 @@ export interface Harness {
   emit(event: WSEvent): void;
   /** Push many WS events in sequence. */
   emitMany(events: WSEvent[]): void;
+  /** Pre-populate a session's native Contract-Node surface mock state
+   *  (served by GET /api/v2/surface/sessions/:id/{snapshot,nodes/*
+   *  /children,older}) — see MockBackend.seedSurface. Call before
+   *  `selectSession`/mounting ChatSurfaceView so its initial fetchSnapshot
+   *  sees the seeded content instead of the always-empty default. */
+  seedSurface(sessionId: string, partial: Parameters<MockBackend["seedSurface"]>[1]): void;
+  /** Push one live `/ws/v2/surface` ChatFrame into the app AND project it
+   *  onto the mock's surface state (mirrors `emit`'s applyWsEvent
+   *  pairing) — targets the native socket specifically via
+   *  MockWebSocketController.emitTo, since a legacy `/ws/chat` socket may
+   *  also be open concurrently in the same test. */
+  emitSurface(sessionId: string, frame: ChatFrame): void;
   /** Emit `session_monitoring_changed` — the backend-owned source of truth
    * for the Running dimension (docs/session-states.md). In production the
    * monitoring loop announces active/stopped alongside `run_state`, so tests
@@ -172,6 +185,11 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     emitMany: (events) => {
       for (const event of events) backend.applyWsEvent(event);
       wsController.emitMany(events);
+    },
+    seedSurface: (sessionId, partial) => backend.seedSurface(sessionId, partial),
+    emitSurface: (sessionId, frame) => {
+      backend.applySurfaceFrame(sessionId, frame);
+      wsController.emitTo("/ws/v2/surface", frame);
     },
     setMonitoring: (sessionId, state) => {
       const event = {

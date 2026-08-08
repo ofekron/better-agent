@@ -1,10 +1,10 @@
 // Runtime flag for the native Contract-Node rendering layer (Phase I
-// stage 1). OFF by default — this is a new, additive render path behind
-// its own opt-in, independent of `ba.surface_v2` (adapter/flag.ts), which
-// gates the existing down-mapped thin-client path. Both flags are
-// independently readable; `ba.surface_native` only has an effect when the
-// legacy render path would otherwise be used for the chat content region
-// (see components/Chat.tsx's single branch point).
+// stage 2b). ON by default — the native surface is now the sole chat
+// content plane; the legacy down-mapped thin-client and raw WS-ingested
+// render paths have been deleted. An explicit opt-out (`ba.surface_native`
+// === "0" in localStorage, or `?surface_native=0`) is the kill-switch,
+// same pattern `ba.surface_v2` used during its own rollout (adapter/flag.ts,
+// now dead — the v2-vs-legacy distinction it gated no longer exists).
 
 const STORAGE_KEY = "ba.surface_native";
 const QUERY_KEY = "surface_native";
@@ -21,9 +21,9 @@ export function readNativeSurfaceFlag(): boolean {
     // Malformed location.search — fall through to the storage check.
   }
   try {
-    return localStorage.getItem(STORAGE_KEY) === "1";
+    return localStorage.getItem(STORAGE_KEY) !== "0";
   } catch {
-    // Private mode / storage disabled — default OFF.
-    return false;
+    // Private mode / storage disabled — default ON.
+    return true;
   }
 }

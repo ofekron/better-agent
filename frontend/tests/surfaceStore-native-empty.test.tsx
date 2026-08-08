@@ -193,35 +193,6 @@ describe("SurfaceStore native frame handling (state-machine tier)", () => {
   });
 });
 
-describe("Native + down-map integration (dual-consumer regression)", () => {
-  it("opens exactly one /ws/v2/surface consumer for a session once native is on", async () => {
-    fetchSnapshotImpl = () => Promise.resolve(EMPTY_SNAPSHOT("s1"));
-    const [{ ChatSurfaceView }, { useSurfaceSession }, { resolveSurfaceSessionId }] = await Promise.all([
-      import("../src/surface/ChatSurfaceView"),
-      import("../src/adapter/useSurfaceSession"),
-      import("../src/hooks/useSession"),
-    ]);
-
-    function Harness() {
-      // Mirrors useSession.ts's real wiring: the down-map hook's
-      // sessionId is gated through resolveSurfaceSessionId exactly like
-      // the production `surfaceSessionId` — native being on must disable
-      // it, leaving ChatSurfaceView's own SurfaceStore as the sole
-      // `/ws/v2/surface` consumer for this session.
-      const surfaceSessionId = resolveSurfaceSessionId("s1", true, true);
-      useSurfaceSession({ sessionId: surfaceSessionId, onSnapshot: () => {}, onUpsertMessage: () => {} });
-      return <ChatSurfaceView sessionId="s1" />;
-    }
-
-    render(<Harness />);
-    await screen.findByTestId("surface-chat-view");
-
-    // Give any (incorrect) second effect a chance to fire before asserting.
-    await waitFor(() => expect(capturedSockets.length).toBeGreaterThan(0));
-    expect(capturedSockets.length).toBe(1);
-  });
-});
-
 describe("ChatSurfaceView native rendering (component tier)", () => {
   it("renders the assistant text once the store's frames are delivered", async () => {
     fetchSnapshotImpl = () => Promise.resolve(EMPTY_SNAPSHOT("s1"));

@@ -124,6 +124,48 @@ STATELESS_DOTTED_IMPORT_ALLOWLIST = frozenset({
     "ws_outbox",
 })
 
+# Closed set of production files permitted to reference the
+# `parentUuid`/`isSidechain` markers — the backend's canonical Claude-shaped
+# internal event envelope (every provider runner normalizes its own native
+# format into this shape before the event enters the shared session/event
+# pipeline; adapters/normalize.py and event_journal.py then parse it for
+# linkage/ownership). This is NOT "only normalize.py may parse Claude
+# content" (that stronger, single-parser shape is ADR 0010's future
+# deliverable) — it is a closed-set/no-growth gate: prevents a NEW file from
+# starting to parse or stamp these markers without a deliberate allowlist
+# update, so the surface area doesn't silently expand now that Phase I's
+# frontend-facing legacy WS chat-content ingestion is deleted. See the
+# backend-deletion-plan investigation (Phase I stage 2b) for the full
+# per-file evidence this table is built from.
+CLAUDE_SHAPE_PARSER_ALLOWLIST = frozenset({
+    # Producers — stamp/propagate parentUuid/isSidechain when building a
+    # provider's own Claude-shaped canonical event.
+    BACKEND_DIR / "runner_pi.py",
+    BACKEND_DIR / "runner_qwen.py",
+    BACKEND_DIR / "runner_kimi.py",
+    BACKEND_DIR / "runner_cursor.py",
+    BACKEND_DIR / "runner_session_events.py",
+    BACKEND_DIR / "runner_better_agent.py",
+    BACKEND_DIR / "runner_copilot.py",
+    BACKEND_DIR / "runner_opencode.py",
+    BACKEND_DIR / "runner_amp.py",
+    BACKEND_DIR / "runner_agy.py",
+    BACKEND_DIR / "codex_native.py",
+    BACKEND_DIR / "codex_normalize.py",
+    BACKEND_DIR / "native_import.py",
+    # Parsers/consumers — read parentUuid/isSidechain to decide ownership,
+    # filtering, dedup, or chain-walking.
+    BACKEND_DIR / "adapters" / "normalize.py",
+    BACKEND_DIR / "event_journal.py",
+    BACKEND_DIR / "native_elements.py",
+    BACKEND_DIR / "claude_jsonl_enrich.py",
+    BACKEND_DIR / "provider_claude.py",
+    BACKEND_DIR / "orchs" / "base.py",
+    BACKEND_DIR / "orchs" / "manager" / "_delegation.py",
+})
+
+_CLAUDE_SHAPE_MARKERS = frozenset({"parentUuid", "isSidechain"})
+
 _STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 _SKIP_DIR_NAMES = {"__pycache__", "node_modules"}
 
@@ -427,6 +469,86 @@ def _outward_alias_coverage_violations() -> list[str]:
     return violations
 
 
+# ---- Claude-shape marker confinement: parentUuid/isSidechain are the
+# canonical internal event envelope's own fields, deliberately excluded
+# from the general import-boundary rules above (this isn't an import — it's
+# a string-literal marker check across the whole backend tree, not just
+# adapters/). Test/fixture files are exempt wholesale (they legitimately
+# construct or assert on fixture data carrying these keys); every other
+# backend/*.py file must be in CLAUDE_SHAPE_PARSER_ALLOWLIST to reference
+# either marker as a string literal.
+
+def _is_claude_shape_test_or_fixture(path: Path) -> bool:
+    if path.parent == SCRIPTS_DIR and path.name.startswith("test_"):
+        return True
+    try:
+        rel = path.relative_to(SCRIPTS_DIR / "fixtures")
+    except ValueError:
+        return False
+    return True
+
+
+def _collect_claude_shape_marker_violations(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    rel = path.relative_to(REPO_ROOT)
+    violations = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if node.value in _CLAUDE_SHAPE_MARKERS:
+            violations.append(
+                f"{rel}:{node.lineno}: references Claude-shape marker "
+                f"{node.value!r} — not in CLAUDE_SHAPE_PARSER_ALLOWLIST "
+                f"(backend/scripts/test_adapter_boundaries.py); either this "
+                f"file is a new legitimate producer/parser of the canonical "
+                f"Claude-shaped envelope (add it to the allowlist, with the "
+                f"same evidence-backed justification as the existing "
+                f"entries) or it's an accidental re-parse of raw provider "
+                f"content that should route through one of the allowlisted "
+                f"sites instead",
+            )
+    return violations
+
+
+def _claude_shape_marker_violations() -> list[str]:
+    violations = []
+    for path in _iter_py_files(BACKEND_DIR):
+        if path in CLAUDE_SHAPE_PARSER_ALLOWLIST:
+            continue
+        if _is_claude_shape_test_or_fixture(path):
+            continue
+        violations += _collect_claude_shape_marker_violations(path)
+    return violations
+
+
+def _marker_reference_count(path: Path) -> int:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in _CLAUDE_SHAPE_MARKERS
+    )
+
+
+def _claude_shape_allowlist_dead_entries() -> list[str]:
+    """Mirrors test_adapters_allowlist_has_no_dead_entries: an allowlist
+    entry that no longer references either marker (e.g. after its own
+    deletion/refactor) must be removed, not left as a stale exemption."""
+    dead = []
+    for path in sorted(CLAUDE_SHAPE_PARSER_ALLOWLIST):
+        if not path.is_file():
+            dead.append(f"{path.relative_to(REPO_ROOT)}: allowlisted file no longer exists")
+            continue
+        if _marker_reference_count(path) == 0:
+            dead.append(
+                f"{path.relative_to(REPO_ROOT)}: allowlisted for "
+                f"parentUuid/isSidechain but no longer references either marker",
+            )
+    return dead
+
+
 def _external_adapters_import_violations() -> list[str]:
     exempt = {SURFACE_CONTRACT_DIR, ADAPTERS_DIR}
     exempt_files = {MAIN_PY, ADAPTER_API_PY, SURFACE_COMMANDS_PY}
@@ -492,6 +614,19 @@ def test_outward_dotted_imports_have_alias_coverage() -> None:
     assert not violations, "orphaned dotted backend.* import(s) with no alias coverage:\n" + "\n".join(violations)
 
 
+def test_claude_shape_markers_confined_to_known_parsers() -> None:
+    violations = _claude_shape_marker_violations()
+    assert not violations, (
+        "parentUuid/isSidechain referenced outside CLAUDE_SHAPE_PARSER_ALLOWLIST:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_claude_shape_allowlist_has_no_dead_entries() -> None:
+    violations = _claude_shape_allowlist_dead_entries()
+    assert not violations, "CLAUDE_SHAPE_PARSER_ALLOWLIST has dead entries:\n" + "\n".join(violations)
+
+
 def test_event_ingester_bare_and_dotted_are_the_same_singleton() -> None:
     """Runtime companion to test_outward_dotted_imports_have_alias_coverage:
     proves backend/adapters/__init__.py's canonicalization actually unifies
@@ -519,6 +654,8 @@ if __name__ == "__main__":
         + _store_access_dynamic_target_violations()
         + _sys_modules_mutation_violations()
         + _outward_alias_coverage_violations()
+        + _claude_shape_marker_violations()
+        + _claude_shape_allowlist_dead_entries()
     )
     if all_violations:
         print("\n".join(all_violations))

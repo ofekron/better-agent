@@ -20,9 +20,6 @@ import {
 } from "src/utils/offlineRequest";
 
 import { API } from "../api";
-import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
-import { readNativeSurfaceFlag } from "../surface/flag";
-import { useSurfaceSession } from "../adapter/useSurfaceSession";
 import { extBackendBase } from "../extensionIds";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
@@ -458,61 +455,6 @@ function findNode(tree: Session, sessionId: string): Session | null {
     if (hit) return hit;
   }
   return null;
-}
-
-/** Surface v2 kill-the-flash: when the flag is ON, `sessionId`'s
- * `messages` in a legacy-sourced tree (REST select fetch, or a legacy
- * reconcile fetch) are replaced with whatever `prevTree` already holds for
- * that same node, NEVER with the legacy fetch's own `messages`.
- * useSurfaceSession's onSnapshot (replaceMessages) exclusively owns that
- * node's messages once its own hydration resolves.
- *
- * This must PRESERVE, not force-empty: a legacy fetch (selectSession's own
- * REST call, or applySessionReconciled's — the latter fires whenever the
- * legacy `/ws/chat` plane replays a `turn_complete`-shaped event, which it
- * does unconditionally on every fresh connection/reconnect, e.g. a page
- * reload's brand-new socket replaying an already-completed turn's
- * backlog) can resolve AFTER useSurfaceSession's hydrate() already wrote
- * the real content for this node. Forcing `messages: []` unconditionally
- * (the previous behavior) would then permanently wipe that just-rendered
- * content — useSurfaceSession hydrates exactly once per mount and only
- * re-hydrates on an explicit v2 `resync_required` frame, which this
- * legacy-side reconcile never sends, so nothing would ever repopulate it.
- * Carrying `prevTree`'s current value forward is correct in every case:
- * nothing hydrated yet -> still `[]` (kill-the-flash preserved); v2
- * already hydrated -> that content survives untouched. Every other field
- * on the node, and every other node in the tree, still reconciles
- * normally — only this one node's `messages` are ever excluded from the
- * incoming legacy payload. */
-function preserveSurfaceOwnedMessages(
-  tree: Session,
-  prevTree: Session | null,
-  sessionId: string,
-): Session {
-  if (!readSurfaceV2Flag()) return tree;
-  const preservedMessages = (prevTree && findNode(prevTree, sessionId)?.messages) || [];
-  return updateNodeById(tree, sessionId, (node) =>
-    node.messages === preservedMessages ? node : { ...node, messages: preservedMessages }
-  );
-}
-
-/** Whether `useSurfaceSession` (the ChatMessage-shaped down-map thin
- * client) should own a session's content plane. False whenever the native
- * Contract-Node renderer (`ba.surface_native`, surface/ChatSurfaceView.tsx)
- * is enabled: Chat.tsx's branch selection never shows the down-map's
- * TurnGroup render tree while native is on (see Chat.tsx's ternary — it
- * picks ChatSurfaceView/NativeForkSplitView instead), so running the
- * down-map hook at the same time would only be a second, redundant
- * `/ws/v2/surface` subscriber for the same content the native SurfaceStore
- * already owns — not a fallback, just wasted REST/WS traffic and an extra
- * (unnecessary) hydrate/resync cycle racing the native store's own. Pure
- * so the gate is unit-testable without mounting the full hook. */
-export function resolveSurfaceSessionId(
-  wsTargetSessionId: string | null,
-  surfaceV2Enabled: boolean,
-  nativeSurfaceEnabled: boolean,
-): string | null {
-  return surfaceV2Enabled && !nativeSurfaceEnabled ? wsTargetSessionId : null;
 }
 
 /** Resolve which existing assistant message a live WS turn-event should
@@ -2030,26 +1972,14 @@ export function useSession(authStatus?: string) {
       // that were added by WS events (user_message_persisted, etc.)
       // during the fetch — the REST response was generated before those
       // messages existed, so carryDrafts alone would lose them.
-      //
-      // Surface v2 kill-the-flash: when the flag is ON for this session,
-      // this REST fetch still fires (forks/draft/wsTargetSessionId/seq
-      // cursors below all depend on it — the legacy `/ws/chat` plane for
-      // non-content events stays untouched per useSurfaceSession.ts), but
-      // its `messages` are never applied into state for this session id.
-      // useSurfaceSession's onSnapshot (replaceMessages) exclusively owns
-      // that node's messages once its own hydration resolves — applying
-      // the legacy REST messages here first would cause exactly the
-      // legacy-then-v2 flash this is meant to avoid. See
-      // `preserveSurfaceOwnedMessages` (also reused by applySessionReconciled).
       setCurrentSession((prev) => {
         if (!prev || prev.id !== treeWithOpenedAt.id) {
-          return preserveSurfaceOwnedMessages(treeWithOpenedAt, prev, id);
+          return treeWithOpenedAt;
         }
         const carried = carryDrafts(prev, treeWithOpenedAt);
-        const reconciled = reconcilingCachedTree
+        return reconcilingCachedTree
           ? carried
           : preservePostRequestMessages(carried, prev, messageBaseline);
-        return preserveSurfaceOwnedMessages(reconciled, prev, id);
       });
       // Seed the seq cursor for the root AND every embedded fork —
       // each pane's WS subscribe sends its own since_seq.
@@ -3155,23 +3085,7 @@ export function useSession(authStatus?: string) {
               prev,
               messageBaseline,
             );
-            // Surface v2: this is the shared safety-net reconcile — it
-            // still applies for every non-content field (run state,
-            // metadata, forks, ...) on a v2-owned session, but must not
-            // let this legacy REST fetch's `messages` touch the content
-            // useSurfaceSession owns for `rootId` in either direction.
-            // This reconcile is driven by legacy `/ws/chat` events
-            // (onTurnTerminal, onSessionReconciled) that a freshly
-            // (re)connected socket can replay for an ALREADY-COMPLETED
-            // turn — e.g. a page reload's brand-new connection replaying
-            // the prior turn's `turn_complete` backlog — so this fetch's
-            // resolution has no ordering guarantee relative to
-            // useSurfaceSession's own hydrate(). Preserving `prev`'s
-            // current value (not forcing `[]`) is what makes that safe:
-            // same strip target as selectSession's kill-the-flash gating,
-            // keyed on the node this reconcile targets rather than the
-            // tree root.
-            return preserveSurfaceOwnedMessages(applyReconcilePreserves(carried), prev, rootId);
+            return applyReconcilePreserves(carried);
           });
           return undefined;
         });
@@ -3214,57 +3128,6 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  // ---- Chat Surface Contract v2 thin client (ON by default) ----------
-  //
-  // Behind `ba.surface_v2` (frontend/src/adapter/flag.ts) — an explicit
-  // opt-out kill-switch, not an opt-in. OFF: the block below is inert
-  // (surfaceSessionId is always null, useSurfaceSession is a no-op, and
-  // the two gated wrappers just delegate straight through — byte-identical
-  // behavior to calling applyMessagesReplay/applyLiveEvent directly).
-  // ON: the currently-open session's CHAT content plane
-  // (hydration + live) is owned by useSurfaceSession instead of the
-  // legacy messages_replay/agent_message WS ingestion; every other event
-  // type (run_state, worker_*, session_metadata_updated, ...) and all
-  // commands stay on the legacy `/ws/chat` path untouched.
-  //
-  // Also OFF whenever `ba.surface_native` is on (see resolveSurfaceSessionId)
-  // — the native Contract-Node renderer owns the content plane directly
-  // through its own SurfaceStore/`/ws/v2/surface` subscription in that case,
-  // and running this hook alongside it would just be a second, redundant
-  // subscriber for the same surface_id.
-  const surfaceSessionId = resolveSurfaceSessionId(
-    wsTargetSessionId,
-    readSurfaceV2Flag(),
-    readNativeSurfaceFlag(),
-  );
-
-  const applySurfaceUpsert = useCallback(
-    (sid: string, message: ChatMessage) => applyMessagesReplay(sid, [message]),
-    [applyMessagesReplay]
-  );
-
-  useSurfaceSession({
-    sessionId: surfaceSessionId,
-    onSnapshot: replaceMessages,
-    onUpsertMessage: applySurfaceUpsert,
-  });
-
-  const gatedApplyMessagesReplay = useCallback(
-    (sessionId: string, messages: ChatMessage[]) => {
-      if (surfaceSessionId && sessionId === surfaceSessionId) return;
-      applyMessagesReplay(sessionId, messages);
-    },
-    [applyMessagesReplay, surfaceSessionId]
-  );
-
-  const gatedApplyLiveEvent = useCallback(
-    (sessionId: string, event: WSEvent) => {
-      if (surfaceSessionId && sessionId === surfaceSessionId) return;
-      applyLiveEvent(sessionId, event);
-    },
-    [applyLiveEvent, surfaceSessionId]
-  );
-
   return {
     sessions,
     sessionsLoaded,
@@ -3285,7 +3148,7 @@ export function useSession(authStatus?: string) {
     deleteSession,
     addMessages,
     replaceMessages,
-    applyMessagesReplay: gatedApplyMessagesReplay,
+    applyMessagesReplay,
     getSinceSeq,
     getEventsFromSeq,
     getEventsCursorKnown,
@@ -3308,7 +3171,7 @@ export function useSession(authStatus?: string) {
     dropSessionIfPresent,
     runStateBySession,
     applyRunState,
-    applyLiveEvent: gatedApplyLiveEvent,
+    applyLiveEvent,
     markTurnTerminal,
     markTurnDetached,
     applyMessageRecovering,

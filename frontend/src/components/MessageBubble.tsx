@@ -42,7 +42,6 @@ import { providerDisplayName } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 import { copyToClipboard } from "../utils/clipboard";
 import { AUTO_ACTION_OPEN_MAX, groupEvents, type EventRenderGroup } from "../lib/groupEvents";
-import { isActionableUserInteractionEvent } from "../adapter/mapToRenderModel";
 import { readFlag as readSurfaceV2Flag } from "../adapter/flag";
 import { findScrollParent } from "../utils/scrollParent";
 import { VirtualizedEventList, VIRTUALIZE_EVENT_THRESHOLD } from "./VirtualizedEventList";
@@ -1288,11 +1287,6 @@ export function renderSingleEvent(
         return <CompactionEvent key={idx} data={event.data ?? {}} />;
       }
       if (kind === "user_interaction") {
-        // A pending, corresponding-kind node already renders as an
-        // actionable card elsewhere (Chat.tsx's visiblePendingUserInputs
-        // merge, via mapUserInteractionEventToRequest) — suppress the
-        // inline duplicate here (see isActionableUserInteractionEvent).
-        if (isActionableUserInteractionEvent(event)) return null;
         return <UserInteractionNotice key={idx} data={event.data ?? {}} />;
       }
       if (kind.startsWith("fact.")) {

@@ -56,6 +56,23 @@ export class MockWebSocketController {
     return this.current;
   }
 
+  /** Most-recently-created OPEN socket whose URL contains `urlSubstring` —
+   * for targeting a specific connection when more than one is live at
+   * once (e.g. the legacy `/ws/chat` socket AND a native `/ws/v2/surface`
+   * socket open simultaneously in the same test). `getCurrent()` above
+   * only ever tracks "the last one created" and is unaware of URL, so it
+   * is unsafe once a second concurrent socket exists — this is the
+   * URL-disambiguated counterpart, additive, existing callers unaffected. */
+  getCurrentByUrl(urlSubstring: string): MockWebSocket {
+    const match = [...this.sockets]
+      .reverse()
+      .find((ws) => ws.url.includes(urlSubstring) && ws.readyState !== MockWebSocket.CLOSED);
+    if (!match) {
+      throw new Error(`MockWebSocket: no active instance matching "${urlSubstring}"`);
+    }
+    return match;
+  }
+
   /** Push a WS frame into the app. Wrapped in act() so React state
    *  updates flush before the test asserts. */
   emit(event: WSEvent): void {
@@ -69,6 +86,15 @@ export class MockWebSocketController {
     const ws = this.getCurrent();
     act(() => {
       for (const e of events) ws.deliver(e);
+    });
+  }
+
+  /** Same as `emit`, targeting the socket whose URL contains
+   *  `urlSubstring` instead of "whichever connected last". */
+  emitTo(urlSubstring: string, frame: unknown): void {
+    const ws = this.getCurrentByUrl(urlSubstring);
+    act(() => {
+      ws.deliverRaw(frame);
     });
   }
 
@@ -151,8 +177,16 @@ export class MockWebSocket {
   }
 
   deliver(event: WSEvent): void {
+    this.deliverRaw(event);
+  }
+
+  /** Same as `deliver`, untyped — for wire shapes other than the legacy
+   *  `/ws/chat` WSEvent union (e.g. Chat Surface Contract v2's ChatFrame
+   *  over `/ws/v2/surface`, see adapter/wire.ts). Both are just
+   *  JSON.stringify'd onto onmessage; only the TS type differs. */
+  deliverRaw(data: unknown): void {
     if (this.readyState !== MockWebSocket.OPEN) return;
-    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) }));
   }
 
   deliverBinary(data: ArrayBuffer): void {
