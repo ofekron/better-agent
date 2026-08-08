@@ -54,6 +54,7 @@ def _build_authority(root: Path, provider_id: str, *, with_config_file: bool) ->
         "kind": "codex",
         "generation": _PROVIDER_GENERATION,
         "revision": 7,
+        "execution_revision": 3,
         "config_dir": str(config_dir),
         "base_url": "",
         "mode": "subscription",
