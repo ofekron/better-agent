@@ -6,6 +6,8 @@ inside the detector.
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 
 import testape_login_detector as detector
@@ -15,7 +17,7 @@ router = APIRouter(prefix="/api/testape", tags=["testape"])
 
 
 @router.get("/login-state")
-def get_login_state(
+async def get_login_state(
     adapter_id: str | None = Query(
         None, description="TestApe web adapter to probe; omit to auto-pick the first connected one"
     ),
@@ -26,11 +28,13 @@ def get_login_state(
 ) -> dict:
     """Report whether the app open in a TestApe browser is on the login/setup screen or authenticated."""
     try:
-        return detector.detect_login_state(
+        result = await asyncio.to_thread(
+            detector.detect_login_state,
             adapter_id=adapter_id,
             url=url,
             fs_url=fs_url or detector.FS_DEFAULT,
-        ).to_dict()
+        )
+        return result.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # TestApe not running, adapter error, eval_js failure
@@ -38,7 +42,7 @@ def get_login_state(
 
 
 @router.get("/chat-panel/validate")
-def validate_chat_panel(
+async def validate_chat_panel(
     adapter_id: str | None = Query(
         None, description="TestApe web adapter to probe; omit to auto-pick the first connected one"
     ),
@@ -51,12 +55,14 @@ def validate_chat_panel(
     fs_url: str | None = Query(None, description="TestApe FS server URL"),
 ) -> dict:
     try:
-        result = chat_detector.validate_chat_panel(
+        validation = await asyncio.to_thread(
+            chat_detector.validate_chat_panel,
             adapter_id=adapter_id,
             session_id=session_id,
             url=url,
             fs_url=fs_url or detector.FS_DEFAULT,
-        ).to_dict()
+        )
+        result = validation.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

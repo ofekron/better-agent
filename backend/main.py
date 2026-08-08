@@ -362,7 +362,7 @@ async def ingest_command_received(request, call_next):
     payload: Any
     if body_bytes:
         try:
-            payload = json.loads(body_bytes)
+            payload = await asyncio.to_thread(json.loads, body_bytes)
         except Exception:
             payload = {"_raw": body_bytes.decode("utf-8", errors="replace")}
     else:

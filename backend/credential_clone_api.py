@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from fastapi import APIRouter, Header, HTTPException
@@ -43,13 +44,14 @@ def _require_internal(token: str) -> None:
 
 
 @router.post("/api/internal/provider-credentials/clone")
-def clone_provider_credential(
+async def clone_provider_credential(
     body: CloneProviderCredentialRequest,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ) -> dict[str, str]:
     _require_internal(x_internal_token)
     try:
-        status = config_store.clone_provider_credential(
+        status = await asyncio.to_thread(
+            config_store.clone_provider_credential,
             body.source_provider_id,
             body.target_provider_id,
         )
