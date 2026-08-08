@@ -359,17 +359,6 @@ async def _cleanup_projection_response_inflight(
             inflight.pop(cache_key, None)
 
 
-def _cached_json_projection_response(
-    name: str,
-    key: tuple[Any, ...],
-    build: Callable[[], dict[str, Any]],
-) -> Response:
-    cached = _projection_response_cache_get(name, key)
-    if cached is not None:
-        return cached
-    return _projection_response_cache_put(name, key, build())
-
-
 async def _cached_json_projection_response_threaded(
     name: str,
     key_fn: Callable[[], tuple[Any, ...]],

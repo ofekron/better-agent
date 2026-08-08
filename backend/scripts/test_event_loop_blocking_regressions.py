@@ -1879,7 +1879,6 @@ def test_extension_projection_routes_cache_json_bytes() -> None:
     assert "_projection_response_cache" in source
     assert "def _projection_response_cache_get(" in source
     assert "def _projection_response_cache_put(" in source
-    assert "def _cached_json_projection_response(" in source
     assert "async def _cached_json_projection_response_threaded(" in source
     assert "json.dumps(" in source
     assert "Response(content=content, media_type=\"application/json\")" in source

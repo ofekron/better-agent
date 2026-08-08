@@ -5983,7 +5983,7 @@ def record_slow_backend_call(
         extension_id,
         activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
-        history_key="slow_asgi",
+        history_key="slow_host_elapsed",
         reason="repeated_slow_backend_calls",
         route_path=str(path),
         incident_id=incident_id,

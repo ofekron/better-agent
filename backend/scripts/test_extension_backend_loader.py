@@ -915,6 +915,53 @@ def main() -> int:
 
         asyncio.run(_check_response_size_cap_enforced_on_the_wire())
 
+        async def _check_oversized_line_never_reaches_decode() -> None:
+            """(e) regression guard on the cap's ordering: rejecting an
+            oversized wire line must never invoke the body's base64 decode
+            step. A regression that reordered this to "decode, then check
+            size" would still fail the request the same way, so the other
+            oversized-line tests above would keep passing — this spies on
+            the decode seam directly so that reordering fails loudly."""
+            extension_id = "ofek.backend"
+            original_line_cap = extension_backend_transport._LINE_MAX_BYTES
+            original_stream_limit = extension_backend_transport._STREAM_READ_LIMIT
+            original_decode = extension_backend_loader._decode_backend_response_payload  # type: ignore[attr-defined]
+            small_cap = 4096
+            extension_backend_transport._LINE_MAX_BYTES = small_cap
+            extension_backend_transport._STREAM_READ_LIMIT = small_cap + 4096
+            extension_backend_loader.evict_persistent_backend(extension_id)
+            decode_calls: list[int] = []
+
+            def spy_decode(line: bytes):
+                decode_calls.append(len(line))
+                return original_decode(line)
+
+            extension_backend_loader._decode_backend_response_payload = spy_decode  # type: ignore[attr-defined]
+            try:
+                huge_spec = extension_store.backend_entrypoint_spec(extension_id)
+                try:
+                    await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        huge_spec,
+                        method="GET",
+                        path="huge",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                except Exception as exc:
+                    check(getattr(exc, "status_code", None) == 500, "oversized wire response still fails closed")
+                else:
+                    raise AssertionError("oversized wire response should not return a normal response")
+                check(decode_calls == [], "size cap rejects the line before any base64 decode is attempted")
+            finally:
+                extension_backend_loader._decode_backend_response_payload = original_decode  # type: ignore[attr-defined]
+                extension_backend_transport._LINE_MAX_BYTES = original_line_cap
+                extension_backend_transport._STREAM_READ_LIMIT = original_stream_limit
+                extension_backend_loader.evict_persistent_backend(extension_id)
+
+        asyncio.run(_check_oversized_line_never_reaches_decode())
+
         async def _check_high_concurrency_without_a_thread_pool() -> None:
             """(f) no-thread-wait: 100+ concurrent in-flight requests to a slow
             child stub all suspend on the event loop, not a bounded thread
