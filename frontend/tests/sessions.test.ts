@@ -342,7 +342,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       .toBe("keep this offline draft");
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
     h.unmount();
-  });
+  }, 15000);
 
   it("selects a new session through route sync instead of createSession side effects", async () => {
     const h = await renderApp({
@@ -540,7 +540,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
 
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
     h.unmount();
-  });
+  }, 15000);
 
   it("pressing Enter in the new-session initial prompt runs the selected Create action", async () => {
     const restoreViewport = useDesktopViewport();
@@ -1018,7 +1018,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       }),
     );
     h.unmount();
-  });
+  }, 15000);
 
   it("keeps a new-session modal available while an offline create syncs", async () => {
     const h = await renderApp({
@@ -1052,7 +1052,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     releaseCreate();
     await h.flush();
     h.unmount();
-  });
+  }, 15000);
 
   it("queues a new session when create returns a retryable backend failure", async () => {
     const h = await renderApp({

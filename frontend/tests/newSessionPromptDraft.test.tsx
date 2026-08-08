@@ -42,6 +42,26 @@ async function promptTextarea(view: ReturnType<typeof renderModal>) {
   return view.getByTestId(NEW_SESSION_PROMPT_TESTID) as HTMLTextAreaElement;
 }
 
+// Every other endpoint rejects (offline), but `HarnessProfileSelector`'s
+// `GET /api/harness-profiles` gates the Create button on its own fetch
+// settling — via `trackedFetch`'s real retry-with-backoff (~3s of real
+// `setTimeout` delays) on a bare rejection. Resolve that one endpoint so
+// the button becomes usable without waiting out the real backoff; every
+// other fetch stays rejected, matching the offline caches seeded above.
+function mockOfflineFetchExceptHarnessProfiles() {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = typeof input === "string"
+      ? input
+      : input instanceof URL
+      ? input.toString()
+      : input.url;
+    if (url.endsWith("/api/harness-profiles")) {
+      return Promise.resolve(new Response(JSON.stringify({ profiles: [] }), { status: 200 }));
+    }
+    return Promise.reject(new TypeError("offline"));
+  });
+}
+
 describe("NewSessionModal prompt draft", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -55,7 +75,7 @@ describe("NewSessionModal prompt draft", () => {
       })],
       default_runtime_profile_id: "rp-cached",
     }));
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    mockOfflineFetchExceptHarnessProfiles();
   });
 
   it("restores unsent text after the modal is dismissed and reopened", async () => {
@@ -127,6 +147,13 @@ describe("NewSessionModal prompt draft", () => {
   });
 
   it("uses Enter to create with the selected action", async () => {
+    // Desktop-only shortcut: `useViewport()` reports "tablet" at happy-dom's
+    // default 1024px width (the tablet breakpoint is inclusive), which
+    // would make Enter insert a newline instead of creating.
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
+    window.dispatchEvent(new Event("resize"));
+
     const onCreate = vi.fn();
     const view = renderModal(true, () => {}, onCreate);
     const textarea = await promptTextarea(view);
@@ -143,6 +170,8 @@ describe("NewSessionModal prompt draft", () => {
       );
     });
     view.unmount();
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: previousWidth });
+    window.dispatchEvent(new Event("resize"));
   });
 
   it("closes immediately when there is no text", async () => {
