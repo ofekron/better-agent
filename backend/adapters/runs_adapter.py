@@ -477,10 +477,16 @@ class RunsSurfaceAdapter(RunsSurface):
         turn_id = event.payload.get("execution_turn_id")
         if not isinstance(turn_id, str) or not turn_id:
             return
-        # list_run_records walks the runs ledger with per-row stat calls —
-        # sync filesystem work that must not run on the event-loop thread.
+        # list_run_records_for_session walks only this session's own run
+        # dirs (SQL-filtered) — sync filesystem work that must not run on
+        # the event-loop thread, but O(this session's runs) rather than
+        # O(every session the backend has ever run), which is what
+        # list_run_records() would cost here on every turn_start/turn_
+        # complete/turn_stopped fact for EVERY session in the backend.
         async with self._scan_broadcast_lock:
-            records = await asyncio.to_thread(store_access.list_run_records)
+            records = await asyncio.to_thread(
+                store_access.list_run_records_for_session, session_id,
+            )
             record = next(
                 (
                     r for r in records
@@ -513,7 +519,11 @@ class RunsSurfaceAdapter(RunsSurface):
             return
         fact_type = event.type
         if fact_type == _FACT_REMOVED:
-            self._live.pop(run_id, None)
+            removed = self._live.pop(run_id, None)
+            session_id = (
+                removed.session_id if removed is not None
+                else event.sid or str(event.payload.get("session_id") or "")
+            )
         else:
             payload = event.payload
             live = self._live.get(run_id)
@@ -521,6 +531,8 @@ class RunsSurfaceAdapter(RunsSurface):
                 session_id = event.sid or str(payload.get("session_id") or "")
                 live = _LiveRunState(session_id=session_id)
                 self._live[run_id] = live
+            else:
+                session_id = live.session_id
             if fact_type == _FACT_ANCHOR_CHANGED:
                 if "kind" in payload:
                     live.kind = _to_run_kind(payload.get("kind"))
@@ -545,8 +557,12 @@ class RunsSurfaceAdapter(RunsSurface):
                 # currently-projected effect of "retrying".
                 pass
 
+        if not session_id:
+            return
         async with self._scan_broadcast_lock:
-            records = await asyncio.to_thread(store_access.list_run_records)
+            records = await asyncio.to_thread(
+                store_access.list_run_records_for_session, session_id,
+            )
             record = next((r for r in records if r.run_id == run_id), None)
             if record is None:
                 return

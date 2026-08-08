@@ -899,13 +899,43 @@ class StoreAccess:
             for run_dir in runs_dir.cached_run_dirs_for_app_session(root, session_id)
         )
 
+    def list_run_records_for_session(self, session_id: str) -> tuple[RunRecord, ...]:
+        """Every run dir for exactly ONE session — the session-scoped
+        sibling of `list_run_records()`.
+
+        `list_run_records()` first calls `runs_dir.run_dirs_by_app_session`
+        to discover WHICH sessions have any run at all — an O(every
+        session that has ever run) walk of the run-state ledger, correct
+        for a genuine "list every run in the backend" caller (a paginated
+        runs listing) but wasteful when the caller already knows the one
+        session_id it cares about: it pays for every OTHER session's rows
+        just to throw them away in a Python-side filter.
+
+        Goes straight to `runs_dir.cached_run_dirs_for_app_session`, which
+        filters at the sqlite layer (`WHERE app_session_id IN (...)`) to
+        just this session's own run dirs — O(this session's runs), not
+        O(every run dir the backend has ever created). Any caller that
+        already knows the session_id (a lifecycle-fact handler reacting to
+        one session's turn, a worker-sidecar lookup for one
+        agent_session_id) MUST use this instead of filtering
+        `list_run_records()` — the full scan's cost grows with the whole
+        backend's run history, not with what the caller actually needs."""
+        if not session_id:
+            return ()
+        runs_dir = _resolve("runs_dir")
+        root = runs_dir.runs_root()
+        return tuple(
+            _run_record(session_id, run_dir)
+            for run_dir in runs_dir.cached_run_dirs_for_app_session(root, session_id)
+        )
+
     def get_latest_run_record(self, session_id: str) -> RunRecord | None:
         """Most-recently-started run for `session_id`, or None. The shared
         best-effort run<->session linkage heuristic (no direct run<->turn
         index exists) — used by both RunsSurfaceAdapter's lifecycle-fact
         handler and ChatSurfaceAdapter's worker-sidecar success/error
         lookup, so the heuristic has exactly one owner."""
-        records = [r for r in self.list_run_records() if r.session_id == session_id]
+        records = self.list_run_records_for_session(session_id)
         if not records:
             return None
         return max(records, key=lambda r: r.started_at)

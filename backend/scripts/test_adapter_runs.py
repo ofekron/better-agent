@@ -292,6 +292,104 @@ def test_lifecycle_fact_matches_run_by_exact_turn_id_not_most_recent() -> None:
         sub.close()
 
 
+def test_lifecycle_fact_does_not_scan_every_session_in_the_backend() -> None:
+    """Root-cause regression for the 2026-08-08 zero-runners-spawning
+    incident: `_on_lifecycle` used to call `store_access.list_run_records()`,
+    which walks `runs_dir.run_dirs_by_app_session` — an O(every session
+    that has ever run) discovery scan — to resolve ONE record for the ONE
+    session the event already names. With tens of thousands of run dirs
+    accumulated (the real ledger had ~78k rows), that per-turn-start scan,
+    globally serialized behind `_scan_broadcast_lock`, could take minutes
+    under host CPU starvation — every session's turn dispatch queued
+    behind the same lock, appearing to hang forever with no further log
+    output past "turn_start". Seeds several OTHER sessions' runs plus the
+    target session's, then asserts `_on_lifecycle` never calls
+    `run_dirs_by_app_session` at all (only the session-scoped
+    `cached_run_dirs_for_app_session` path may run) while still resolving
+    and broadcasting the correct record."""
+    for _ in range(5):
+        _seed_run(f"app-{uuid.uuid4().hex}", turn_id=f"turn-{uuid.uuid4().hex}")
+    session_id = f"app-{uuid.uuid4().hex}"
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    run_id = _seed_run(session_id, turn_id=turn_id)
+
+    original = runs_dir.run_dirs_by_app_session
+    calls: list = []
+
+    def _tracking(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    runs_dir.run_dirs_by_app_session = _tracking
+    try:
+        adapter = RunsSurfaceAdapter()
+        adapter.bind()
+        received: list = []
+        sub = adapter.subscribe(received.append)
+        try:
+            asyncio.run(
+                bus.publish(
+                    BusEvent(
+                        type="lifecycle.turn_start", root_id=session_id, sid=session_id,
+                        payload={"execution_turn_id": turn_id}, persist=False,
+                    )
+                )
+            )
+        finally:
+            sub.close()
+    finally:
+        runs_dir.run_dirs_by_app_session = original
+
+    assert calls == [], (
+        f"_on_lifecycle triggered {len(calls)} whole-backend discovery "
+        "scan(s) instead of a session-scoped lookup"
+    )
+    upserts = [f for f in received if isinstance(f, RunSummaryUpsert)]
+    assert upserts, received
+    assert upserts[0].summary.run_id == run_id
+    assert upserts[0].summary.turn_id == turn_id
+
+
+def test_run_state_fact_does_not_scan_every_session_in_the_backend() -> None:
+    """Same root-cause regression as
+    `test_lifecycle_fact_does_not_scan_every_session_in_the_backend`, for
+    `_on_run_state_fact` (the `run.state.*` sibling handler, same
+    `_scan_broadcast_lock` bottleneck)."""
+    for _ in range(5):
+        _seed_run(f"app-{uuid.uuid4().hex}", turn_id=f"turn-{uuid.uuid4().hex}")
+    session_id = f"app-{uuid.uuid4().hex}"
+    run_id = _seed_run(session_id)
+
+    original = runs_dir.run_dirs_by_app_session
+    calls: list = []
+
+    def _tracking(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    runs_dir.run_dirs_by_app_session = _tracking
+    try:
+        adapter = RunsSurfaceAdapter()
+        adapter.bind()
+        received: list = []
+        sub = adapter.subscribe(received.append)
+        try:
+            _publish_run_state_fact("run.state.pid_changed", session_id, run_id, pid=4242)
+        finally:
+            sub.close()
+    finally:
+        runs_dir.run_dirs_by_app_session = original
+
+    assert calls == [], (
+        f"_on_run_state_fact triggered {len(calls)} whole-backend discovery "
+        "scan(s) instead of a session-scoped lookup"
+    )
+    upserts = [f for f in received if isinstance(f, RunSummaryUpsert)]
+    assert upserts, received
+    assert upserts[0].summary.run_id == run_id
+    assert upserts[0].summary.pid == 4242
+
+
 def test_lifecycle_fact_without_execution_turn_id_does_not_broadcast() -> None:
     session_id = f"app-{uuid.uuid4().hex}"
     _seed_run(session_id, turn_id=f"turn-{uuid.uuid4().hex}")
@@ -550,6 +648,8 @@ _TESTS = [
     test_list_runs_paginates_without_overlap_or_gap,
     test_list_runs_stale_cursor_across_adapter_incarnations,
     test_lifecycle_fact_matches_run_by_exact_turn_id_not_most_recent,
+    test_lifecycle_fact_does_not_scan_every_session_in_the_backend,
+    test_run_state_fact_does_not_scan_every_session_in_the_backend,
     test_lifecycle_fact_without_execution_turn_id_does_not_broadcast,
     test_run_detail_includes_turn_id_and_heartbeat_entries,
     test_run_detail_omits_turn_id_and_heartbeat_entries_when_absent,
