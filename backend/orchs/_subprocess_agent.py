@@ -352,11 +352,13 @@ class SubprocessAgent:
             per-session entry once the last id leaves. Called per
             attempt and on the exception path."""
             run_ids = coordinator.turn_manager.active_run_ids.get(self.agent_session_id)
-            if run_ids and rid in run_ids:
+            # `rid` is appended to both lists at the top of each attempt before
+            # any call here, so the not-present guards are defensive only.
+            if run_ids and rid in run_ids:  # pragma: no branch
                 run_ids.remove(rid)
                 if not run_ids:
                     coordinator.turn_manager.active_run_ids.pop(self.agent_session_id, None)
-            if rid in active_run_ids:
+            if rid in active_run_ids:  # pragma: no branch
                 active_run_ids.remove(rid)
 
         collected: list[dict] = []
