@@ -805,6 +805,11 @@ function AppMain({
     fetch(`${API}/api/sessions/topbar-pinned`, { credentials: "include" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { sessions?: Session[] } | null) => {
+        // Fired from a mount effect (below) on every `sessionsLoaded`
+        // flip — same AppMain-lifetime guard as the other post-fetch
+        // state updates in this component; a response settling after
+        // unmount must not apply a stale pinned-session snapshot.
+        if (!openSessionRecordMountedRef.current) return;
         const next: Record<string, Session> = {};
         for (const session of data?.sessions ?? []) {
           if (session?.id) next[session.id] = session;
@@ -2756,9 +2761,19 @@ function AppMain({
   // Load user prefs (language + shortcuts) from backend after auth
   useEffect(() => {
     if (authStatus !== "authed") return;
+    // Guard against the fetch settling after this effect has been
+    // cleaned up (route change, unmount, or a re-auth in tests that
+    // tears the harness down mid-flight) — an unguarded `i18n.
+    // changeLanguage`/setState here fires outside any test's `act()`
+    // boundary and, via i18next's global 'languageChanged' event, forces
+    // every mounted `useTranslation()` consumer in the tree to re-render
+    // at an arbitrary later point (same pattern NewSessionModal's own
+    // fetch effects already guard with).
+    let cancelled = false;
     progressTrackedFetch("userPrefs:load", `${API}/api/user-prefs`)
       .then((r) => r.json())
       .then((data) => {
+        if (cancelled) return;
         if (data.language && data.language !== i18n.language) {
           i18n.changeLanguage(data.language);
         }
@@ -2788,6 +2803,9 @@ function AppMain({
         );
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [authStatus, navigate, authedUser?.username]);
   // UI navigation-restore state (selected project + remembered sessions).
   // Backend is the source of truth; mount GET reconciles the local cache
@@ -2797,9 +2815,14 @@ function AppMain({
   const uiSelectionLoadedRef = useRef(false);
   useEffect(() => {
     if (authStatus !== "authed") return;
+    // Same unmount/re-run guard as the userPrefs:load effect above — a
+    // late-settling fetch must not apply a stale snapshot (session
+    // selection, open tabs) once this effect has been cleaned up.
+    let cancelled = false;
     progressTrackedFetch("uiSelection:load", `${API}/api/ui-selection`)
       .then((r) => r.json())
       .then((snap: UiSelectionSnapshot) => {
+        if (cancelled) return;
         applyBackendSnapshot(snap, true);
         setOpenSessionIds(getOpenSessionTabIds());
         setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
@@ -2817,7 +2840,10 @@ function AppMain({
       setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
       uiSelectionLoadedRef.current = true;
     });
-    return off;
+    return () => {
+      cancelled = true;
+      off();
+    };
   }, [authStatus]);
   // Drain the panel write-backlog on each (re)connect so writes made while
   // the backend was unreachable (open/close tab, pin, sort/visibility) are
@@ -4087,6 +4113,12 @@ function AppMain({
       })
         .then((res) => (res.ok ? res.json() : undefined))
         .then((data: { sessions?: Session[] } | undefined) => {
+          // `sessionExistenceChecksRef` only dedupes concurrent fetches for
+          // the same id — it is not a mount guard. A route change or
+          // unmount between the fetch starting and settling must not
+          // still navigate/mutate state (same `openSessionRecordMountedRef`
+          // AppMain uses for its other post-teardown-fetch guard above).
+          if (!openSessionRecordMountedRef.current) return;
           const found = data?.sessions?.find((s) => s?.id === id);
           if (found) {
             sessionExistenceChecksRef.current.delete(id);
@@ -4103,6 +4135,7 @@ function AppMain({
           }
         })
         .catch(() => {
+          if (!openSessionRecordMountedRef.current) return;
           sessionExistenceChecksRef.current.set(id, "missing");
           navigate("/");
         });
@@ -4687,7 +4720,16 @@ function AppMain({
         body: JSON.stringify({ model: action.model, client_id: clientId }),
       },
       { silent: true },
-    ).then(() => refreshSessions()).catch(() => {});
+    )
+      .then(() => {
+        // AppMain-lifetime guard (same `openSessionRecordMountedRef` used
+        // by the route/existence-check and open-session-record fetch
+        // effects above) — a PATCH that settles after unmount must not
+        // trigger a stale `refreshSessions()` state update.
+        if (!openSessionRecordMountedRef.current) return;
+        refreshSessions();
+      })
+      .catch(() => {});
   }, [model, currentSession, refreshSessions, clientId, defaultRuntimeProfile, runtimeProfileLastModels]);
 
   // user_message_persisted ack is now handled imperatively by
